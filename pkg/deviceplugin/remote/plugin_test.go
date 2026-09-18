@@ -71,31 +71,36 @@ func gpuNode(t *testing.T) *manager.DeviceManager {
 		}}))
 }
 
-// roleLabels are the label values the registered role functions publish; a nil
-// entry means the role is removed from the node.
-func roleLabels(t *testing.T, reg *fakeRegistrar) (server, consumer *string) {
+// assertRole checks what a process publishes for one role. A role it runs is
+// published while it runs and removed when it stops; a role it does not run is
+// not touched at all -- that role may belong to another process on the node,
+// and removing "roles this process does not run" deletes what that one
+// publishes.
+func assertRole(t *testing.T, reg *fakeRegistrar, name, label string, runs bool) {
 	t.Helper()
-	for _, test := range []struct {
-		name  string
-		label string
-		out   **string
-	}{
-		{serverRoleName, util.NodeRemoteServerLabel, &server},
-		{consumerRoleName, util.NodeRemoteConsumerLabel, &consumer},
-	} {
-		fn, ok := reg.registry[test.name]
-		require.True(t, ok, "%s must always be registered, as a publisher or as a removal", test.name)
-		metadata, err := fn(nil)
-		require.NoError(t, err)
-		value, ok := metadata.Labels[test.label]
-		require.True(t, ok, "%s must always write its label", test.name)
-		*test.out = value
+	publish, published := reg.registry[name]
+	cleanup, cleans := reg.cleanup[name]
+	if !runs {
+		assert.False(t, published, "%s is not this process's to publish or remove", name)
+		assert.False(t, cleans, "%s is not this process's to clean up", name)
+		return
 	}
-	return server, consumer
+	require.True(t, published, "%s must be published", name)
+	require.True(t, cleans, "%s must be removed when the process stops", name)
+	metadata, err := publish(nil)
+	require.NoError(t, err)
+	value := metadata.Labels[label]
+	require.NotNil(t, value, "%s must publish its label", name)
+	assert.Equal(t, "true", *value)
+	metadata, err = cleanup(nil)
+	require.NoError(t, err)
+	value, ok := metadata.Labels[label]
+	assert.True(t, ok)
+	assert.Nil(t, value, "%s must remove its label on the way out", name)
 }
 
-// Each role publishes its own label and offers its own slot count; the role
-// that is not configured is removed from the node.
+// Each role publishes its own label and offers its own slot count, and leaves
+// the role it does not run alone.
 func TestRoleMatrix(t *testing.T) {
 	for _, test := range []struct {
 		name           string
@@ -146,9 +151,8 @@ func TestRoleMatrix(t *testing.T) {
 			}, devManager, opts...)
 			require.NoError(t, err)
 
-			server, consumer := roleLabels(t, reg)
-			assert.Equal(t, test.wantServer, server != nil, "server role label")
-			assert.Equal(t, test.wantConsumer, consumer != nil, "consumer role label")
+			assertRole(t, reg, serverRoleName, util.NodeRemoteServerLabel, test.wantServer)
+			assertRole(t, reg, consumerRoleName, util.NodeRemoteConsumerLabel, test.wantConsumer)
 			assert.Len(t, plugin.Devices(), test.wantSlots)
 
 			_, err = plugin.Allocate(context.Background(), &pluginapi.AllocateRequest{})

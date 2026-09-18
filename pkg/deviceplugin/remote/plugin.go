@@ -140,14 +140,6 @@ func New(cfg Config, devManager *manager.DeviceManager, opts ...Option) (*Plugin
 	if p.consumer == nil && !p.publishDevices {
 		return nil, fmt.Errorf("remote plugin needs at least one role")
 	}
-	// A role the options did not switch on is removed from the node: it may
-	// be left over from an earlier configuration of this node.
-	if !p.publishDevices {
-		setupServerRole(p.reg, nil)
-	}
-	if p.consumer == nil {
-		setupConsumerRole(p.reg, false)
-	}
 	p.devices = p.slots()
 	return p, nil
 }
@@ -173,7 +165,7 @@ func WithServerRole(ctx context.Context, kubeClient kubernetes.Interface, agentE
 func WithConsumerRole(kubeClient kubernetes.Interface, opts ConsumerOptions) Option {
 	return func(p *Plugin) error {
 		p.consumer = newConsumerRole(p.cfg.NodeName, kubeClient, opts)
-		setupConsumerRole(p.reg, true)
+		setupConsumerRole(p.reg)
 		return nil
 	}
 }

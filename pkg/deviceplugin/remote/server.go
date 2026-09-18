@@ -42,16 +42,18 @@ const (
 	probeInterval = 5 * time.Second
 )
 
-// setupConsumerRole publishes this node as a node that runs remote vGPU pods,
-// or removes a consumer role left from an earlier configuration. The role is
-// removed on shutdown either way.
-func setupConsumerRole(reg registrar, enabled bool) {
-	// TODO Only enabling remote server may accidentally delete tags maintained by consumer processes
-	//reg.AddRegistryFunc(consumerRoleName, removeConsumerRole)
+// Each remote role publishes its own node metadata while its process runs and
+// removes it when that process stops -- and never touches the other role's.
+// The two roles may run as two processes on one node (a GPU server that also
+// runs remote pods), and a process that cleaned up "roles it does not run"
+// would keep deleting what the other one publishes. Metadata left behind by a
+// remote role that is gone for good is the local plugin's to remove: a node
+// runs either the local plugin or remote ones, never both (see RemoveRoles).
+
+// setupConsumerRole publishes this node as one that runs remote vGPU pods, and
+// has the label removed when this process stops.
+func setupConsumerRole(reg registrar) {
 	reg.AddCleanupRegistryFunc(consumerRoleName, removeConsumerRole)
-	if !enabled {
-		return
-	}
 	reg.AddRegistryFunc(consumerRoleName, func(featuregate.FeatureGate) (*client.PatchMetadata, error) {
 		return roleMetadata(util.NodeRemoteConsumerLabel, ptr.To("true"), nil, nil), nil
 	})
@@ -68,20 +70,32 @@ type registrar interface {
 	RegisterNotify()
 }
 
-// setupServerRole publishes this node as a remote GPU server, or removes a
-// server role left from an earlier configuration when role is nil. The role is
-// removed on shutdown either way.
+// setupServerRole publishes this node as a remote GPU server, and has the
+// label and endpoints removed when this process stops.
 //
 // The node keeps its role while lupine-server is unreachable, publishing
 // remotegpu.UnreachableServerEndpointInfo: local pods stay off its GPUs and
 // the scheduler sends no remote pods to it.
 func setupServerRole(reg registrar, role *serverRole) {
-	reg.AddRegistryFunc(serverRoleName, removeServerRole)
 	reg.AddCleanupRegistryFunc(serverRoleName, removeServerRole)
-	if role == nil {
-		return
-	}
 	reg.AddRegistryFunc(serverRoleName, role.registry)
+}
+
+// RemoveRoles removes any remote role this node still carries, for a process
+// that runs no remote role at all: the local vGPU plugin. A node never runs
+// local and remote plugins together -- both register vgpu-number, and a
+// remote label beside local devices would send remote pods to a node that
+// cannot serve them -- so whatever remote metadata is on the node was left by
+// a remote process that is gone (one that died without cleaning up, or a node
+// whose role was changed). It is removed on every registration round, not just
+// once, so it also clears what such a process leaves behind later.
+func RemoveRoles(devManager *manager.DeviceManager) {
+	removeRoles(devManager)
+}
+
+func removeRoles(reg registrar) {
+	reg.AddRegistryFunc(serverRoleName, removeServerRole)
+	reg.AddRegistryFunc(consumerRoleName, removeConsumerRole)
 }
 
 // newServerRole starts tracking what this node's remote-agent reports about

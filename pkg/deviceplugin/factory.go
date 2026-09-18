@@ -56,6 +56,14 @@ func GetDevicePlugins(
 	// not by this plugin, so no flag is exposed for it.
 	nodeConfig := devManager.GetNodeConfig()
 
+	// A local node carries no remote role. The remote plugins each remove
+	// their own metadata when they stop, so anything still on the node was
+	// left by one that is gone; clearing it is the local side's job, whatever
+	// plugins it goes on to build (MIG-only nodes included).
+	if !option.RemoteServer && !option.RemoteConsumer {
+		remote.RemoveRoles(devManager)
+	}
+
 	var cdiHandler cdi.Handler
 	if option.RemoteConsumer && !option.RemoteServer {
 		// only remote consumer no need for CDI

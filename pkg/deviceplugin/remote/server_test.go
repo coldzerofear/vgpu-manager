@@ -58,16 +58,25 @@ func published(t *testing.T, fn manager.RegistryFunc) (label, endpoints *string)
 	return label, endpoints
 }
 
-func TestSetupServerRoleDisabled(t *testing.T) {
+// The local plugin clears whatever remote role a gone remote process left on
+// the node: both labels, and the server's endpoints.
+func TestRemoveRoles(t *testing.T) {
 	reg := newFakeRegistrar()
 
-	setupServerRole(reg, nil)
+	removeRoles(reg)
 
-	for _, fn := range []manager.RegistryFunc{reg.registry[serverRoleName], reg.cleanup[serverRoleName]} {
-		label, endpoints := published(t, fn)
-		assert.Nil(t, label, "a stale role label is removed")
-		assert.Nil(t, endpoints, "stale endpoints are removed")
-	}
+	label, endpoints := published(t, reg.registry[serverRoleName])
+	assert.Nil(t, label, "a stale server label is removed")
+	assert.Nil(t, endpoints, "stale endpoints are removed")
+
+	require.NotNil(t, reg.registry[consumerRoleName])
+	metadata, err := reg.registry[consumerRoleName](nil)
+	require.NoError(t, err)
+	consumer, ok := metadata.Labels[util.NodeRemoteConsumerLabel]
+	require.True(t, ok, "the consumer label must be written, as a removal")
+	assert.Nil(t, consumer, "a stale consumer label is removed")
+
+	assert.Empty(t, reg.cleanup, "there is nothing of its own for the local side to clean up")
 }
 
 func TestNewServerRoleBadAgentEndpoint(t *testing.T) {
@@ -77,13 +86,9 @@ func TestNewServerRoleBadAgentEndpoint(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Nil(t, role)
-	// Nothing is published for a role that could not be set up; what the
-	// plugin registered before applying the options is the removal, so the
-	// node does not go on advertising a role it cannot serve.
-	setupServerRole(reg, role)
-	label, endpoints := published(t, reg.registry[serverRoleName])
-	assert.Nil(t, label, "a stale role label is removed")
-	assert.Nil(t, endpoints, "stale endpoints are removed")
+	// A role that could not be set up publishes nothing -- the plugin fails to
+	// build, so the process exits and nothing of this role is advertised.
+	assert.NotContains(t, reg.registry, serverRoleName)
 }
 
 func TestServerRoleRefresh(t *testing.T) {

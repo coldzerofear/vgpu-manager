@@ -1054,7 +1054,15 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
 | `WithConsumerRole` | 不发 | 发布（数量 = `max(消费数量, 本地槽位)`） | 不发 | `true` | 准备 shim + 会话 |
 | 两者 | 发布 | 发布一次 | `true` | `true` | 准备 shim + 会话 |
 
-- **没配的角色主动摘除**：`New` 里对未开启的角色注册"删除标签"的 registry func，并且进程退出时也删——节点不会留着上一次配置的角色。
+- **每个角色只管自己的标签与注解**（2026-09-18，上机发现后改定，取代"没配的角色主动摘除"）：server 角色发布
+  `remote-server` 标签与 `remote-endpoints` 注解、consumer 角色发布 `remote-consumer` 标签，各自在**本进程**退出时删除，
+  **从不碰另一个角色的**。原先"对没配的角色注册删除函数"是为了防过时标签残留，但同一节点把两个角色跑成两个进程时
+  （GPU 节点顺带消费），纯 server 进程会每轮把 consumer 进程发布的标签删掉、纯 consumer 进程则会删掉 server 的标签与
+  endpoints（后者让服务器直接从调度器视野里消失）。回归测试 `TestRoleMatrix` 断言"没跑的角色不注册任何发布/清理函数"。
+- **残留由本地插件清理**：一个节点不会同时跑本地插件与远程插件（两者都注册 `vgpu-number`；远程标签挂在本地设备旁边
+  会把远程 Pod 引到这台不能服务它们的节点上），所以本地路径（factory 判定本进程不带任何远程角色时，含只起 MIG 插件的节点）
+  每轮注册都调用 `remote.RemoveRoles` 删掉两种角色的标签与注解——清的是异常退出的远程进程或改过角色的节点留下的东西。
+  远程节点之间互相不清：一个远程进程异常退出后留下的标签，靠它重启后照常发布/退出时照常删除，或者节点改成本地后被清掉。
 - **纯 server 也注册 `vgpu-number`**（2026-09-16 用户拍板）：`CheckNode` 的第一道门是 `IsVGPUEnabledNode`（可分配 > 0），
   所以注册它调度器才认这台机器是 vGPU 节点，**调度器侧零改动**。它不会招来本地 Pod（extender 以 `NodeIsRemoteServer` 拒），
   也不会被当成消费节点（没有 consumer 标签）。真有 Pod 落到这里只能是绕过了调度器，`Allocate` 直接拒。
@@ -1126,7 +1134,7 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
    - 代码放在新的 `pkg/deviceplugin/remote`，消费节点用它替换本地 vGPU 插件，不在 `vnum_plugin.go` 里加分支。
    - **节点设备注册已抽到 `pkg/deviceplugin/nodedevice`**：本地插件和远程插件都调用它，没有设备的节点自动不发布。
    - **三种角色组合收敛成一个 option 模式的插件**（2026-09-16，见 §16.6"已实施"）：`WithServerRole`/`WithConsumerRole`
-     各自决定发布哪几项，没配的角色主动摘除；纯 server 也注册 `vgpu-number`（于是调度器零改动），
+     各自决定发布哪几项、各自只清理自己的（残留由本地路径清）；纯 server 也注册 `vgpu-number`（于是调度器零改动），
      两进程共存时纯 server 向 consumer 单向让位。
 5. **S5 监控**（已完成）：§16.5 的"已实施"。服务器节点的节点/卡级用量本来就统计到了（靠 D2 与
    `PodPlanSchedulingNode`），这一步补的是容器级实时用量与 `access_mode` 标签。

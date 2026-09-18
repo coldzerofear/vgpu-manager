@@ -19,16 +19,18 @@ CUDA 调用经 lupine 数据面落到 GPU 服务器节点的卡上。集群**不
 
 一个进程同时承担两种角色也是支持的：GPU 节点想顺带消费自己的卡，就给同一个 DaemonSet 加上
 `--remote-server --remote-consumer`（此时 `vgpu-number` 数量取 `max(本地槽位, --remote-consumer-number)`），
-**不要**在同一节点再起一个消费者 DaemonSet——kubelet 对同名扩展资源只保留最后注册的那个插件。
+分成两个进程也可以（例如用两个 DaemonSet、不同的 nodeSelector 管理）：kubelet 对同名扩展资源只保留最后注册的那个
+插件，所以服务者进程探测到本节点有活着的消费者进程时会把 `vgpu-number` 让给它，只继续发布设备与角色信息；
+两个进程各自只维护自己的标签与注解，互不清理。推荐的仍然是一个进程两个开关。
 
 ### 节点标签：运维打的 vs 插件发布的
 
 | 标签 | 谁写 | 用途 |
 |---|---|---|
 | `vgpu-manager=remote-server` / `vgpu-manager=remote-consumer` | **运维手动打** | 本目录各 DaemonSet 的 `nodeSelector` |
-| `nvidia.com/remote-server=true` | 服务者插件发布，退出时删 | 调度器识别 GPU 服务器；同时让本地 Pod 避开该节点 |
-| `nvidia.com/remote-consumer=true` | 消费者插件发布，退出时删 | 调度器识别可运行远程 Pod 的节点（还要求 `vgpu-number` 可分配 > 0） |
-| `nvidia.com/remote-endpoints`（注解） | 服务者插件发布，每 5s 刷新 | agent / lupine-server 地址与服务器 CUDA 版本；服务不可用时发布 `{}`，调度器随即跳过该节点 |
+| `nvidia.com/remote-server=true` | 服务者插件发布、退出时删；本地插件会清掉残留 | 调度器识别 GPU 服务器；同时让本地 Pod 避开该节点 |
+| `nvidia.com/remote-consumer=true` | 消费者插件发布、退出时删；本地插件会清掉残留 | 调度器识别可运行远程 Pod 的节点（还要求 `vgpu-number` 可分配 > 0） |
+| `nvidia.com/remote-endpoints`（注解） | 服务者插件发布、每 5s 刷新、退出时删；本地插件会清掉残留 | agent / lupine-server 地址与服务器 CUDA 版本；服务不可用时发布 `{}`，调度器随即跳过该节点 |
 
 **不要**把 `nvidia.com/remote-*` 当 DaemonSet 的 `nodeSelector`：它们由插件自己发布，插件没起来时并不存在。
 
@@ -113,8 +115,12 @@ spec:
 
 ## 已知边界
 
-- **每个节点只能有一个 `vgpu-number` 注册者**：本地 vGPU 插件、消费者插件、服务者插件三者互斥。
-  同节点既服务又消费用"一个进程两个开关"，不要叠 DaemonSet。
+- **本地插件与远程插件不能同节点共存**：两者都注册 `vgpu-number`。本地插件启动后会主动清掉节点上残留的
+  `nvidia.com/remote-server`、`nvidia.com/remote-consumer` 标签与 `nvidia.com/remote-endpoints` 注解，所以把一台远程节点
+  改回本地节点不需要手工清理。远程的两个角色之间则各管各的：同节点既服务又消费推荐一个进程两个开关，
+  拆成两个进程时服务者会把 `vgpu-number` 让给消费者。
+- **远程进程异常退出会留下自己的标签**（正常退出会删）：重启后照常接管；如果该节点就此不再承担这个角色，
+  又没有改成本地节点，需要手工删掉，例如 `kubectl label node <node> nvidia.com/remote-consumer-`。
 - **服务器节点不接本地 Pod**：调度器对本地 Pod 直接以 `NodeIsRemoteServer` 拒绝该节点（服务器的卡上
   记着别的节点 Pod 的用量，本地 NodeInfo 统计不到）。服务者插件的 `Allocate` 也会拒绝。
 - **污点语义**：集群自己打的硬污点（cordon/drain、not-ready、unreachable、out-of-service、资源压力、
