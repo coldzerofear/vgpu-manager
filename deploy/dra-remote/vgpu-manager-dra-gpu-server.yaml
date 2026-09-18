@@ -232,6 +232,8 @@ spec:
               value: "1"
             - name: LOGGER_LEVEL    # vGPU library 日志级别
               value: "2"
+            - name: LD_LIBRARY_PATH
+              value: /usr/lib64:/lib64:/usr/lib/x86_64-linux-gnu:/usr/lib/aarch64-linux-gnu:/lib/x86_64-linux-gnu:/lib/aarch64-linux-gnu:/usr/local/cuda/compat:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs
           securityContext:
             privileged: true
           resources: {}
