@@ -161,7 +161,12 @@ func (l deviceLib) GetMigDeviceInfos(gpuInfo *GpuDeviceInfo) (map[string]*MigDev
 	}
 	defer shutdown()
 
-	migs, err := l.GetMigInfos(gpuInfo.GpuInfo)
+	device, ret := l.DeviceGetHandleByUUID(gpuInfo.UUID)
+	if ret != nvml.SUCCESS {
+		return nil, fmt.Errorf("error getting GPU device handle: %w", ret)
+	}
+
+	migs, err := l.GetMigInfosByDevice(device, gpuInfo.GpuInfo)
 	if err != nil {
 		return nil, err
 	}

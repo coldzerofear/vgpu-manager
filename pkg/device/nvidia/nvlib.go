@@ -147,6 +147,10 @@ type MigProfileInfo struct {
 	Placements []*MigDevicePlacement
 }
 
+func (p MigProfileInfo) String() string {
+	return p.Profile.String()
+}
+
 type MigDevicePlacement struct {
 	nvml.GpuInstancePlacement
 }
@@ -165,6 +169,18 @@ type DeviceLib struct {
 	DevRoot           string
 	SysfsRoot         string
 	NvidiaSMIPath     string
+}
+
+func NewFakeDeviceLib(
+	devlib nvdev.Interface, infolib nvinfo.Interface,
+	nvmllib nvml.Interface, pcilib nvpci.Interface,
+) *DeviceLib {
+	return &DeviceLib{
+		devInterface:  devlib,
+		nvmlInterface: nvmllib,
+		infoInterface: infolib,
+		pciInterface:  pcilib,
+	}
 }
 
 func DetectionDeviceLib(root RootPath) (lib *DeviceLib, err error) {
@@ -459,16 +475,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 	return gpuInfo, nil
 }
 
-func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
-	if !gpuInfo.MigEnabled {
-		return nil, nil
-	}
-
-	device, ret := l.DeviceGetHandleByUUID(gpuInfo.UUID)
-	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting GPU device handle: %w", ret)
-	}
-
+func (l DeviceLib) GetMigInfosByDevice(device nvml.Device, gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
 	migInfos := make(map[string]*MigInfo)
 	err := walkMigDevices(device, func(i int, migDevice nvml.Device) error {
 		memoryInfo, ret := migDevice.GetMemoryInfo()
@@ -558,6 +565,19 @@ func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
 	}
 
 	return migInfos, nil
+}
+
+func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
+	if !gpuInfo.MigEnabled {
+		return nil, nil
+	}
+
+	device, ret := l.DeviceGetHandleByUUID(gpuInfo.UUID)
+	if ret != nvml.SUCCESS {
+		return nil, fmt.Errorf("error getting GPU device handle: %w", ret)
+	}
+
+	return l.GetMigInfosByDevice(device, gpuInfo)
 }
 
 func walkMigDevices(d nvml.Device, f func(i int, d nvml.Device) error) error {

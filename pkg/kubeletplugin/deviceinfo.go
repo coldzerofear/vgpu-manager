@@ -126,7 +126,7 @@ func (m *MigDeviceInfo) LiveTuple() *MigLiveTuple {
 // physical configuration, but doesn't reflect the fact that this represents a
 // curently-live MIG device.
 func (d *MigDeviceInfo) CanonicalName() string {
-	return fmt.Sprintf("gpu-%d-mig-%d-%d-%d", d.Parent.Minor, d.GiInfo.ProfileId, d.Placement.Start, d.Placement.Size)
+	return d.SpecTuple().ToCanonicalName(d.Profile)
 }
 
 func (d *VfioDeviceInfo) CanonicalName() string {
