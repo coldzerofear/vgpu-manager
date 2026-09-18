@@ -88,24 +88,36 @@ spec:
       serviceAccountName: vgpu-manager-remote-consumer-plugin
       terminationGracePeriodSeconds: 30
       restartPolicy: Always
-#      initContainers:
-#        # 【可选】预铺 lupine-client 静态制品：每个 CUDA 版本一个 init 容器，目录名必须是
-#        # 可解析的版本号（选择规则 = 取 ≤ 服务器 CUDA 版本的最高版本）。
-#        # 不预铺也能用：Allocate 时插件会经 agent 从 lupine-server 拉取同构建的 client bundle
-#        # （校验 etag / content-digest / manifest sha256 后落盘，并记录 .etag）。
-#        # 预铺只省掉"本节点第一个远程 Pod"的下载等待；预铺目录没有 .etag，必须与服务器同一 release。
-#        - name: lupine-client-cuda-13-3
-#          image: ghcr.io/coldzerofear/lupine-client-static:cuda-13.3.1
-#          imagePullPolicy: IfNotPresent
-#          command: [sh, -c]
-#          args:
-#            - mkdir -p /target/13.3.1 && cp -a /artifacts/. /target/13.3.1/
-#          securityContext:
-#            privileged: true
-#          volumeMounts:
-#            - name: client-artifacts
-#              mountPath: /target
-#              mountPropagation: Bidirectional
+      initContainers:
+        # 【可选】预铺 lupine-client 静态制品：每个 CUDA 版本一个 init 容器，目录名必须是
+        # 可解析的版本号（选择规则 = 取 ≤ 服务器 CUDA 版本的最高版本）。
+        # 不预铺也能用：Allocate 时插件会经 agent 从 lupine-server 拉取同构建的 client bundle
+        # （校验 etag / content-digest / manifest sha256 后落盘，并记录 .etag）。
+        # 预铺只省掉"本节点第一个远程 Pod"的下载等待；预铺目录没有 .etag，必须与服务器同一 release。
+        - name: client-shim-cuda-13-3
+          image: ghcr.io/coldzerofear/lupine-client-static:cuda-13.3.1
+          imagePullPolicy: IfNotPresent
+          command: [sh, -c]
+          args:
+            - mkdir -p /target/13.3.1 && cp -a /artifacts/. /target/13.3.1/
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: client-artifacts
+              mountPath: /target
+              mountPropagation: Bidirectional
+        - name: client-shim-cuda-12-9
+          image: ghcr.io/coldzerofear/lupine-client-static:cuda-12.9.1   # ← 按需增删版本（同样同一 release）
+          imagePullPolicy: IfNotPresent
+          command: [sh, -c]
+          args:
+            - mkdir -p /target/12.9.1 && cp -a /artifacts/. /target/12.9.1/
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: client-artifacts
+              mountPath: /target
+              mountPropagation: Bidirectional
       containers:
         - name: device-plugin
           image: coldzerofear/vgpu-manager:latest
