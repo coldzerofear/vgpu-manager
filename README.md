@@ -23,8 +23,8 @@ A Kubernetes device plugin for managing and allocating virtual GPU (vGPU) device
 - [x] NRI supported DRA multi container configuration path isolation security
 - [x] Device resource monitoring under the DRA driver path
 - [x] Multi process core speed limit for shared token bucket
-- [x] Remote GPU resource pool based on DRA driver
-- [ ] Remote GPU resource pool based on device plugin
+- [x] Remote GPU resource pool based on DRA driver [README](./deploy/dra-remote/README.md)
+- [x] Remote GPU resource pool based on device plugin [README](./deploy/classic-remote/README.md)
 - [ ] Provide a scheduler framework plugin to achieve high-performance scheduling
 - [ ] Support device hot plugging and expansion ([device-mounter](https://github.com/coldzerofear/device-mounter))
 - [ ] Compatible with Volcano Batch Scheduler
