@@ -19,7 +19,6 @@ package collector
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,6 +33,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/mig"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/lister"
@@ -53,6 +53,11 @@ import (
 type nodeGPUCollector struct {
 	*nvidia.DeviceLib
 	nodeName    string
+	managerRoot string
+	// sessionBase is the remote GPU session root on this node: where the
+	// sessions of the remote pods these GPUs serve keep their PID list and
+	// quota. Empty disables the remote path.
+	sessionBase string
 	nodeLister  listerv1.NodeLister
 	podLister   client.PodLister
 	contLister  *lister.ContainerLister
@@ -63,27 +68,35 @@ type nodeGPUCollector struct {
 
 func NewNodeGPUCollector(
 	config *node.NodeConfigSpec, nodeLister listerv1.NodeLister, podLister client.PodLister,
-	contLister *lister.ContainerLister, featureGate featuregate.FeatureGate,
+	contLister *lister.ContainerLister, managerRoot, sessionBase string, featureGate featuregate.FeatureGate,
 ) (prometheus.Collector, error) {
 	driverRoot := config.GetDriverRoot()
 	deviceLib, err := nvidia.DetectionDeviceLib(driverRoot)
 	if err != nil {
 		return nil, err
 	}
-	adapter := watcher.NewDeviceUtilAdapter(
+	utilAdapter := watcher.NewDeviceUtilAdapter(
 		watcher.WithExtendedInterface(deviceLib.Extensions()),
 	)
 	return &nodeGPUCollector{
 		DeviceLib:   deviceLib,
 		nodeName:    config.GetNodeName(),
+		managerRoot: managerRoot,
+		sessionBase: sessionBase,
 		nodeLister:  nodeLister,
 		podLister:   podLister,
 		contLister:  contLister,
 		featureGate: featureGate,
-		utilAdapter: adapter,
+		utilAdapter: utilAdapter,
 		podResource: client.NewPodResource(
 			client.WithCallTimeoutSecond(5)),
 	}, nil
+}
+
+// remoteEnabled reports whether this node serves remote pods, which is what
+// makes the session directories readable here.
+func (c nodeGPUCollector) remoteEnabled() bool {
+	return c.featureGate != nil && c.featureGate.Enabled(util.RemoteGPUSupport) && c.sessionBase != ""
 }
 
 // Descriptors used by the nodeGPUCollector below.
@@ -149,75 +162,75 @@ var (
 	vGPUTotalCoresNumber = prometheus.NewDesc(
 		"vgpu_device_total_cores_number",
 		"Virtual GPU device total cores number",
-		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
+		[]string{"node", "device_idx", "device_uuid", "device_type", "access_mode"}, nil,
 	)
 	vGPUAssignedCoresNumber = prometheus.NewDesc(
 		"vgpu_device_assigned_cores_number",
 		"Virtual GPU device assigned cores number",
-		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
+		[]string{"node", "device_idx", "device_uuid", "device_type", "access_mode"}, nil,
 	)
 	vGPUPeakSharedContainersNumber = prometheus.NewDesc(
 		"vgpu_device_peak_shared_containers_number",
 		"Peak number of containers that may concurrently share the vGPU device across the pods' lifecycle (reserved view; >= the current value)",
-		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
+		[]string{"node", "device_idx", "device_uuid", "device_type", "access_mode"}, nil,
 	)
 	vGPUCurrentSharedContainersNumber = prometheus.NewDesc(
 		"vgpu_device_current_shared_containers_number",
 		"Number of currently running containers sharing the vGPU device right now (a completed sequential init container is excluded; <= the peak value)",
-		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
+		[]string{"node", "device_idx", "device_uuid", "device_type", "access_mode"}, nil,
 	)
 	vGPUTotalMemory = prometheus.NewDesc(
 		"vgpu_device_total_memory_in_bytes",
 		"Virtual GPU device total memory (sum of physical GPU memory + unified memory)",
-		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
+		[]string{"node", "device_idx", "device_uuid", "device_type", "access_mode"}, nil,
 	)
 	vGPUTotalPhysicalMemory = prometheus.NewDesc(
 		"vgpu_device_total_physical_memory_in_bytes",
 		"Virtual GPU device total physical memory (only physical GPU memory)",
-		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
+		[]string{"node", "device_idx", "device_uuid", "device_type", "access_mode"}, nil,
 	)
 	vGPUAssignedMemory = prometheus.NewDesc(
 		"vgpu_device_assigned_memory_in_bytes",
 		"Virtual GPU device assigned memory (sum of physical GPU memory + unified memory)",
-		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
+		[]string{"node", "device_idx", "device_uuid", "device_type", "access_mode"}, nil,
 	)
 	vGPUAssignedPhysicalMemory = prometheus.NewDesc(
 		"vgpu_device_assigned_physical_memory_in_bytes",
 		"Virtual GPU device assigned physical memory (only physical GPU memory)",
-		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
+		[]string{"node", "device_idx", "device_uuid", "device_type", "access_mode"}, nil,
 	)
 
 	containerVGPUMemoryLimit = prometheus.NewDesc(
 		"container_vgpu_device_memory_limit_in_bytes",
 		"Container's virtual GPU device total memory limit (sum of physical GPU memory + unified memory)",
-		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node"}, nil,
+		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 	containerVGPUPhysicalMemoryLimit = prometheus.NewDesc(
 		"container_vgpu_device_physical_memory_limit_in_bytes",
 		"Container's virtual GPU device physical memory limit (only physical GPU memory)",
-		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node"}, nil,
+		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 
 	containerVGPUMemoryUsage = prometheus.NewDesc(
 		"container_vgpu_device_memory_usage_in_bytes",
 		"Container's virtual GPU device memory usage (sum of physical GPU memory + unified memory)",
-		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node"}, nil,
+		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 	containerVGPUPhysicalMemoryUsage = prometheus.NewDesc(
 		"container_vgpu_device_physical_memory_usage_in_bytes",
 		"Container's virtual GPU device physical memory usage (only physical GPU memory)",
-		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node"}, nil,
+		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 
 	containerVGPUMemoryUtilRate = prometheus.NewDesc(
 		"container_vgpu_device_memory_utilization_percent",
 		"Container's virtual GPU device memory utilization percentage (0-100)",
-		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node"}, nil,
+		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 	containerVGPUCoreUtilRate = prometheus.NewDesc(
 		"container_vgpu_device_core_utilization_percent",
 		"Container's virtual GPU device core utilization percentage (0-100)",
-		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node"}, nil,
+		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 
 	migDeviceTotalMemory = prometheus.NewDesc(
@@ -305,8 +318,6 @@ func ContainerDeviceProcUtilEach(procUtils procUtilList,
 	}
 }
 
-var smFilePath = filepath.Join(util.ManagerRootPath, util.Watcher, util.SMUtilFile)
-
 // Collect device indicators
 func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	klog.V(4).Infof("Starting to collect metrics for vGPU on node <%s>", c.nodeName)
@@ -320,8 +331,9 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		devProcUtilMap = make(map[string]procUtilList)
 		devMigInfosMap = make(map[string][]*nvidia.MigInfo)
 	)
-	CollectBasedOnNvml(ch, c.DeviceLib, c.nodeName, devTypeMap, devIndexMap, devHealthMap, devHealthLvs,
-		devMemInfoMap, devProcInfoMap, devProcUtilMap, devMigInfosMap, c.utilAdapter, c.featureGate)
+
+	CollectBasedOnNvml(ch, c.DeviceLib, c.nodeName, c.managerRoot, devTypeMap, devIndexMap, devHealthMap,
+		devHealthLvs, devMemInfoMap, devProcInfoMap, devProcUtilMap, devMigInfosMap, c.utilAdapter, c.featureGate)
 
 	var (
 		//vGpuHealthMap      = make(map[string]bool)
@@ -446,6 +458,14 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		for uuid, n := range device.CurrentSharedContainers(pod, podDeviceClaim) {
 			currentSharedContainersMap[uuid] += n
 		}
+		// A remote pod's containers run on a consumer node while their GPU
+		// work happens here, so their usage is read from the session instead
+		// of from a local container.
+		accessMode, err := util.PodVGPUAccessMode(pod)
+		if err != nil {
+			klog.V(4).ErrorS(err, "pod access mode", "pod", klog.KObj(pod))
+		}
+		remoteSession := accessMode == util.AccessModeRemote && c.remoteEnabled()
 		// Real-time per-container usage: regular containers, sidecars, and
 		// currently-running sequential init containers (a completed init
 		// container is excluded so its stale usage stops being reported).
@@ -457,24 +477,36 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 
 			klog.V(4).Infoln("Container matching: using resource data", "pod", klog.KObj(pod), "container", containerName)
-			var getFullPath func(string) string
-			switch {
-			case cgroups.IsCgroup2UnifiedMode(): // cgroupv2
-				getFullPath = cgroup.GetK8sPodCGroupFullPath
-			case cgroups.IsCgroup2HybridMode():
-				// If the device controller does not exist, use the path of cgroupv2.
-				getFullPath = cgroup.GetK8sPodDeviceCGroupFullPath
-				if util.PathIsNotExist(cgroup.CGroupDevicePath) {
-					getFullPath = cgroup.GetK8sPodCGroupFullPath
-				}
-			default: // cgroupv1
-				getFullPath = cgroup.GetK8sPodDeviceCGroupFullPath
-			}
 			var containerPids []uint32
-			_ = cgroup.GetContainerPidsFunc(pod, containerName, getFullPath, func(pid int) {
-				containerPids = append(containerPids, uint32(pid))
-			})
-			//_, containerId := cgroup.GetContainerRuntime(pod, containerName)
+			if remoteSession {
+				// The pod runs on a consumer node: the GPU work is done here
+				// by lupine-server children, which the session lists -- this
+				// node has no cgroup of that container to ask.
+				pids, err := GetPidsByFilepath(remotegpu.SessionPidsFile(c.sessionBase,
+					remotegpu.SessionToken(string(pod.UID), containerName)))
+				if err != nil {
+					klog.V(2).ErrorS(err, "read remote session pids failed",
+						"pod", klog.KObj(pod), "container", containerName)
+				}
+				containerPids = pids
+			} else {
+				var getFullPath func(string) string
+				switch {
+				case cgroups.IsCgroup2UnifiedMode(): // cgroupv2
+					getFullPath = cgroup.GetK8sPodCGroupFullPath
+				case cgroups.IsCgroup2HybridMode():
+					// If the device controller does not exist, use the path of cgroupv2.
+					getFullPath = cgroup.GetK8sPodDeviceCGroupFullPath
+					if util.PathIsNotExist(cgroup.CGroupDevicePath) {
+						getFullPath = cgroup.GetK8sPodCGroupFullPath
+					}
+				default: // cgroupv1
+					getFullPath = cgroup.GetK8sPodDeviceCGroupFullPath
+				}
+				_ = cgroup.GetContainerPidsFunc(pod, containerName, getFullPath, func(pid int) {
+					containerPids = append(containerPids, uint32(pid))
+				})
+			}
 
 			deviceCount := 0
 			for i := int32(0); i < vgpu.MaxDeviceCount; i++ {
@@ -518,12 +550,12 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 					})
 
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUMemoryLimit, prometheus.GaugeValue, float64(deviceMemLimit),
-					pod.Namespace, pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName)
+					containerVGPUMemoryLimit, prometheus.GaugeValue, float64(deviceMemLimit), pod.Namespace, pod.Name,
+					containerName, vDevIndex, deviceUUID, c.nodeName, accessMode, pod.Spec.NodeName)
 
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUPhysicalMemoryLimit, prometheus.GaugeValue, float64(realMemBytes),
-					pod.Namespace, pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName)
+					containerVGPUPhysicalMemoryLimit, prometheus.GaugeValue, float64(realMemBytes), pod.Namespace,
+					pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName, accessMode, pod.Spec.NodeName)
 
 				// TODO handler Virtual Memory Cache node.
 				if c.featureGate.Enabled(util.VirtualMemoryTracking) {
@@ -557,11 +589,11 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				}
 
 				ch <- prometheus.MustNewConstMetric(containerVGPUMemoryUsage,
-					prometheus.GaugeValue, float64(deviceMemUsage+deviceVMemUsage),
-					pod.Namespace, pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName)
+					prometheus.GaugeValue, float64(deviceMemUsage+deviceVMemUsage), pod.Namespace, pod.Name,
+					containerName, vDevIndex, deviceUUID, c.nodeName, accessMode, pod.Spec.NodeName)
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUPhysicalMemoryUsage, prometheus.GaugeValue, float64(deviceMemUsage),
-					pod.Namespace, pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName)
+					containerVGPUPhysicalMemoryUsage, prometheus.GaugeValue, float64(deviceMemUsage), pod.Namespace,
+					pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName, accessMode, pod.Spec.NodeName)
 
 				deviceMemUsage += deviceVMemUsage
 				memoryUtilRate := int64(0)
@@ -571,16 +603,23 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 					memoryUtilRate = int64(float64(deviceMemUsage) / float64(deviceMemLimit) * 100)
 				}
 				ch <- prometheus.MustNewConstMetric(containerVGPUMemoryUtilRate,
-					prometheus.GaugeValue, float64(memoryUtilRate),
-					pod.Namespace, pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName)
+					prometheus.GaugeValue, float64(memoryUtilRate), pod.Namespace, pod.Name, containerName,
+					vDevIndex, deviceUUID, c.nodeName, accessMode, pod.Spec.NodeName)
 
 				ch <- prometheus.MustNewConstMetric(containerVGPUCoreUtilRate,
-					prometheus.GaugeValue, float64(util.GetPercentageValue(deviceSMUtil)),
-					pod.Namespace, pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName)
+					prometheus.GaugeValue, float64(util.GetPercentageValue(deviceSMUtil)), pod.Namespace, pod.Name,
+					containerName, vDevIndex, deviceUUID, c.nodeName, accessMode, pod.Spec.NodeName)
 			}
 		}
 	})
 
+	// A remote server's cards are consumed over the network only -- local pods
+	// are kept off such a node by the scheduler -- so the card metrics of this
+	// node carry one mode, the way a DRA publish-only node's devices do.
+	nodeAccessMode := util.AccessModeLocal
+	if util.IsRemoteServerNode(node) {
+		nodeAccessMode = util.AccessModeRemote
+	}
 	nodeGpuAssignedMemoryBytes := uint64(0)
 	for uuid, totalMemoryBytes := range vGpuTotalMemMap {
 		totalPhyMemoryBytes := totalMemoryBytes
@@ -591,10 +630,10 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		deviceIndex := strconv.Itoa(devIndexMap[uuid])
 		//healthy := fmt.Sprint(vGpuHealthMap[uuid])
 		ch <- prometheus.MustNewConstMetric(vGPUTotalMemory, prometheus.GaugeValue,
-			float64(totalMemoryBytes), c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			float64(totalMemoryBytes), c.nodeName, deviceIndex, uuid, devTypeMap[uuid], nodeAccessMode)
 
 		ch <- prometheus.MustNewConstMetric(vGPUTotalPhysicalMemory, prometheus.GaugeValue,
-			float64(totalPhyMemoryBytes), c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			float64(totalPhyMemoryBytes), c.nodeName, deviceIndex, uuid, devTypeMap[uuid], nodeAccessMode)
 
 		assignedPhyMemoryBytes := vGpuAssignedMemMap[uuid]
 		if memoryRatio > 1 {
@@ -602,22 +641,22 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		nodeGpuAssignedMemoryBytes += assignedPhyMemoryBytes
 		ch <- prometheus.MustNewConstMetric(vGPUAssignedMemory, prometheus.GaugeValue,
-			float64(vGpuAssignedMemMap[uuid]), c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			float64(vGpuAssignedMemMap[uuid]), c.nodeName, deviceIndex, uuid, devTypeMap[uuid], nodeAccessMode)
 
 		ch <- prometheus.MustNewConstMetric(vGPUAssignedPhysicalMemory, prometheus.GaugeValue,
-			float64(assignedPhyMemoryBytes), c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			float64(assignedPhyMemoryBytes), c.nodeName, deviceIndex, uuid, devTypeMap[uuid], nodeAccessMode)
 
 		ch <- prometheus.MustNewConstMetric(vGPUTotalCoresNumber, prometheus.GaugeValue,
-			float64(vGPUTotalCoresMap[uuid]), c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			float64(vGPUTotalCoresMap[uuid]), c.nodeName, deviceIndex, uuid, devTypeMap[uuid], nodeAccessMode)
 
 		ch <- prometheus.MustNewConstMetric(vGPUAssignedCoresNumber, prometheus.GaugeValue,
-			float64(vGpuAssignedCoresMap[uuid]), c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			float64(vGpuAssignedCoresMap[uuid]), c.nodeName, deviceIndex, uuid, devTypeMap[uuid], nodeAccessMode)
 
 		ch <- prometheus.MustNewConstMetric(vGPUPeakSharedContainersNumber, prometheus.GaugeValue,
-			float64(peakSharedContainersMap[uuid]), c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			float64(peakSharedContainersMap[uuid]), c.nodeName, deviceIndex, uuid, devTypeMap[uuid], nodeAccessMode)
 
 		ch <- prometheus.MustNewConstMetric(vGPUCurrentSharedContainersNumber, prometheus.GaugeValue,
-			float64(currentSharedContainersMap[uuid]), c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			float64(currentSharedContainersMap[uuid]), c.nodeName, deviceIndex, uuid, devTypeMap[uuid], nodeAccessMode)
 	}
 
 	ch <- prometheus.MustNewConstMetric(
@@ -680,7 +719,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 
 }
 
-func CollectorDeviceProcesses(
+func collectorDeviceProcesses(
 	utilAdapter watcher.DeviceUtilInterface,
 	mmapUtil *watcher.MmapDeviceUtil,
 	index int, hdev nvml.Device,

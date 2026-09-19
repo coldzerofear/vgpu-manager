@@ -1,0 +1,215 @@
+# 消费者角色的设备插件：运行远程 vGPU Pod 的节点上的 device-plugin --remote-consumer。
+#
+# 这台节点上没有 GPU 也不需要驱动：插件用 deviceless 设备管理器，只做三件事
+#   1. 发布角色标签 nvidia.com/remote-consumer=true，并向 kubelet 注册 vgpu-number
+#      （数量 = --remote-consumer-number，纯 CPU 节点上就是"本节点同时能跑多少个远程 vGPU"）；
+#   2. Allocate 时按 predicate-node 找到服务器节点，读它的 nvidia.com/remote-endpoints 拿到
+#      agent 地址，为每个容器建会话（EnsureSession），并把 lupine-server 地址、会话 token
+#      注入容器环境（LUPINE_SERVER / LUPINE_SESSION / LUPINE_DISABLE_LOCAL / NVIDIA_VISIBLE_DEVICES=void）；
+#   3. 准备客户端 shim：选出不高于服务器 CUDA 版本的版本目录，写好 ld.so.preload，
+#      节点上没有可用版本（或 etag 与服务器当前内嵌的不一致）时从 agent 的 FetchClientBundle 下载。
+#
+# 注意：一个节点不能同时是"本地 vGPU 节点"和"远程消费节点"——两者都要注册 vgpu-number，
+# kubelet 对同名资源只保留最后注册的那个插件。GPU 节点想同时消费自己的卡，用同一个进程加上
+# 两个开关（--remote-server --remote-consumer），不要在同节点再起一个消费者 DaemonSet。
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vgpu-manager-remote-consumer-plugin
+  namespace: kube-system
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: vgpu-manager-remote-consumer-plugin:role
+rules:
+  # 读服务器节点的 endpoints 注解 + 发布本节点的 consumer 角色标签
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["patch"]
+  # Allocate：找到本节点待准入的 Pod、写实分配注解与阶段标签；失败时标记 Pod 供 reschedule 处理
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: vgpu-manager-remote-consumer-plugin-as-role
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-remote-consumer-plugin
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: vgpu-manager-remote-consumer-plugin:role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vgpu-manager-remote-consumer-plugin
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: vgpu-manager-remote-consumer-plugin
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: vgpu-manager-remote-consumer-plugin
+        vgpu-manager.io/ignore-webhook: "true"
+    spec:
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+        - effect: NoSchedule
+          operator: Exists
+      priorityClassName: system-node-critical
+      nodeSelector:
+        vgpu-manager: remote-consumer
+      serviceAccountName: vgpu-manager-remote-consumer-plugin
+      terminationGracePeriodSeconds: 30
+      restartPolicy: Always
+      initContainers:
+        # 【可选】预铺 lupine-client 静态制品：每个 CUDA 版本一个 init 容器，目录名必须是
+        # 可解析的版本号（选择规则 = 取 ≤ 服务器 CUDA 版本的最高版本）。
+        # 不预铺也能用：Allocate 时插件会经 agent 从 lupine-server 拉取同构建的 client bundle
+        # （校验 etag / content-digest / manifest sha256 后落盘，并记录 .etag）。
+        # 预铺只省掉"本节点第一个远程 Pod"的下载等待；预铺目录没有 .etag，必须与服务器同一 release。
+        - name: client-shim-cuda-13-3
+          image: ghcr.io/coldzerofear/lupine-client-static:cuda-13.3.1
+          imagePullPolicy: IfNotPresent
+          command: [sh, -c]
+          args:
+            - mkdir -p /target/13.3.1 && cp -a /artifacts/. /target/13.3.1/
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: client-artifacts
+              mountPath: /target
+              mountPropagation: Bidirectional
+        - name: client-shim-cuda-12-9
+          image: ghcr.io/coldzerofear/lupine-client-static:cuda-12.9.1   # ← 按需增删版本（同样同一 release）
+          imagePullPolicy: IfNotPresent
+          command: [sh, -c]
+          args:
+            - mkdir -p /target/12.9.1 && cp -a /artifacts/. /target/12.9.1/
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: client-artifacts
+              mountPath: /target
+              mountPropagation: Bidirectional
+      containers:
+        - name: device-plugin
+          image: coldzerofear/vgpu-manager:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - device-plugin
+            # RemoteGPUSupport 是 --remote-consumer 的前置门控（必须成对配置）。
+            - --feature-gates=RemoteGPUSupport=true,AllocationFailureReschedule=true
+            - --mig-strategy=none
+            - --remote-consumer
+            # 本节点同时可运行的远程 vGPU 数量（= 上报的 vgpu-number）。纯 CPU 节点没有卡数/切分数
+            # 可参考，给一个足够大的虚数即可；真正的容量约束在服务器侧。
+            - --remote-consumer-number=1000
+            - --node-config-path=/config/nodeConfig.json
+            - --v=4
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # auto = 从 kubelet 配置/进程/cgroup 布局里探测；探测不到会退出，
+            # 此时显式写 systemd 或 cgroupfs。
+            - name: CGROUP_DRIVER
+              value: auto
+            - name: KUBE_FEATURE_WatchListClient
+              value: "true"
+            # 客户端 shim 落盘位置 = <HOST_MANAGER_DIR>/driver/<CUDA 版本>/，
+            # 注入容器的挂载用的是宿主路径，所以这个值必须与 manager-root 卷的 hostPath 一致。
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
+            # 可选：不向容器注入 LUPINE_CLIENT_ETAG / LUPINE_CLIENT_PLATFORM，
+            # 服务端于是无法校验 client shim 是不是它内嵌的那个构建（不匹配会延后成运行时错误）。
+#            - name: IGNORE_CLIENT_SHIM_ETAG
+#              value: "true"
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["SYS_ADMIN"]
+          resources: {}
+          volumeMounts:
+            # kubelet-root 与 cgroup-root 只为 CGROUP_DRIVER=auto 的探测而挂；
+            # 显式指定 cgroup driver 后可以去掉。
+            - name: kubelet-root
+              mountPath: /var/lib/kubelet
+              readOnly: true
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+              mountPropagation: Bidirectional
+            - name: cgroup-root
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            # 客户端 shim 目录与容器级目录都在这下面
+            - name: manager-root
+              mountPath: /etc/vgpu-manager
+            - name: node-config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: kubelet-root
+          hostPath:
+            path: /var/lib/kubelet
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: cgroup-root
+          hostPath:
+            path: /sys/fs/cgroup
+        - name: manager-root
+          hostPath:
+            path: /etc/vgpu-manager
+            type: DirectoryOrCreate
+        - name: client-artifacts
+          hostPath:
+            path: /etc/vgpu-manager/driver
+            type: DirectoryOrCreate
+        - name: node-config
+          configMap:
+            name: vgpu-manager-remote-consumer-plugin-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vgpu-manager-remote-consumer-plugin-config
+  namespace: kube-system
+data:
+  # 消费节点没有本地设备，这里只用来固定 cgroupDriver 之类的节点级参数。
+  nodeConfig.json: |
+    [
+      {
+        "nodeName": "consumer-node-a",
+        "cgroupDriver": "systemd"
+      }
+    ]

@@ -1,6 +1,6 @@
 apiVersion: v2
 name: vgpu-manager-dra-driver
-description: A Dynamic Resource Allocation (DRA) driver for scheduling and allocating vGPU devices.
+description: A dynamic resource allocation (DRA) driver used for scheduling and allocating vGPU local devices.
 
 # A chart can be either an 'application' or a 'library' chart.
 #
@@ -36,6 +36,8 @@ keywords:
   - vgpu
   - gpu
   - dra
+  - dra-driver
+  - kubelet-plugin
   - dynamic-resource-allocation
 
 sources:

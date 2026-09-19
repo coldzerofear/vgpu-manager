@@ -32,12 +32,14 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
+# Optional $1: library tree to check, so one script serves both library/ and
+# library-remote/. Defaults to this script's parent.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LIB_ROOT="$(cd "${1:-${SCRIPT_DIR}/..}" && pwd)"
 SRC_DIR="${LIB_ROOT}/src"
 
 if [[ ! -d "${SRC_DIR}" ]]; then
-  echo "[FAIL] library/src not found at ${SRC_DIR}" >&2
+  echo "[FAIL] src/ not found at ${SRC_DIR}" >&2
   exit 2
 fi
 
@@ -48,7 +50,7 @@ matches=$(grep -rnE \
   "${SRC_DIR}" 2>/dev/null || true)
 
 if [[ -n "${matches}" ]]; then
-  echo "[FAIL] forbidden constructor / destructor attribute(s) in library/src/:"
+  echo "[FAIL] forbidden constructor / destructor attribute(s) in ${SRC_DIR}:"
   echo "${matches}" | sed 's/^/         /'
   echo
   echo "       Functions tagged with __attribute__((constructor)) run at"
@@ -64,4 +66,4 @@ if [[ -n "${matches}" ]]; then
   exit 1
 fi
 
-echo "[PASS] no constructor/destructor attributes in library/src/"
+echo "[PASS] no constructor/destructor attributes in ${SRC_DIR}"

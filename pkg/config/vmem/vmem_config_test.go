@@ -17,6 +17,9 @@ limitations under the License.
 package vmem
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"unsafe"
 
@@ -80,5 +83,53 @@ func TestGetVmemoryLockOffset(t *testing.T) {
 	// with any per-device lock range.
 	if getVmemoryLockOffset(0) <= 0 {
 		t.Fatal("device 0's lock byte overlaps the header byte locked at init")
+	}
+}
+
+// A mapping the metrics lister closed must refuse readers instead of letting
+// them dereference unmapped memory (the file may be long gone by then).
+func TestMmapDeviceVMemoryClosedRefusesReaders(t *testing.T) {
+	path := filepath.Join(t.TempDir(), util.VMemNodeFile)
+	region := &DeviceVMemoryT{
+		Magic:         VMemNodeMagic,
+		LayoutVersion: VMemNodeLayoutVersion,
+		RegionSize:    uint32(unsafe.Sizeof(DeviceVMemoryT{})),
+		DeviceCount:   uint32(util.MaxDeviceCount),
+	}
+	buf := make([]byte, VMemNodeFileSize)
+	copy(buf, unsafe.Slice((*byte)(unsafe.Pointer(region)), unsafe.Sizeof(*region)))
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	vMemory, err := NewMmapDeviceVMemory(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := vMemory.RLock(0)
+	if err != nil {
+		t.Fatalf("RLock on a live mapping: %v", err)
+	}
+	if _, err = vMemory.GetDeviceMemory(0); err != nil {
+		t.Fatalf("GetDeviceMemory: %v", err)
+	}
+	if err = unlock(); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+
+	if err = vMemory.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err = vMemory.Close(); err != nil {
+		t.Fatalf("a second close must be a no-op: %v", err)
+	}
+	if _, err = vMemory.RLock(0); err == nil {
+		t.Error("RLock on a closed mapping must fail, not hand out unmapped memory")
+	}
+	if _, err = vMemory.NeedsReload(); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("NeedsReload on a closed mapping: %v", err)
+	}
+	if err = vMemory.Reload(); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("Reload of a closed mapping: %v", err)
 	}
 }

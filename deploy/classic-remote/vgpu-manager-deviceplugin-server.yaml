@@ -1,0 +1,211 @@
+# 服务者角色的设备插件：GPU 节点上的 device-plugin --remote-server。
+#
+# 它发布三件事，调度器全靠这三样认这台服务器：
+#   1. 节点设备注册注解 nvidia.com/node-device-register（+ node-config-info、驱动版本标签）
+#      —— 远程 Pod 的卡就是从这里分配出来的；
+#   2. 角色标签 nvidia.com/remote-server=true 与注解 nvidia.com/remote-endpoints
+#      （agent/lupine-server 地址，由 agent 探测得到；服务不可用时发布 {}，调度器即跳过本节点）；
+#   3. vgpu-number 资源（数量 = 本地槽位 = 卡数 × deviceSplitCount）。CheckNode 的第一道门是
+#      "可分配 vgpu-number > 0"，所以纯服务器也要注册它；它的 Allocate 一律拒绝——本地 Pod 被
+#      调度器挡在服务器节点之外，真落到这里说明绕过了调度器。
+#
+# 与 vgpu-manager-remote-gpu-server.yaml 落在同一批 GPU 节点上（标签 vgpu-manager=remote-server），
+# 但刻意是两个 DaemonSet：设备插件重启不应该顺带重启 lupine-server（会话是连接态，重启即作废）。
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vgpu-manager-remote-server-plugin
+  namespace: kube-system
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: vgpu-manager-remote-server-plugin:role
+rules:
+  # 节点设备注册 / 角色标签 / endpoints 注解
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["patch"]
+  # 远程 Pod 的预分配/实分配注解与阶段标签（Pod 跑在消费节点，但记账挂在本节点）
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: vgpu-manager-remote-server-plugin-as-role
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-remote-server-plugin
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: vgpu-manager-remote-server-plugin:role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vgpu-manager-remote-server-plugin-config
+  namespace: kube-system
+data:
+  # 按节点名覆盖切分参数；不匹配的节点用命令行默认值。
+  nodeConfig.json: |
+    [
+      {
+        "nodeName": "gpu-node-a",
+        "cgroupDriver": "systemd",
+        "deviceListStrategy": "envvar",
+        "deviceSplitCount": 10,
+        "deviceMemoryScaling": 1,
+        "deviceMemoryFactor": 1,
+        "deviceCoresScaling": 1,
+        "openKernelModules": false
+      }
+    ]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vgpu-manager-remote-server-plugin
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: vgpu-manager-remote-server-plugin
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: vgpu-manager-remote-server-plugin
+        vgpu-manager.io/ignore-webhook: "true"
+    spec:
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+        - effect: NoSchedule
+          operator: Exists
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      priorityClassName: system-node-critical
+      nodeSelector:
+        vgpu-manager: remote-server
+      serviceAccountName: vgpu-manager-remote-server-plugin
+      terminationGracePeriodSeconds: 30
+      restartPolicy: Always
+      hostPID: true
+      containers:
+        - name: device-plugin
+          image: coldzerofear/vgpu-manager:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - device-plugin
+            # RemoteGPUSupport 是 --remote-server/--remote-consumer 的前置门控（两者必须成对配置）。
+            # SharedSMUtilizationWatcher 在这里是"写方"：设备管理器把节点级 SM 采样写到
+            # /etc/vgpu-manager/watcher/sm_util.config，agent 与 monitor 都从那里读，
+            # 所以这一项要与 remote-gpu-server 的两处 FEATURE_GATES 一起开或一起关。
+            - --feature-gates=RemoteGPUSupport=true,TopologyAwareGPUAllocation=true,SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
+            - --remote-server
+            # 本机 remote-agent 怎么连：同节点走 unix 套接字（需与 agent 的
+            # LISTEN_SERVER_ENDPOINT 一致）；也可写 grpc://:14834（host 留空 = 节点 InternalIP）。
+            - --remote-agent-endpoint=unix:///etc/vgpu-manager/agent.sock
+            - --device-list-strategy=envvar
+            - --device-split-count=10
+            - --device-cores-scaling=1
+            - --device-memory-scaling=1
+            - --node-config-path=/config/nodeConfig.json
+            - --open-kernel-modules=false
+            # 驱动装在宿主机上时保持默认；GPU-Operator 驱动容器场景改成驱动根路径，
+            # 并把同一宿主路径以同名挂进来（见 driver-root 卷）。
+            - --host-driver-root=/
+            - --container-driver-root=/driver-root
+            # 启用 cdi-annotations / cdi-cri 策略时才需要：再加 cdi-root 卷与挂载
+            # （见 deploy/classic-local/vgpu-manager-deviceplugin.yaml 的写法）。
+#            - --cdi-root=/var/run/cdi
+            - --v=4
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CGROUP_DRIVER
+              value: auto
+            - name: KUBE_FEATURE_WatchListClient
+              value: "true"
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_MIG_MONITOR_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["SYS_ADMIN"]
+          resources: {}
+          volumeMounts:
+            - name: kubelet-root
+              mountPath: /var/lib/kubelet
+              readOnly: true
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+              mountPropagation: Bidirectional
+            - name: pod-resources
+              mountPath: /var/lib/kubelet/pod-resources
+              readOnly: true
+            - name: manager-root
+              mountPath: /etc/vgpu-manager
+            - name: cgroup-root
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: node-config
+              mountPath: /config
+              readOnly: true
+            - name: driver-root
+              mountPath: /driver-root
+              readOnly: true
+      volumes:
+        - name: kubelet-root
+          hostPath:
+            path: /var/lib/kubelet
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: pod-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+        - name: manager-root
+          hostPath:
+            path: /etc/vgpu-manager
+            type: DirectoryOrCreate
+        - name: cgroup-root
+          hostPath:
+            path: /sys/fs/cgroup
+        - name: driver-root
+          hostPath:
+            path: /
+        - name: node-config
+          configMap:
+            name: vgpu-manager-remote-server-plugin-config

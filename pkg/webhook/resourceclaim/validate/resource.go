@@ -91,7 +91,7 @@ func (rw *validateHandle) extractResourceClaim(req admissionv1.AdmissionRequest)
 	}
 
 	if _, _, err = deserializer.Decode(raw, nil, obj); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to decode ResourceClaim: %w", err)
 	}
 
 	// Convert to v1 using Kubernetes conversion
@@ -127,7 +127,7 @@ func (rw *validateHandle) extractResourceClaimTemplate(req admissionv1.Admission
 	}
 
 	if _, _, err = deserializer.Decode(raw, nil, obj); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to decode ResourceClaimTemplate: %w", err)
 	}
 
 	// Convert to v1 using Kubernetes conversion

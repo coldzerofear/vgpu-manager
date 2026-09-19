@@ -2,13 +2,13 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: vgpu-manager-kubelet-plugin
+  name: vgpu-manager-dra-driver
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: vgpu-manager-kubelet-plugin:role
+  name: vgpu-manager-dra-driver:role
 rules:
   - apiGroups:
       - resource.k8s.io
@@ -72,30 +72,30 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: vgpu-manager-kubelet-plugin-as-role
+  name: vgpu-manager-dra-driver-as-role
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: vgpu-manager-kubelet-plugin:role
+  name: vgpu-manager-dra-driver:role
 subjects:
   - kind: ServiceAccount
-    name: vgpu-manager-kubelet-plugin
+    name: vgpu-manager-dra-driver
     namespace: kube-system
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: vgpu-manager-kubelet-plugin
+  name: vgpu-manager-dra-driver
   namespace: kube-system
 spec:
   revisionHistoryLimit: 10
   selector:
     matchLabels:
-      app: vgpu-manager-kubelet-plugin
+      app: vgpu-manager-dra-driver
   template:
     metadata:
       labels:
-        app: vgpu-manager-kubelet-plugin
+        app: vgpu-manager-dra-driver
         vgpu-manager.io/ignore-webhook: "true"
     spec:
 #      affinity:
@@ -171,6 +171,9 @@ spec:
           image: coldzerofear/vgpu-manager-dra:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c, /usr/bin/install_files.sh]
+          env:
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
           resources:
             requests:
               cpu: 10m
@@ -197,28 +200,41 @@ spec:
                 sed -i 's/^ModifyDeviceFiles: 1$/ModifyDeviceFiles: 0/' root/gpu-params
                 mount --bind root/gpu-params /proc/driver/nvidia/params
               fi
-              kubelet-plugin -v 6
+              exec kubelet-plugin "$@"
+            - --kube-api-qps=20
+            - --kube-api-burst=30
+            - --device-cores-ratio=100
+            - --device-memory-ratio=100
+            - -v=6
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: FEATURE_GATES
-              value: SharedSMUtilizationWatcher=true,DevicePluginClientMode=false
+              value: NVMLDeviceHealthCheck=true,SharedSMUtilizationWatcher=true,DevicePluginClientMode=false,NRISupport=false
             - name: MASK_NVIDIA_DRIVER_PARAMS
               value: ""
             - name: NVIDIA_DRIVER_ROOT
               value: /
-            - name: NVIDIA_VISIBLE_DEVICES
-              value: void
             - name: CDI_ROOT
               value: /var/run/cdi
             - name: NRI_ROOT
               value: /var/run/nri
+            - name: NRI_PLUGIN_INDEX
+              value: "00"
             - name: HOST_ROOT
               value: /host-root
             - name: HEALTHCHECK_PORT
               value: "4567"
+            - name: HTTP_ENDPOINT
+              value: ":8080"
+            - name: METRICS_PATH
+              value: "/metrics"
+            # void: 阻止 nvidia runtime 向插件容器注入驱动库/设备节点，
+            # 驱动发现走 prestart + /driver-root
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
             - name: NVIDIA_MIG_CONFIG_DEVICES
@@ -227,12 +243,19 @@ spec:
               value: /driver-root
             - name: HOST_MANAGER_DIR
               value: /etc/vgpu-manager
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
             - name: KUBELET_REGISTRAR_DIRECTORY_PATH
               value: /var/lib/kubelet/plugins_registry
             - name: KUBELET_PLUGINS_DIRECTORY_PATH
               value: /var/lib/kubelet/plugins
           securityContext:
             privileged: true
+          ports:
+            - name: health
+              containerPort: 4567
+            - name: metrics
+              containerPort: 8080
           startupProbe:
             grpc:
               port: 4567
@@ -281,18 +304,23 @@ spec:
               mountPath: /proc/
               mountPropagation: Bidirectional
 #            # When NRISupport is enabled, it is necessary to mount the nri root directory to the container
-#            - name: nri-root
-#              mountPath: /var/run/nri
-#              mountPropagation: HostToContainer
-#              readOnly: true
+            - name: nri-root
+              mountPath: /var/run/nri
+              mountPropagation: HostToContainer
+              readOnly: true
         - name: device-monitor
           image: coldzerofear/vgpu-manager-dra:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor
+            - --domain=nvidia.com
+            - --kube-api-qps=20
+            - --kube-api-burst=30
             - --enable-dra-monitor
             - --server-bind-port=3456
             - --container-driver-root=/driver-root
+            - --min-scrape-interval=1s
+            - --feature-gates=SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
             - --v=4
           ports:
             - name: http
@@ -318,14 +346,14 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 3456
+              port: http
               scheme: HTTP
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 3456
+              port: http
               scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -352,7 +380,7 @@ spec:
       priorityClassName: system-node-critical
       nodeSelector:
         vgpu-manager: dra-driver
-      serviceAccountName: vgpu-manager-kubelet-plugin
+      serviceAccountName: vgpu-manager-dra-driver
       securityContext: {}
       volumes:
         - hostPath:
@@ -413,15 +441,15 @@ spec:
             path: /var/lib/kubelet/pod-resources
             type: Directory
 #        # When NRISupport is enabled, it is necessary to mount the nri root directory to the container
-#        - name: nri-root
-#          hostPath:
-#            path: /var/run/nri
-#            type: Directory
+        - name: nri-root
+          hostPath:
+            path: /var/run/nri
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: vgpu-manager-dra-monitor
+  name: vgpu-manager-dra-driver
   namespace: kube-system
 spec:
   ports:
@@ -429,43 +457,10 @@ spec:
       port: 3456
       protocol: TCP
       targetPort: http
+    - name: metrics
+      port: 8080
+      protocol: TCP
+      targetPort: metrics
   selector:
-    app: vgpu-manager-kubelet-plugin
+    app: vgpu-manager-dra-driver
   type: ClusterIP
----
-apiVersion: resource.k8s.io/v1
-kind: DeviceClass
-metadata:
-  name: gpu-manager
-spec:
-  selectors:
-    - cel:
-        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'gpu'"
-  extendedResourceName: nvidia.com/gpu
----
-apiVersion: resource.k8s.io/v1
-kind: DeviceClass
-metadata:
-  name: vgpu-manager
-spec:
-  selectors:
-    - cel:
-        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu'"
----
-apiVersion: resource.k8s.io/v1
-kind: DeviceClass
-metadata:
-  name: mig-manager
-spec:
-  selectors:
-    - cel:
-        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'mig'"
----
-apiVersion: resource.k8s.io/v1
-kind: DeviceClass
-metadata:
-  name: vfio-manager
-spec:
-  selectors:
-    - cel:
-        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vfio'"

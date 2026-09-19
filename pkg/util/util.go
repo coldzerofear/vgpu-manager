@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -39,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/net"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	k8scache "k8s.io/client-go/tools/cache"
 	"k8s.io/component-helpers/resource"
@@ -431,9 +433,11 @@ func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 		if _, ok := HasAnnotation(&pod, PodVGPUPreAllocAnnotation); !ok {
 			continue
 		}
-		if nodeName, ok := HasAnnotation(&pod, PodPredicateNodeAnnotation); !ok {
+		// A remote pod's predicate node is the GPU server whose devices it
+		// was given; it runs on the node the caller listed pods of.
+		if nodeName, ok := HasAnnotation(&pod, PodPredicateNodeAnnotation); !ok || nodeName == "" {
 			continue
-		} else if pod.Spec.NodeName != nodeName {
+		} else if mode, _ := PodVGPUAccessMode(&pod); mode == AccessModeLocal && pod.Spec.NodeName != nodeName {
 			continue
 		}
 		if val, ok := HasAnnotation(&pod, PodPredicateTimeAnnotation); !ok {
@@ -449,24 +453,23 @@ func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 	return allocatingPods
 }
 
+// PodPlanSchedulingNode returns the node whose devices the pod uses. For a
+// remote pod that is its predicate node, the GPU server, wherever it runs.
 func PodPlanSchedulingNode(pod *corev1.Pod) string {
 	if pod == nil {
 		return ""
 	}
 	if pod.Spec.NodeName != "" {
-		return pod.Spec.NodeName
+		if mode, _ := PodVGPUAccessMode(pod); mode == AccessModeLocal {
+			return pod.Spec.NodeName
+		}
 	}
 	predicateNode, _ := HasAnnotation(pod, PodPredicateNodeAnnotation)
 	return predicateNode
 }
 
 func PodsOnNodeCallback(pods []*corev1.Pod, node *corev1.Node, callbackFn func(*corev1.Pod)) {
-	if node == nil {
-		klog.Warningln("node is empty")
-		return
-	}
-	if callbackFn == nil {
-		klog.Warningln("PodsOnNodeCallback callback function is empty")
+	if node == nil || callbackFn == nil {
 		return
 	}
 	klog.V(5).InfoS("pods on node callback", "node", node.Name)
@@ -861,4 +864,72 @@ func SafeDiv(a, b float64) float64 {
 		return 0
 	}
 	return a / b
+}
+
+// PodVGPUAccessMode returns the vGPU access mode a pod (or pod template) asks
+// for via VGPUAccessModeAnnotation: AccessModeLocal when absent, an error for
+// any other value than local/remote.
+func PodVGPUAccessMode(obj metav1.Object) (string, error) {
+	mode, _ := HasAnnotation(obj, VGPUAccessModeAnnotation)
+	if mode != "" {
+		mode = strings.ToLower(strings.TrimSpace(mode))
+	}
+	switch mode {
+	case "":
+		return AccessModeLocal, nil
+	case AccessModeLocal, AccessModeRemote:
+		return mode, nil
+	default:
+		return AccessModeLocal, fmt.Errorf("invalid annotation %s=%q: must be %q or %q",
+			VGPUAccessModeAnnotation, mode, AccessModeLocal, AccessModeRemote)
+	}
+}
+
+// NRIPartitionKey is the per-container partition key used by the NRI paths
+// (local and remote): the name of the per-container partition directory and
+// the remote per-container session. Defined here because both
+// pkg/kubeletplugin/nri and pkg/kubeletplugin/remote need it (remote imports
+// nri, so neither can host it for the other).
+func NRIPartitionKey(podUID, containerName string) string {
+	return podUID + "_" + containerName
+}
+
+// IsRemoteServerNode reports whether the node's GPUs serve remote pods.
+func IsRemoteServerNode(node *corev1.Node) bool {
+	if node == nil {
+		return false
+	}
+	value, _ := HasLabel(node, NodeRemoteServerLabel)
+	_, exists := HasAnnotation(node, NodeRemoteEndpointsAnnotation)
+	return value == "true" && exists
+}
+
+// IsRemoteConsumerNode reports whether the node is set up to run remote vGPU pods.
+func IsRemoteConsumerNode(node *corev1.Node) bool {
+	if node == nil {
+		return false
+	}
+	value, _ := HasLabel(node, NodeRemoteConsumerLabel)
+	return value == "true" && IsVGPUEnabledNode(node)
+}
+
+func AddContainerRequiredNRIPluginAnnotations(obj metav1.Object, container string, plugins ...string) error {
+	if len(plugins) > 0 {
+		pluginSet := sets.NewString(plugins...)
+		annoKey := RequiredNRIPluginsContainerAnnotation(container)
+		if val, _ := HasAnnotation(obj, annoKey); val != "" {
+			var pluginNames []string
+			if err := json.Unmarshal([]byte(val), &pluginNames); err != nil {
+				return fmt.Errorf("failed to parse the list of required plugins %q: %w", val, err)
+			}
+			pluginSet.Insert(pluginNames...)
+		}
+		pluginNames := pluginSet.List()
+		bytes, err := json.Marshal(pluginNames)
+		if err != nil {
+			return fmt.Errorf("failed to serialize required plugins %v: %w", pluginNames, err)
+		}
+		InsertAnnotation(obj, annoKey, string(bytes))
+	}
+	return nil
 }

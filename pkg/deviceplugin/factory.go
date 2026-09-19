@@ -25,10 +25,12 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/cdi"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/mig"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"gomodules.xyz/jsonpatch/v2"
@@ -38,13 +40,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrm "sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 func GetDevicePlugins(
-	option *options.Options, devManager *manager.DeviceManager,
+	ctx context.Context, option *options.Options, devManager *manager.DeviceManager,
 	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset,
-) ([]base.DevicePlugin, error) {
+) (plugins []base.DevicePlugin, err error) {
 	// Build the CDI handler (a null no-op handler is returned when no CDI
 	// strategy is configured) and generate the node CDI specification so that
 	// CDI device references emitted during Allocate can be resolved.
@@ -53,46 +56,76 @@ func GetDevicePlugins(
 	// references that host path. It is executed by the host container runtime,
 	// not by this plugin, so no flag is exposed for it.
 	nodeConfig := devManager.GetNodeConfig()
-	cdiHandler, err := cdi.New(
-		devManager.DeviceLib,
-		cdi.Config{
-			Strategies:        nodeConfig.GetDeviceListStrategy(),
-			Vendor:            util.CDIVendor,
-			Class:             util.CDIClass,
-			DeviceIDStrategy:  util.CDIDeviceIDStrategy,
-			AnnotationPrefix:  option.CDIAnnotationPrefix,
-			NvidiaCDIHookPath: filepath.Join(vgpu.HostManagerDirectoryPath, util.Tools, "nvidia-cdi-hook"),
-			// The host driver/dev root is mounted into the plugin at the same path,
-			// so the in-container read path equals the host path written into the
-			// spec (TargetDriverRoot/TargetDevRoot default to these in cdi.New).
-			DriverRoot:       string(nodeConfig.GetDriverRoot()),
-			TargetDriverRoot: string(nodeConfig.GetHostDriverRoot()),
-			DevRoot:          nodeConfig.GetDriverRoot().GetDevRoot(),
-			TargetDevRoot:    string(nodeConfig.GetHostDevRoot()),
-			GDSEnabled:       nodeConfig.GetGDSEnabled(),
-			MOFEDEnabled:     nodeConfig.GetMOFEDEnabled(),
-			GDRCopyEnabled:   nodeConfig.GetGDRCopyEnabled(),
-			ImexChannels:     devManager.GetImexChannels(),
-		})
-	if err != nil {
-		klog.Errorf("Create CDI handler failed: %v", err)
-		return nil, err
+
+	// A local node carries no remote role. The remote plugins each remove
+	// their own metadata when they stop, so anything still on the node was
+	// left by one that is gone; clearing it is the local side's job, whatever
+	// plugins it goes on to build (MIG-only nodes included).
+	if !option.RemoteServer && !option.RemoteConsumer {
+		remote.RemoveRoles(devManager)
 	}
+
+	// A node that only consumes remote GPUs has none of its own: its device
+	// manager is deviceless, so nothing below that inspects local devices --
+	// CDI spec generation, MIG -- applies to it.
+	consumerOnly := option.RemoteConsumer && !option.RemoteServer
+
+	var cdiHandler cdi.Handler
+	if consumerOnly {
+		cdiHandler = cdi.NewNullHandler()
+	} else {
+		cdiHandler, err = cdi.New(
+			devManager.DeviceLib,
+			cdi.Config{
+				Strategies:        nodeConfig.GetDeviceListStrategy(),
+				Vendor:            util.CDIVendor,
+				Class:             util.CDIClass,
+				CdiRoot:           option.CDIRoot,
+				DeviceIDStrategy:  util.CDIDeviceIDStrategy,
+				AnnotationPrefix:  option.CDIAnnotationPrefix,
+				NvidiaCDIHookPath: filepath.Join(vgpu.HostManagerDirectoryPath, util.Tools, "nvidia-cdi-hook"),
+				// The host driver/dev root is mounted into the plugin at the same path,
+				// so the in-container read path equals the host path written into the
+				// spec (TargetDriverRoot/TargetDevRoot default to these in cdi.New).
+				DriverRoot:       string(nodeConfig.GetDriverRoot()),
+				TargetDriverRoot: string(nodeConfig.GetHostDriverRoot()),
+				DevRoot:          nodeConfig.GetDriverRoot().GetDevRoot(),
+				TargetDevRoot:    string(nodeConfig.GetHostDevRoot()),
+				GDSEnabled:       nodeConfig.GetGDSEnabled(),
+				MOFEDEnabled:     nodeConfig.GetMOFEDEnabled(),
+				GDRCopyEnabled:   nodeConfig.GetGDRCopyEnabled(),
+				ImexChannels:     devManager.GetImexChannels(),
+			})
+		if err != nil {
+			klog.Errorf("Create CDI handler failed: %v", err)
+			return nil, err
+		}
+	}
+
 	if err = cdiHandler.CreateSpecFile(); err != nil {
 		klog.Errorf("Generate CDI spec file failed: %v", err)
 		return nil, err
 	}
 
-	var plugins []base.DevicePlugin
 	migStrategy := devManager.GetNodeConfig().GetMigStrategy()
 	if migStrategy != util.MigStrategySingle {
-		socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu.sock")
-		plugin, err := vgpu.NewVNumberDevicePlugin(util.VGPUNumberResourceName,
-			socket, devManager, kubeClient, clusterManager.GetCache(), cdiHandler)
-		if err != nil {
-			return nil, fmt.Errorf("create vnumber plugin failed: %v", err)
+		var plugin base.DevicePlugin
+		if option.RemoteConsumer || option.RemoteServer {
+			cacheClient := clusterManager.GetClient()
+			if plugin, err = remotePlugin(ctx, option, nodeConfig, devManager, kubeClient, cacheClient); err != nil {
+				return nil, err
+			}
+		} else {
+			socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu.sock")
+			plugin, err = vgpu.NewVNumberDevicePlugin(util.VGPUNumberResourceName,
+				socket, devManager, kubeClient, clusterManager.GetCache(), cdiHandler)
+			if err != nil {
+				return nil, fmt.Errorf("create vnumber plugin failed: %v", err)
+			}
 		}
-		plugins = append(plugins, plugin)
+		if plugin != nil {
+			plugins = append(plugins, plugin)
+		}
 	}
 
 	var deleteResources []string
@@ -110,15 +143,14 @@ func GetDevicePlugins(
 		deleteResources = append(deleteResources, util.VGPUMemoryResourceName)
 	}
 
-	nodeName := devManager.GetNodeConfig().GetNodeName()
-	go CycleCleanupNodeResources(kubeClient, nodeName, deleteResources)
+	go CycleCleanupNodeResources(kubeClient, nodeConfig.GetNodeName(), deleteResources)
 
-	if migStrategy != util.MigStrategyNone {
+	if migStrategy != util.MigStrategyNone && !consumerOnly {
 		var requireUniformMIGDevices bool
 		if migStrategy == util.MigStrategySingle {
 			requireUniformMIGDevices = true
 		}
-		if err := devManager.AssertAllMigDevicesAreValid(requireUniformMIGDevices); err != nil {
+		if err = devManager.AssertAllMigDevicesAreValid(requireUniformMIGDevices); err != nil {
 			return nil, fmt.Errorf("invalid MIG configuration: %v", err)
 		}
 
@@ -196,4 +228,38 @@ func cleanupNodeResources(ctx context.Context, kubeClient *kubernetes.Clientset,
 		}
 	}
 	return len(jsonPatches) == 0
+}
+
+// remotePlugin builds the plugin of a node that takes part in remote vGPU,
+// with one option per configured role (see pkg/deviceplugin/remote).
+func remotePlugin(
+	ctx context.Context, option *options.Options, nodeConfig node.NodeConfigSpec,
+	devManager *manager.DeviceManager, kubeClient kubernetes.Interface, cacheClient client.Client,
+) (base.DevicePlugin, error) {
+	cfg := remote.Config{
+		NodeName:     nodeConfig.GetNodeName(),
+		ResourceName: util.VGPUNumberResourceName,
+		Socket:       filepath.Join(nodeConfig.GetDevicePluginPath(), remote.ConsumerSocketName),
+	}
+	if !option.RemoteConsumer {
+		// Serving GPUs only: another process on this node may run the
+		// consumer role, and it is the one that owns the resource then.
+		cfg.Socket = filepath.Join(nodeConfig.GetDevicePluginPath(), remote.ServerSocketName)
+		cfg.PeerConsumerSocket = filepath.Join(nodeConfig.GetDevicePluginPath(), remote.ConsumerSocketName)
+	}
+
+	var opts []remote.Option
+	if option.RemoteServer {
+		nodeAdapter := remote.NodeGetterAdapter{Client: cacheClient}
+		opts = append(opts, remote.WithServerRole(ctx, &nodeAdapter, option.RemoteAgentEndpoint))
+	}
+	if option.RemoteConsumer {
+		opts = append(opts, remote.WithConsumerRole(kubeClient, remote.ConsumerOptions{
+			VGPUNumber:           option.RemoteConsumerNum,
+			ArtifactsDir:         filepath.Join(vgpu.ContManagerDirectoryPath, util.Driver),
+			HostArtifactsDir:     filepath.Join(vgpu.HostManagerDirectoryPath, util.Driver),
+			IgnoreClientShimEtag: option.IgnoreClientShimEtag,
+		}))
+	}
+	return remote.New(cfg, devManager, opts...)
 }

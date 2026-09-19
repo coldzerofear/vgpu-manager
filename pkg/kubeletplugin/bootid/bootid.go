@@ -3,6 +3,7 @@
 package bootid
 
 import (
+	"fmt"
 	"os"
 	"strings"
 )
@@ -16,7 +17,7 @@ var bootIDPath = defaultBootIDPath
 func GetCurrentBootID() (string, error) {
 	b, err := os.ReadFile(bootIDPath)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to read boot ID from %s: %w", bootIDPath, err)
 	}
 	return strings.TrimSpace(string(b)), nil
 }

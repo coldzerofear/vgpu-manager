@@ -47,7 +47,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SUBSET_HEADER = ROOT / "include/cuda-subset.h"
+SUBSET_HEADER = Path()
+
+
+def set_root(root: Path) -> None:
+    """Point every path at `root`, so one checker serves both library/ and
+    library-remote/ (same layout, same hand-maintained subset headers)."""
+    global ROOT, SUBSET_HEADER
+    ROOT = root
+    SUBSET_HEADER = root / "include/cuda-subset.h"
+
+
+set_root(ROOT)
 
 # Hand-curated offsetof audits for ABI-conflict families. These are the
 # structs whose field ORDER matters for CUDA 11/12 <-> CUDA 13 calling
@@ -225,7 +236,12 @@ def main() -> int:
     ap.add_argument("--cuda-home", default=None,
                     help="path to CUDA toolkit (defaults to env CUDA_HOME or "
                          "/usr/local/cuda)")
+    ap.add_argument("--root", default=None,
+                    help="library tree to check (defaults to this script's "
+                         "parent; pass ../library-remote to check that one)")
     args = ap.parse_args()
+    if args.root:
+        set_root(Path(args.root).resolve())
 
     cuda_h = locate_cuda_h(args.cuda_home)
     if cuda_h is None:

@@ -35,6 +35,10 @@ import (
 
 type CudaDriverVersion int
 
+func NewCudaVersion(major, minor int64) CudaDriverVersion {
+	return CudaDriverVersion(major*1000 + minor*10)
+}
+
 func (v CudaDriverVersion) String() string {
 	major, minor := v.MajorAndMinor()
 	return fmt.Sprintf("%d.%d", major, minor)
@@ -143,6 +147,10 @@ type MigProfileInfo struct {
 	Placements []*MigDevicePlacement
 }
 
+func (p MigProfileInfo) String() string {
+	return p.Profile.String()
+}
+
 type MigDevicePlacement struct {
 	nvml.GpuInstancePlacement
 }
@@ -161,6 +169,18 @@ type DeviceLib struct {
 	DevRoot           string
 	SysfsRoot         string
 	NvidiaSMIPath     string
+}
+
+func NewFakeDeviceLib(
+	devlib nvdev.Interface, infolib nvinfo.Interface,
+	nvmllib nvml.Interface, pcilib nvpci.Interface,
+) *DeviceLib {
+	return &DeviceLib{
+		devInterface:  devlib,
+		nvmlInterface: nvmllib,
+		infoInterface: infolib,
+		pciInterface:  pcilib,
+	}
 }
 
 func DetectionDeviceLib(root RootPath) (lib *DeviceLib, err error) {
@@ -195,7 +215,7 @@ func NewDeviceLib(root RootPath) (*DeviceLib, error) {
 		return nil, fmt.Errorf("failed to locate driver libraries: %w", err)
 	}
 
-	nvidiaSMIPath, err := root.getNvidiaSMIPath()
+	nvidiaSMIPath, err := root.GetNvidiaSMIPath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to locate nvidia-smi: %w", err)
 	}
@@ -254,8 +274,8 @@ func (l DeviceLib) NvmlShutdown() {
 	}
 }
 
-// prependPathListEnvvar prepends a specified list of strings to a specified envvar and returns its value.
-func prependPathListEnvvar(envvar string, prepend ...string) string {
+// PrependPathListEnvvar prepends a specified list of strings to a specified envvar and returns its value.
+func PrependPathListEnvvar(envvar string, prepend ...string) string {
 	if len(prepend) == 0 {
 		return os.Getenv(envvar)
 	}
@@ -263,8 +283,8 @@ func prependPathListEnvvar(envvar string, prepend ...string) string {
 	return strings.Join(append(prepend, current...), string(filepath.ListSeparator))
 }
 
-// setOrOverrideEnvvar adds or updates an envar to the list of specified envvars and returns it.
-func setOrOverrideEnvvar(envvars []string, key, value string) []string {
+// SetOrOverrideEnvvar adds or updates an envar to the list of specified envvars and returns it.
+func SetOrOverrideEnvvar(envvars []string, key, value string) []string {
 	var updated []string
 	for _, envvar := range envvars {
 		pair := strings.SplitN(envvar, "=", 2)
@@ -386,7 +406,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 			continue
 		}
 		if ret != nvml.SUCCESS {
-			return nil, fmt.Errorf("error retrieving GpuInstanceProfileInfo for profile %d on GPU %v", i, uuid)
+			return nil, fmt.Errorf("error retrieving GpuInstanceProfileInfo for profile %d on GPU %v: %w", i, uuid, ret)
 		}
 
 		giPossiblePlacements, ret := device.GetGpuInstancePossiblePlacements(&giProfileInfo)
@@ -397,7 +417,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 			continue
 		}
 		if ret != nvml.SUCCESS {
-			return nil, fmt.Errorf("error retrieving GpuInstancePossiblePlacements for profile %d on GPU %v", i, uuid)
+			return nil, fmt.Errorf("error retrieving GpuInstancePossiblePlacements for profile %d on GPU %v: %w", i, uuid, ret)
 		}
 
 		var migDevicePlacements []*MigDevicePlacement
@@ -412,7 +432,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 			for k := 0; k < nvml.COMPUTE_INSTANCE_ENGINE_PROFILE_COUNT; k++ {
 				migProfile, err := l.NewMigProfile(i, j, k, giProfileInfo.MemorySizeMB, memory.Total)
 				if err != nil {
-					return nil, fmt.Errorf("error building MIG profile from GpuInstanceProfileInfo for profile %d on GPU %v", i, uuid)
+					return nil, fmt.Errorf("error building MIG profile from GpuInstanceProfileInfo for profile %d on GPU %v: %w", i, uuid, err)
 				}
 
 				if migProfile.GetInfo().G != migProfile.GetInfo().C {
@@ -455,16 +475,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 	return gpuInfo, nil
 }
 
-func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
-	if !gpuInfo.MigEnabled {
-		return nil, nil
-	}
-
-	device, ret := l.DeviceGetHandleByUUID(gpuInfo.UUID)
-	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting GPU device handle: %w", ret)
-	}
-
+func (l DeviceLib) GetMigInfosByDevice(device nvml.Device, gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
 	migInfos := make(map[string]*MigInfo)
 	err := walkMigDevices(device, func(i int, migDevice nvml.Device) error {
 		memoryInfo, ret := migDevice.GetMemoryInfo()
@@ -524,7 +535,7 @@ func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
 			ciProfileInfo = &cipInfo
 		}
 		if migProfile == nil {
-			return fmt.Errorf("error getting profile info for MIG device: %v", uuid)
+			return fmt.Errorf("failed to match MIG profile for device %s (GI profile ID %d, CI profile ID %d)", uuid, giInfo.ProfileId, ciInfo.ProfileId)
 		}
 
 		placement := MigDevicePlacement{
@@ -554,6 +565,19 @@ func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
 	}
 
 	return migInfos, nil
+}
+
+func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
+	if !gpuInfo.MigEnabled {
+		return nil, nil
+	}
+
+	device, ret := l.DeviceGetHandleByUUID(gpuInfo.UUID)
+	if ret != nvml.SUCCESS {
+		return nil, fmt.Errorf("error getting GPU device handle: %w", ret)
+	}
+
+	return l.GetMigInfosByDevice(device, gpuInfo)
 }
 
 func walkMigDevices(d nvml.Device, f func(i int, d nvml.Device) error) error {
@@ -589,7 +613,7 @@ func (l DeviceLib) SetTimeSlice(uuids []string, timeSlice int) error {
 			"--set-timeslice", fmt.Sprintf("%d", timeSlice))
 
 		// In order for nvidia-smi to run, we need update LD_PRELOAD to include the path to libnvidia-ml.so.1.
-		cmd.Env = setOrOverrideEnvvar(os.Environ(), "LD_PRELOAD", prependPathListEnvvar("LD_PRELOAD", l.DriverLibraryPath))
+		cmd.Env = SetOrOverrideEnvvar(os.Environ(), "LD_PRELOAD", PrependPathListEnvvar("LD_PRELOAD", l.DriverLibraryPath))
 
 		output, err := cmd.CombinedOutput()
 		if err != nil {
@@ -608,7 +632,7 @@ func (l DeviceLib) SetComputeMode(uuids []string, mode string) error {
 			"-c", mode)
 
 		// In order for nvidia-smi to run, we need update LD_PRELOAD to include the path to libnvidia-ml.so.1.
-		cmd.Env = setOrOverrideEnvvar(os.Environ(), "LD_PRELOAD", prependPathListEnvvar("LD_PRELOAD", l.DriverLibraryPath))
+		cmd.Env = SetOrOverrideEnvvar(os.Environ(), "LD_PRELOAD", PrependPathListEnvvar("LD_PRELOAD", l.DriverLibraryPath))
 
 		output, err := cmd.CombinedOutput()
 		if err != nil {

@@ -28,7 +28,7 @@ vgpu-manager-dra-monitor {{ .Chart.AppVersion }} device-monitor (SideCar) has be
 
 {{- if .Values.deviceClasses.enabled }}
 
-vgpu-manager-dra-driver {{ .Chart.AppVersion }} DeviceClasses (driver: {{ .Values.deviceClasses.driverName | default "manager.nvidia.com" | quote }}):
+vgpu-manager-dra-driver {{ .Chart.AppVersion }} DeviceClasses (driver: "manager.nvidia.com"):
 {{- if .Values.deviceClasses.gpu.enabled }}
   - {{ .Values.deviceClasses.gpu.name | default "gpu-manager" }} (type=gpu)
 {{- end }}
