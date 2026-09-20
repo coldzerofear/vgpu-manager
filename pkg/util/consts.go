@@ -337,25 +337,6 @@ const (
 	CliqueDeviceAttribute = "clique"
 )
 
-// LinkTopologyAttribute selects the device attribute that a `link` topology
-// constraint matches on when converting to DRA.
-type LinkTopologyAttribute string
-
-const (
-	// LinkTopologyPCIeRoot groups GPUs by PCIe root complex. This is PCIe
-	// locality, not NVLink connectivity — on an NVSwitch board the GPUs are
-	// all NVLink peers yet sit under several roots, so it rejects perfectly
-	// good sets, and a PCIe-only box satisfies it while offering no NVLink at
-	// all. Kept as the default only because it is what earlier releases did.
-	LinkTopologyPCIeRoot LinkTopologyAttribute = "pcieRoot"
-	// LinkTopologyNVLinkDomain groups GPUs by the NVLink domain they can
-	// reach each other in, which is what `link` is supposed to mean. Requires
-	// the kubelet plugin's NVLinkTopologyAttributes gate on every node that
-	// should be able to satisfy a link constraint; nodes without the
-	// attribute cannot satisfy one at all.
-	LinkTopologyNVLinkDomain LinkTopologyAttribute = "nvlinkDomain"
-)
-
 // IsStrictTopology reports whether the topology mode requires hard
 // satisfaction (no silent fallback to non-topology allocation).
 func (m TopologyMode) IsStrictTopology() bool {

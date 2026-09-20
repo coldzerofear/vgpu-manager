@@ -143,6 +143,10 @@ kubeletPlugin:
         TimeSlicingSettings: false
         PassthroughSupport: false
         FabricManagerPartitioning: false
+        # Publish each device's NVLink connectivity (`clique` / `nvlinkDomain`). Required on every
+        # node that should be able to satisfy a `nvidia.com/device-topology-mode: link` pod, since
+        # the webhook converts that into a matchAttribute constraint on nvlinkDomain.
+        NVLinkTopologyAttributes: false
         # Publish list-valued DRA device attributes
         DRAListTypeAttributes: false
         # Publish consumable capacity and multi-allocation support for devices

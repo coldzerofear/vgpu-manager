@@ -427,9 +427,13 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 			// Multiple devices are matched and allocated according to defined topology patterns to ensure optimal performance.
 			switch topologyMode.BaseTopology() {
 			case util.LinkTopology:
+				// nvlinkDomain, not pcieRoot: PCIe locality is not NVLink
+				// connectivity. On an NVSwitch board the GPUs are all NVLink
+				// peers yet sit under several roots, and a PCIe-only box
+				// satisfies pcieRoot while offering no NVLink at all.
 				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
 					Requests:       []string{request.Name},
-					MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributePCIeRoot)),
+					MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.NVLinkDomainDeviceAttribute),
 				})
 			case util.NUMATopology:
 				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{

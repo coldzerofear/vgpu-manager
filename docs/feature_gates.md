@@ -344,9 +344,13 @@ Publishes each device's NVLink connectivity as two attributes:
   on NVLink hardware without NVSwitch.
 
 A GPU with no NVLink peer publishes neither, so a `matchAttribute` constraint on `nvlinkDomain`
-correctly refuses it. This gate is what the webhook's `--link-topology-attribute=nvlinkDomain`
-depends on: enable it on every node that should be able to satisfy a `link` topology constraint
-before switching the webhook over, otherwise those pods become unschedulable.
+correctly refuses it.
+
+The webhook converts a `nvidia.com/device-topology-mode: link` pod into a `matchAttribute`
+constraint on `nvlinkDomain`, so **enable this gate on every node that should be able to satisfy a
+`link` constraint**. A node without the attribute cannot satisfy one, and such pods stay
+Unschedulable there — which is the intended meaning of `link`, but it does mean a cluster using
+`link` has to roll the gate out before the pods can land.
 
 Independent of `FabricManagerPartitioning` — it reads fabric identities from NVML and never talks to
 Fabric Manager.
