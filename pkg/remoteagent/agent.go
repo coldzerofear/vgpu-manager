@@ -79,10 +79,16 @@ type Config struct {
 	// see AdvertiseEndpoint and serverState.Endpoint.
 	ServerEndpoint string
 	// AdvertiseEndpoint, when set, is reported to callers of ServerInfo as the
-	// server's endpoint verbatim (URL form) instead of the discovered one.
+	// server.s endpoint verbatim (URL form) instead of the discovered one.
 	// For DNS names and gateways that this host cannot resolve or reach
 	// itself; it is not probed.
 	AdvertiseEndpoint string
+	// AdvertiseAgentEndpoint, when set, is reported as this agent's own
+	// endpoint (grpc://host:port) instead of the address it discovered for
+	// itself. A pod that is not on the host network has only its pod IP to
+	// offer, which a recreated pod loses; the name of a headless service
+	// keeps working (see pkg/webhook/pod/hostname).
+	AdvertiseAgentEndpoint string
 	// ListenEndpoints are the gRPC listen addresses, URL form; grpc://host:port
 	// for TCP (empty host = all interfaces) and unix:///path for a socket.
 	// The same service is served on every one of them.
@@ -638,6 +644,9 @@ func (a *Agent) serverEndpointFor(host string) string {
 // on the routable host (or on the listener's own address when it is bound
 // to one); "" without a TCP listener or a routable host.
 func (a *Agent) agentEndpointFor(host string) string {
+	if a.cfg.AdvertiseAgentEndpoint != "" {
+		return a.cfg.AdvertiseAgentEndpoint
+	}
 	tcp := a.agentTCP.Load()
 	if tcp == nil {
 		return ""

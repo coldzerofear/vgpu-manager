@@ -40,9 +40,14 @@ const (
 	VFIODeviceClassName = "vfio-manager"
 
 	IgnoreWebhookAnnotation = "vgpu-manager.io/ignore-webhook"
-	DRAOriResAnnotation     = "vgpu-manager.io/original-resources"
-	DRAOwnerKeyLabel        = "vgpu-manager.io/owner-key"
-	DRACreateTimeLabel      = "vgpu-manager.io/create-timestamp"
+	// NodeHostnameLabel ("true") opts a pod into having its hostname derived
+	// from the node it is going to run on, so that a DaemonSet pod gets a
+	// stable DNS name of its own through a headless service (see
+	// pkg/webhook/pod/hostname).
+	NodeHostnameLabel   = "vgpu-manager.io/node-hostname"
+	DRAOriResAnnotation = "vgpu-manager.io/original-resources"
+	DRAOwnerKeyLabel    = "vgpu-manager.io/owner-key"
+	DRACreateTimeLabel  = "vgpu-manager.io/create-timestamp"
 
 	SchedulerRoleLabel = "vgpu-manager.io/scheduler-role"
 	// SchedulerRoleValueLeader is the label value used to identify the leader pod.

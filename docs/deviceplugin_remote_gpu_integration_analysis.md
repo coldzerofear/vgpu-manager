@@ -1145,3 +1145,13 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
    调度器与 webhook（与 classic-local 相同，集群已有则跳过），外加一份 README（组件拓扑、标签分工、
    参数表、端口表、已知边界）。刻意把设备插件与数据面拆成两个 DaemonSet：滚动升级插件不该打断在跑的会话。
    剩余：chart 增补（`charts/vgpu-manager` 的远程角色开关）与主 README 的远程小节细化。
+   - **按域名寻址（2026-09-20，实机发现后补）**：默认仍是 hostNetwork（节点 IP 稳定、数据面不过 CNI），
+     但集群禁止 hostNetwork 时服务端 Pod 每次重建都换 IP，而 `LUPINE_SERVER` 是 `Allocate` 时烧进容器的、
+     容器重启不重注入 —— 于是给每个节点的服务端一个稳定域名：headless Service（`publishNotReadyAddresses: true`）
+     + 由 webhook 按目标节点名生成的 `spec.hostname`（新入口 `/pods/hostname`，Pod 模板标签
+     `vgpu-manager.io/node-hostname=true` opt-in，`failurePolicy: Fail`，同时注入 `HOSTNAME` 供 `1000 1000VAR)` 展开）。
+     agent 侧零改动地复用 `ADVERTISE_SERVER_ENDPOINT`，并新增 `ADVERTISE_AGENT_ENDPOINT`（否则 agent 自己的
+     endpoint 仍是 Pod IP，重建后要等一轮注解刷新）。节点名→DNS label 的转换会在需要改写时追加节点名摘要，
+     否则 `a.b` 与 `a-b` 会撞成同一个域名、把客户端引到另一台服务器。
+     消费侧要求：校验 webhook 拒绝 `access-mode: remote` 且 `dnsPolicy: Default`、或 `hostNetwork` + `ClusterFirst`
+     的 Pod（这两种解析不到集群域），`None` 要求自带 `dnsConfig.nameservers`。DRA 路径同一套机制、同样零代码改动。

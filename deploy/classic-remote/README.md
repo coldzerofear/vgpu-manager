@@ -30,6 +30,7 @@ CUDA 调用经 lupine 数据面落到 GPU 服务器节点的卡上。集群**不
 | `vgpu-manager=remote-server` / `vgpu-manager=remote-consumer` | **运维手动打** | 本目录各 DaemonSet 的 `nodeSelector` |
 | `nvidia.com/remote-server=true` | 服务者插件发布、退出时删；本地插件会清掉残留 | 调度器识别 GPU 服务器；同时让本地 Pod 避开该节点 |
 | `nvidia.com/remote-consumer=true` | 消费者插件发布、退出时删；本地插件会清掉残留 | 调度器识别可运行远程 Pod 的节点（还要求 `vgpu-number` 可分配 > 0） |
+| `vgpu-manager.io/node-hostname=true`（Pod 模板标签） | **运维在清单里打开**（默认注释） | 让 webhook 按节点名生成 `spec.hostname` 并注入 `HOSTNAME`，见"按域名寻址" |
 | `nvidia.com/remote-endpoints`（注解） | 服务者插件发布、每 5s 刷新、退出时删；本地插件会清掉残留 | agent / lupine-server 地址与服务器 CUDA 版本；服务不可用时发布 `{}`，调度器随即跳过该节点 |
 
 **不要**把 `nvidia.com/remote-*` 当 DaemonSet 的 `nodeSelector`：它们由插件自己发布，插件没起来时并不存在。
@@ -86,6 +87,56 @@ spec:
 容器里 `nvidia-smi` 看到的是远程会话视图（新版 client 制品自带 `nvidia-smi`，插件会只读挂到
 `/usr/bin/nvidia-smi`）；`LUPINE_SERVER` / `LUPINE_SESSION` 由插件注入，不要自己写。
 
+## 按域名寻址（集群禁止 hostNetwork 时）
+
+默认形态是 `hostNetwork: true`：节点 IP 天生稳定，数据面也不经 CNI 封装。但如果集群策略
+禁止 hostNetwork（PSS `baseline` 连 hostPort 一起禁），服务端 Pod 每次重建都会换 IP，而
+**`LUPINE_SERVER` 是在 `Allocate` 时烧进容器环境的、容器重启不会重新注入**——于是所有连着
+旧 IP 的远程容器都恢复不了，只能删 Pod 重新调度。
+
+解决办法是给每个节点的服务端 Pod 一个稳定域名（headless Service + 按节点名生成的 hostname）：
+
+```
+<spec.hostname>.<headless svc>.<namespace>.svc.<cluster domain>
+```
+
+DaemonSet 自己做不到这件事：它只有一份 Pod 模板，而 `spec.hostname` 不支持字段引用。所以由
+webhook 在准入时按目标节点名生成——依次从 `spec.nodeName`、`spec.affinity.nodeAffinity` 的
+`matchFields[metadata.name]`（DaemonSet 控制器写的就是这个）、`spec.nodeSelector` 里取节点名。
+
+**切换步骤**（都在 `vgpu-manager-remote-gpu-server.yaml` 里，按注释打开）：
+
+1. 部署**本目录的** webhook（多了 `/pods/hostname` 入口；classic-local 那份没有，也没有校验入口）；
+2. Pod 模板标签打开 `vgpu-manager.io/node-hostname: "true"`；
+3. `hostNetwork: false`、`dnsPolicy: ClusterFirst`、`subdomain: vgpu-manager-remote-gpu-server-headless`；
+4. remote-agent 打开 `POD_NAMESPACE` / `HEADLESS_SERVICE_NAME` / `CLUSTER_DOMAIN` /
+   `ADVERTISE_SERVER_ENDPOINT` / `ADVERTISE_AGENT_ENDPOINT` 这一组环境变量。
+
+几个要点：
+
+- **节点名 → hostname 的转换**：节点名是 DNS *subdomain*（可带点、最长 253），而 `spec.hostname`
+  必须是 DNS *label*（不带点、最长 63）。需要改写时（含大写、下划线、点、超长）会追加节点名的
+  sha256 前 8 位，因为改写不是一对一的：没有这个后缀，`a.b` 与 `a-b` 会撞成同一个域名，
+  客户端可能被解析到**另一台** GPU 服务器上。
+- **`publishNotReadyAddresses: true`**（headless Service 上）：记录只要 Pod 有 IP 就存在。否则
+  Pod 就绪与否（三个容器全 Ready 才算）会牵动 DNS，monitor 探针抖一下整台服务器就解析不出来，
+  而重建期间的 NXDOMAIN 还会被 CoreDNS 否定缓存住（默认 30s）。服务端健康与否由
+  `remote-endpoints` 注解（探测失败发 `{}`）告诉调度器，不靠 DNS 表达。
+- **两个 ADVERTISE 都要开**：只开 server 那条时，agent 自己的 endpoint 仍是 Pod IP——设备插件
+  每 5s 刷新注解，所以 Pod 重建后要等一轮才恢复，窗口内的 `Allocate` 会 EnsureSession 失败。
+- **`failurePolicy: Fail`（`/pods/hostname` 入口）是刻意的**：`spec.hostname` 创建后不可改，
+  webhook 缺席时创建出来的 Pod 是永久坏的；拒绝创建让 DaemonSet 控制器过几秒重试即可自愈。
+  另一层保险：webhook 没生效时 `1000 1000HOSTNAME)` 会原样保留，agent 解析 endpoint 失败直接退出，
+  不会带着错地址上线。
+- **消费侧必须能解析集群 DNS**：默认 `ClusterFirst` 即可；`hostNetwork: true` 的业务 Pod 必须写
+  `dnsPolicy: ClusterFirstWithHostNet`。校验 webhook 会拒绝 `access-mode: remote` 且
+  `dnsPolicy: Default`、或 `hostNetwork` + `ClusterFirst` 的 Pod；`dnsPolicy: None` 要求自带
+  `dnsConfig.nameservers`（它是否解析集群域由运维负责）。
+- **代价**：数据面改走 CNI，overlay 封装与 MTU 会吃掉一部分 H2D/D2H 带宽；能用 hostNetwork 时
+  仍然推荐 hostNetwork。另外要放通消费 Pod → 服务端 Pod 的 14833/14834（NetworkPolicy）。
+- headless Service 在 hostNetwork 模式下也可以照常部署：那时记录解析到节点 IP，同一套寻址的
+  另一种落地，两种模式可以统一用域名下发。
+
 ## 需要自行修改的部署参数
 
 | 参数 | 位置 | 默认/占位值 | 说明 |
@@ -102,6 +153,7 @@ spec:
 | **SM watcher** | `deviceplugin-server.yaml` 与 `remote-gpu-server.yaml`（agent、monitor）三处 `FEATURE_GATES` / `--feature-gates` | 均开启 | 联动开关：**设备插件是写方**（节点级 SM 采样写到 `/etc/vgpu-manager/watcher/sm_util.config`），agent 把会话标记为使用它，monitor 读它。关就三处一起关 |
 | **monitor 端口** | `remote-gpu-server.yaml` `--server-bind-port` | `3456` | hostNetwork，与节点上其他进程冲突时改（Service targetPort 联动） |
 | **客户端 etag 校验** | `deviceplugin-consumer.yaml` `IGNORE_CLIENT_SHIM_ETAG` 注释块 | 关闭（即校验） | 打开后不注入 `LUPINE_CLIENT_ETAG`/`LUPINE_CLIENT_PLATFORM`，服务端无法校验 client 构建，不匹配会延后成运行时错误 |
+| **稳定域名** | `vgpu-manager-remote-gpu-server.yaml` 的 node-hostname 标签 / `subdomain` / `ADVERTISE_*`（默认注释） | 关闭（用 hostNetwork） | 见上一节"按域名寻址"；`CLUSTER_DOMAIN` 按集群的 `--cluster-domain` 改 |
 | **命名空间** | 全部文件 | `kube-system` | 整体替换时注意 webhook 证书 dnsNames 联动 |
 | **资源域名** | 各组件 `--domain`（未设 = `nvidia.com`） | `nvidia.com` | 改它会同时改掉资源名与所有注解/标签前缀，所有组件必须一起改 |
 

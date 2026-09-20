@@ -193,6 +193,41 @@ webhooks:
         scope: "Namespaced"
     sideEffects: NoneOnDryRun
     timeoutSeconds: 10
+  # 给 DaemonSet Pod 按节点名生成稳定的 spec.hostname（+ HOSTNAME 环境变量），配合 headless
+  # Service 让每个节点的远程 GPU 服务端有一个自己的域名。必须是独立入口：上面那条排除了
+  # kube-system 命名空间、也排除了带 vgpu-manager.io/ignore-webhook=true 的 Pod，而远程
+  # GPU 服务端两条都撞上。
+  #
+  # failurePolicy 用 Fail 是刻意的：spec.hostname 创建后不可改，webhook 缺席时创建出来的
+  # Pod 是永久坏的（域名永远不会存在），拒绝创建反而能让 DaemonSet 控制器过几秒重试、
+  # webhook 一起来就自愈。
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      service:
+        name: vgpu-manager-webhook
+        namespace: kube-system
+        path: /pods/hostname
+        port: 443
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    name: nodehostname.vgpu-manager.io
+    objectSelector:
+      matchLabels:
+        vgpu-manager.io/node-hostname: "true"
+    reinvocationPolicy: Never
+    rules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+        resources:
+          - pods
+        scope: "Namespaced"
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration

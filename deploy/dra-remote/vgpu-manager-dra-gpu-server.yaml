@@ -64,6 +64,10 @@ spec:
       labels:
         app: vgpu-manager-dra-gpu-server
         vgpu-manager.io/ignore-webhook: "true"
+        # 【按域名寻址时打开】让 webhook 按本 Pod 所在节点名生成 spec.hostname 并注入
+        # HOSTNAME 环境变量，配合 subdomain 与本文件末尾的 headless Service 得到每节点
+        # 一个稳定域名（详见 deploy/classic-remote/README.md 的"按域名寻址"一节）。
+#        vgpu-manager.io/node-hostname: "true"
     spec:
       tolerations:
         - key: CriticalAddonsOnly
@@ -79,8 +83,12 @@ spec:
       # 无 hostPID 两者对不上，限额静默失效（设计 D9/§1.6.6）。
       hostPID: true
       # endpoint = 节点 IP:14833；lupine-server/agent 直接监听 underlay 网卡。
+      # 推荐形态：数据面不经 CNI 封装，且节点 IP 天然稳定。集群禁止 hostNetwork 时改成
+      #   hostNetwork: false / dnsPolicy: ClusterFirst / subdomain: <headless Service 名>
+      # 并打开上面的 node-hostname 标签与下面的两个 ADVERTISE_* 环境变量。
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+#      subdomain: vgpu-manager-dra-gpu-server-headless
       priorityClassName: system-node-critical
       nodeSelector:
         # 与 dra-server 同一组标签：两个 DaemonSet 必须落在同一批 GPU 节点
@@ -132,6 +140,22 @@ spec:
             # 可选：对外 endpoint 由运维指定（DNS/网关，URL 形态），跳过自动发现、不做探测。
             # - name: ADVERTISE_SERVER_ENDPOINT
             #   value: "https://gpu-a.corp/pool-a"
+            #
+            # 【按域名寻址时打开这一组】HOSTNAME 由 webhook 按节点名注入；两个 ADVERTISE_*
+            # 让 agent 把域名（而不是 Pod IP）报出去，dra-server 再发布成设备属性
+            # serverEndpoint / agentEndpoint。少了 agent 那条，inject 侧会拿到 Pod IP。
+#            - name: POD_NAMESPACE
+#              valueFrom:
+#                fieldRef:
+#                  fieldPath: metadata.namespace
+#            - name: HEADLESS_SERVICE_NAME
+#              value: "vgpu-manager-dra-gpu-server-headless"
+#            - name: CLUSTER_DOMAIN
+#              value: "cluster.local"
+#            - name: ADVERTISE_SERVER_ENDPOINT
+#              value: "http://1000 1000HOSTNAME).1000 1000HEADLESS_SERVICE_NAME).1000 1000POD_NAMESPACE).svc.1000 1000CLUSTER_DOMAIN):14833"
+#            - name: ADVERTISE_AGENT_ENDPOINT
+#              value: "grpc://1000 1000HOSTNAME).1000 1000HEADLESS_SERVICE_NAME).1000 1000POD_NAMESPACE).svc.1000 1000CLUSTER_DOMAIN):14834"
             # gRPC 监听，逗号分隔可多个：grpc://:14834 供其他节点的 dra-inject 调 EnsureSession；
             # 追加 unix:///etc/vgpu-manager/agent.sock 可让同节点的 dra-server 走套接字
             - name: LISTEN_SERVER_ENDPOINT        # ← EnsureSession gRPC 端口(hostNetwork)
@@ -381,3 +405,31 @@ spec:
   selector:
     app: vgpu-manager-dra-gpu-server
   type: ClusterIP
+---
+# 每节点一个稳定域名：<spec.hostname>.<本 Service 名>.<namespace>.svc.<cluster domain>
+# spec.hostname 由 webhook 按节点名生成（标签 vgpu-manager.io/node-hostname=true），
+# Pod 的 subdomain 必须等于本 Service 名。inject 注入给消费容器的 LUPINE_SERVER 是这个
+# 域名，所以服务端 Pod 重建换 IP 后，容器重启即可恢复。
+#
+# publishNotReadyAddresses: true 是刻意的：记录只要 Pod 有 IP 就存在，不随就绪状态抖动
+# （服务端健康与否由设备属性/污点告诉调度器，不靠 DNS 表达），也避免重建期间 NXDOMAIN
+# 被 CoreDNS 否定缓存住。hostNetwork 模式下部署它同样有效：记录解析到节点 IP。
+apiVersion: v1
+kind: Service
+metadata:
+  name: vgpu-manager-dra-gpu-server-headless
+  namespace: kube-system
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: vgpu-manager-dra-gpu-server
+  ports:
+    - name: http
+      port: 14833
+      protocol: TCP
+      targetPort: http
+    - name: grpc
+      port: 14834
+      protocol: TCP
+      targetPort: grpc

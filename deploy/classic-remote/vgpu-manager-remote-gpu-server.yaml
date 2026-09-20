@@ -59,6 +59,10 @@ spec:
       labels:
         app: vgpu-manager-remote-gpu-server
         vgpu-manager.io/ignore-webhook: "true"
+        # 【按域名寻址时打开】让 webhook 按本 Pod 所在节点名生成 spec.hostname 并注入 HOSTNAME
+        # 环境变量，配合下面的 subdomain 与 headless Service 得到每节点一个稳定域名。
+        # 需要部署本目录的 webhook（它多了一个 /pods/hostname 入口）。
+#        vgpu-manager.io/node-hostname: "true"
     spec:
       tolerations:
         - key: CriticalAddonsOnly
@@ -74,8 +78,16 @@ spec:
       # 无 hostPID 两者对不上，限额与监控静默失效。
       hostPID: true
       # endpoint = 节点 IP:14833/:14834；lupine-server 与 agent 直接监听 underlay 网卡。
+      # 这也是推荐形态：数据面不经 CNI 封装，且节点 IP 天然稳定（Pod 重建后地址不变）。
+      #
+      # 【集群禁止 hostNetwork 时】改成下面这套按域名寻址（见 README"按域名寻址"一节）：
+      #   hostNetwork: false
+      #   dnsPolicy: ClusterFirst
+      #   subdomain: vgpu-manager-remote-gpu-server-headless   # = 本文件末尾 headless Service 名
+      # 并打开上面的 node-hostname 标签与 remote-agent 的两个 ADVERTISE_* 环境变量。
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+#      subdomain: vgpu-manager-remote-gpu-server-headless
       priorityClassName: system-node-critical
       nodeSelector:
         # 运维打的标签。注意不要用 nvidia.com/remote-server：那一个是设备插件自己发布的，
@@ -132,6 +144,22 @@ spec:
             # 可选：对外 endpoint 由运维指定（DNS/网关，URL 形态），跳过自动发现、不做探测。
             # - name: ADVERTISE_SERVER_ENDPOINT
             #   value: "https://gpu-a.corp/pool-a"
+            #
+            # 【按域名寻址时打开这一组】HOSTNAME 由 webhook 按节点名注入；两个 ADVERTISE_*
+            # 让 agent 把域名（而不是 Pod IP）报给设备插件去发布。少了 agent 那条，消费侧
+            # 会拿到 Pod IP：每次 Pod 重建后要等一轮（5s）注解刷新才恢复。
+#            - name: POD_NAMESPACE
+#              valueFrom:
+#                fieldRef:
+#                  fieldPath: metadata.namespace
+#            - name: HEADLESS_SERVICE_NAME
+#              value: "vgpu-manager-remote-gpu-server-headless"
+#            - name: CLUSTER_DOMAIN
+#              value: "cluster.local"
+#            - name: ADVERTISE_SERVER_ENDPOINT
+#              value: "http://1000 1000HOSTNAME).1000 1000HEADLESS_SERVICE_NAME).1000 1000POD_NAMESPACE).svc.1000 1000CLUSTER_DOMAIN):14833"
+#            - name: ADVERTISE_AGENT_ENDPOINT
+#              value: "grpc://1000 1000HOSTNAME).1000 1000HEADLESS_SERVICE_NAME).1000 1000POD_NAMESPACE).svc.1000 1000CLUSTER_DOMAIN):14834"
             # gRPC 监听，逗号分隔可多个：grpc://:14834 供消费节点的设备插件调 EnsureSession /
             # FetchClientBundle；追加 unix 套接字供同节点的设备插件（server 角色）探测 ServerInfo。
             - name: LISTEN_SERVER_ENDPOINT
@@ -374,3 +402,34 @@ spec:
   selector:
     app: vgpu-manager-remote-gpu-server
   type: ClusterIP
+---
+# 每节点一个稳定域名：<spec.hostname>.<本 Service 名>.<namespace>.svc.<cluster domain>
+# spec.hostname 由 webhook 按节点名生成（标签 vgpu-manager.io/node-hostname=true），
+# Pod 的 subdomain 必须等于本 Service 名。消费容器拿到的 LUPINE_SERVER 是这个域名，
+# 所以服务端 Pod 重建换 IP 后，连着它的容器重启即可恢复，不需要删 Pod 重新调度。
+#
+# publishNotReadyAddresses: true 是刻意的：记录只要 Pod 有 IP 就存在。否则 Pod 就绪与否
+# （三个容器全 Ready 才算）会牵动 DNS，monitor 探针抖一下整台服务器就解析不出来了，而且
+# 重建期间的 NXDOMAIN 会被 CoreDNS 否定缓存住（默认 30s）。服务端健康与否由节点注解
+# nvidia.com/remote-endpoints（探测失败发 {}）告诉调度器，不靠 DNS 表达。
+#
+# hostNetwork 模式下同样可以部署它：那时记录解析到节点 IP，是同一套寻址的另一种落地。
+apiVersion: v1
+kind: Service
+metadata:
+  name: vgpu-manager-remote-gpu-server-headless
+  namespace: kube-system
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: vgpu-manager-remote-gpu-server
+  ports:
+    - name: http
+      port: 14833
+      protocol: TCP
+      targetPort: http
+    - name: grpc
+      port: 14834
+      protocol: TCP
+      targetPort: grpc

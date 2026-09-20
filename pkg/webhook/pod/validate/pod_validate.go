@@ -72,11 +72,17 @@ type validateHandle struct {
 }
 
 func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod, dryRun bool) error {
-	if _, err := util.PodVGPUAccessMode(pod); err != nil {
+	accessMode, err := util.PodVGPUAccessMode(pod)
+	if err != nil {
 		return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
 			field.Invalid(field.NewPath("metadata").Child("annotations").Key(util.VGPUAccessModeAnnotation),
 				pod.Annotations[util.VGPUAccessModeAnnotation], err.Error()),
 		})
+	}
+	if accessMode == util.AccessModeRemote {
+		if errs := checkClusterDNS(pod); len(errs) > 0 {
+			return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, errs)
+		}
 	}
 	if h.options.DRAAdmissionEnabled {
 		if err := h.checkResourceClaimRequests(ctx, pod); err != nil {
@@ -925,4 +931,38 @@ func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admi
 	}
 	// Return allowed if everything succeeded.
 	return admission.Allowed("").WithWarnings(warnings...)
+}
+
+// checkClusterDNS refuses a remote vGPU pod that cannot resolve names in the
+// cluster. The GPU server it is given is addressed by whatever its node
+// publishes, and where hostNetwork is not allowed on the server side that is
+// an in-cluster DNS name of a headless service (see pkg/webhook/pod/hostname);
+// a pod that resolves through the node's resolver instead would fail to
+// connect at runtime, with nothing in its own spec to explain why.
+//
+//   - Default resolves through the node's resolv.conf, which does not serve
+//     cluster names;
+//   - ClusterFirst together with hostNetwork behaves as Default -- Kubernetes
+//     requires ClusterFirstWithHostNet for a host-network pod to use cluster
+//     DNS;
+//   - None is left to the author: it carries its own dnsConfig, and whether
+//     those servers answer for the cluster zone is not ours to judge.
+func checkClusterDNS(pod *corev1.Pod) field.ErrorList {
+	path := field.NewPath("spec").Child("dnsPolicy")
+	switch pod.Spec.DNSPolicy {
+	case corev1.DNSDefault:
+		return field.ErrorList{field.Invalid(path, pod.Spec.DNSPolicy,
+			"a remote vGPU pod resolves its GPU server through cluster DNS, which this policy does not use: use ClusterFirst, or ClusterFirstWithHostNet with spec.hostNetwork")}
+	case corev1.DNSClusterFirst:
+		if pod.Spec.HostNetwork {
+			return field.ErrorList{field.Invalid(path, pod.Spec.DNSPolicy,
+				"a host-network pod needs ClusterFirstWithHostNet to use cluster DNS, which a remote vGPU pod resolves its GPU server through")}
+		}
+	case corev1.DNSNone:
+		if pod.Spec.DNSConfig == nil || len(pod.Spec.DNSConfig.Nameservers) == 0 {
+			return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsConfig"), pod.Spec.DNSConfig,
+				"dnsPolicy None needs nameservers of its own, and they must answer for the cluster zone: a remote vGPU pod resolves its GPU server through it")}
+		}
+	}
+	return nil
 }
