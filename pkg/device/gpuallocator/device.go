@@ -153,6 +153,11 @@ func (o *deviceListBuilder) build() (DeviceList, error) {
 		devices = append(devices, device)
 	}
 
+	// Resolved once for the node and threaded into every pair comparison so
+	// that GPUs sitting on two independent NVSwitch fabrics are not mistaken
+	// for NVLink peers. Unknown identities keep the fabric-agnostic behaviour.
+	cliques := links.FabricCliques(o.nvmllib, nvmlDevices)
+
 	nvlinkEdges := 0
 	for i, d1 := range nvmlDevices {
 		for j, d2 := range nvmlDevices {
@@ -165,7 +170,7 @@ func (o *deviceListBuilder) build() (DeviceList, error) {
 					devices[i].Links[j] = append(devices[i].Links[j], P2PLink{devices[j], p2plink})
 				}
 
-				nvlink, err := links.GetNVLink(d1, d2)
+				nvlink, err := links.GetNVLinkWithCliques(d1, d2, cliques[i], cliques[j])
 				if err != nil {
 					return nil, fmt.Errorf("error getting NVLink for devices (%v, %v): %v", i, j, err)
 				}
