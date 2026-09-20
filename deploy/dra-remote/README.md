@@ -12,6 +12,7 @@
 | `vgpu-manager-dra-gpu-server.yaml` | remote-agent + lupine-server + device-monitor（一个 DaemonSet 三容器） | GPU 节点（`vgpu-manager.io/remote-server=true`） | 会话物化/EnsureSession gRPC(:14834)、远程 GPU 数据面(:14833)、指标（远程会话按 PID 归账） |
 | `vgpu-manager-dra-remote-server.yaml` | kubelet-plugin `--plugin-mode=server` | GPU 节点（同上标签） | **只发布不分配**：设备叠加 `accessMode=remote`/`endpoint` 属性、pool nodeSelector 放宽；不向 kubelet 注册 DRA 服务 |
 | `vgpu-manager-dra-remote-inject.yaml` | kubelet-plugin `--plugin-mode=inject` + （可选）client 制品 init 容器 + 远程 DeviceClass | 消费节点 **及 GPU 节点**（`vgpu-manager.io/remote-inject=true`） | 节点上唯一注册的 DRA 插件：令牌/EnsureSession 屏障/env+CDI 注入；铺 lupine-client 版本目录 |
+| `vgpu-manager-dra-gpu-server-networkpolicy.yaml` | NetworkPolicy（可选） | GPU 节点的服务端 Pod | 只在 `hostNetwork: false` **且**命名空间有 default-deny 时才需要，见"按域名寻址" |
 | `vgpu-manager-dra-webhook.yaml` | device-webhook | 控制面节点 | 准入 + 资源声明→DRA 转换（转到 `vgpu-manager` class） |
 
 关键拓扑约束（v2.1 设计）：GPU 节点上 server 插件只发布、inject 插件独占 kubelet 注册；
@@ -91,8 +92,12 @@ device-webhook 在准入时按目标节点名生成（本目录的 webhook 清�
   `dnsPolicy: ClusterFirstWithHostNet`。校验 webhook 会拒绝 `vgpu-access-mode: remote` 且
   `dnsPolicy: Default`、或 `hostNetwork` + `ClusterFirst` 的 Pod；`None` 要求自带 `dnsConfig.nameservers`。
 - **代价**：数据面改走 CNI，overlay 封装与 MTU 会吃掉一部分 H2D/D2H 带宽；能用 hostNetwork 时仍然推荐
-  hostNetwork。另外要放通消费 Pod → 服务端 Pod 的 14833/14834。headless Service 在 hostNetwork 模式下
-  也可以照常部署，那时记录解析到节点 IP。
+  hostNetwork。headless Service 在 hostNetwork 模式下也可以照常部署，那时记录解析到节点 IP。
+- **命名空间有 default-deny 时**再部署 `vgpu-manager-dra-gpu-server-networkpolicy.yaml`：它给出服务端入站的
+  最小集合（14833 来自所有命名空间的 Pod——远程负载是任意业务 Pod；14834 来自 dra-inject；3456 按需打开），
+  只声明 Ingress（出站要放行 API server 与 DNS，地址随集群而变，模板在文件末尾）。没有 default-deny 时
+  不要部署它：那是收紧而不是放行。kubelet 探针来自节点而非 Pod，只能用 `ipBlock` 表达（Calico / Cilium
+  默认放行 host → 本机 Pod，通常不必加）；策略由 CNI 执行，Flannel 这类没有策略插件的 CNI 会直接忽略。
 
 ## 端口一览（GPU 节点 hostNetwork）
 

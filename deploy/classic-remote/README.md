@@ -15,6 +15,7 @@ CUDA 调用经 lupine 数据面落到 GPU 服务器节点的卡上。集群**不
 | `vgpu-manager-remote-gpu-server.yaml` | remote-agent + lupine-server + device-monitor（一个 DaemonSet 三容器） | GPU 节点（`vgpu-manager=remote-server`） | 会话物化/回收 + EnsureSession/FetchClientBundle gRPC(:14834)、远程 GPU 数据面(:14833)、指标(:3456，远程容器按会话 PID 归账) |
 | `vgpu-manager-deviceplugin-server.yaml` | device-plugin `--remote-server` | GPU 节点（同上标签） | 发布节点设备注册、`remote-server` 角色标签与 `remote-endpoints` 注解、注册 `vgpu-number`；**拒绝一切 Allocate**（本地 Pod 不该来这里） |
 | `vgpu-manager-deviceplugin-consumer.yaml` | device-plugin `--remote-consumer` | 消费节点（`vgpu-manager=remote-consumer`） | 注册 `vgpu-number` 槽位、发布 `remote-consumer` 标签；Allocate 时建会话、备客户端 shim、注入环境与挂载 |
+| `vgpu-manager-remote-gpu-server-networkpolicy.yaml` | NetworkPolicy（可选） | GPU 节点的服务端 Pod | 只在 `hostNetwork: false` **且**命名空间有 default-deny 时才需要，见"按域名寻址"末尾 |
 | `vgpu-manager-webhook.yaml` | device-webhook | 控制面 | 校验 `vgpu-access-mode` 注解与远程 Pod 的 DNS 策略；按节点名给 DaemonSet Pod 生成稳定 hostname（`/pods/hostname`，见"按域名寻址"）。需 cert-manager |
 
 一个进程同时承担两种角色也是支持的：GPU 节点想顺带消费自己的卡，就给同一个 DaemonSet 加上
@@ -49,6 +50,7 @@ kubectl apply -f vgpu-manager-scheduler.yaml          # 已部署 classic-local 
 kubectl apply -f vgpu-manager-remote-gpu-server.yaml
 kubectl apply -f vgpu-manager-deviceplugin-server.yaml
 kubectl apply -f vgpu-manager-deviceplugin-consumer.yaml
+kubectl apply -f vgpu-manager-remote-gpu-server-networkpolicy.yaml   # 仅 hostNetwork=false + default-deny 命名空间需要
 kubectl apply -f vgpu-manager-webhook.yaml            # 需 cert-manager。即使已装过 classic-local 的那份也要用本文件：
                                                       # 它多了 /pods/hostname 入口与 Pod 校验入口（classic-local 只有变更入口）
 
@@ -137,6 +139,29 @@ webhook 在准入时按目标节点名生成——依次从 `spec.nodeName`、`s
   仍然推荐 hostNetwork。另外要放通消费 Pod → 服务端 Pod 的 14833/14834（NetworkPolicy）。
 - headless Service 在 hostNetwork 模式下也可以照常部署：那时记录解析到节点 IP，同一套寻址的
   另一种落地，两种模式可以统一用域名下发。
+
+### 网络策略（default-deny 命名空间才需要）
+
+换到 Pod 网络之后，流量才受 NetworkPolicy 管（hostNetwork 的 Pod 不走 Pod 网络，策略对它不生效）。
+`vgpu-manager-remote-gpu-server-networkpolicy.yaml` 给出服务端**入站**的最小集合：
+
+| 端口 | 来源 | 说明 |
+|---|---|---|
+| 14833 | **所有命名空间的 Pod** | 远程 Pod 里的 client shim 直连数据面；远程负载是任意命名空间的业务 Pod，只在固定几个命名空间跑时可收紧 |
+| 14834 | 消费者插件（按 app 标签，跨命名空间） | EnsureSession / ReleaseSessions / FetchClientBundle |
+| 3456 | 监控组件 | 注释掉的，按你的监控所在命名空间打开 |
+
+注意三点：
+
+- **没有 default-deny 时不要部署它**：没有任何策略选中服务端 Pod 时本来就是全通的，部署它是**收紧**
+  而不是放行，先确认上面的入站集合对你的集群是完整的；
+- **只声明了 Ingress**：出站要放行 API server（agent 与 monitor 的 informer）与 DNS，地址随集群而变，
+  猜错会让 agent 静默失去 Pod/Node 事件；文件末尾给了出站模板，`ipBlock` 需要自己填（注意要填
+  API server 的**端点地址**，不是 `kubernetes` 服务的 ClusterIP——策略在 DNAT 之前生效）；
+- **kubelet 探针来自节点而不是 Pod**：NetworkPolicy 里只能用 `ipBlock` 表达。Calico / Cilium 默认放行
+  host → 本机 Pod，通常不必加；部署后探针开始失败就把节点网段填进文件里注释好的那一条。
+  消费侧插件若被改成 hostNetwork 部署，源地址同样是节点 IP，14834 也要这样放行。
+- 策略由 CNI 执行，Flannel 这类不带策略插件的 CNI 会直接忽略（部署了也不会有任何效果）。
 
 ## 需要自行修改的部署参数
 
