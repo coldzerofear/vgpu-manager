@@ -83,12 +83,15 @@ spec:
       # 无 hostPID 两者对不上，限额静默失效（设计 D9/§1.6.6）。
       hostPID: true
       # endpoint = 节点 IP:14833；lupine-server/agent 直接监听 underlay 网卡。
-      # 推荐形态：数据面不经 CNI 封装，且节点 IP 天然稳定。集群禁止 hostNetwork 时改成
-      #   hostNetwork: false / dnsPolicy: ClusterFirst / subdomain: <headless Service 名>
+      # 推荐形态：数据面不经 CNI 封装，且节点 IP 天然稳定。
+      #
+      # 【集群禁止 hostNetwork 时】改成下面这套按域名寻址（见 README"按域名寻址"一节）：
+      #   hostNetwork: false
+      #   dnsPolicy: ClusterFirst
+      #   subdomain: vgpu-manager-remote-gpu-server-headless   # = 本文件末尾 headless Service 名
       # 并打开上面的 node-hostname 标签与下面的两个 ADVERTISE_* 环境变量。
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
-#      subdomain: vgpu-manager-dra-gpu-server-headless
       priorityClassName: system-node-critical
       nodeSelector:
         # 与 dra-server 同一组标签：两个 DaemonSet 必须落在同一批 GPU 节点
@@ -131,16 +134,16 @@ spec:
             # 的排序语义（新 pod 里 server 不该被上一个 pod 的文件放行）。
             - name: READY_FILE
               value: /run/vgpu/ready
+            - name: LISTEN_PORT
+              value: "14834"
+            - name: LUPINE_PORT
+              value: "14833"         # ← 与lupine-server的 LUPINE_PORT 保持一致
             # agent 探测 server 的地址（同 pod，host 留空 = 127.0.0.1）。host 是回环时，agent 会
             # 在本机地址里找一个 server 同样应答的（优先节点 InternalIP），作为对外 endpoint 经
             # ServerInfo 报给 dra-server，dra-server 再发布为设备属性——因此 dra-server 不再需要
             # 知道 lupine-server 的地址；改端口只改这里与 LUPINE_PORT。
             - name: REMOTE_SERVER_ENDPOINT
-              value: ":14833"                     # ← 与 LUPINE_PORT 保持一致
-            # 可选：对外 endpoint 由运维指定（DNS/网关，URL 形态），跳过自动发现、不做探测。
-            # - name: ADVERTISE_SERVER_ENDPOINT
-            #   value: "https://gpu-a.corp/pool-a"
-            #
+              value: ":$(LUPINE_PORT)"
             # 【按域名寻址时打开这一组】HOSTNAME 由 webhook 按节点名注入；两个 ADVERTISE_*
             # 让 agent 把域名（而不是 Pod IP）报出去，dra-server 再发布成设备属性
             # serverEndpoint / agentEndpoint。少了 agent 那条，inject 侧会拿到 Pod IP。
@@ -153,20 +156,20 @@ spec:
 #            - name: CLUSTER_DOMAIN
 #              value: "cluster.local"
 #            - name: ADVERTISE_SERVER_ENDPOINT
-#              value: "http://1000 1000HOSTNAME).1000 1000HEADLESS_SERVICE_NAME).1000 1000POD_NAMESPACE).svc.1000 1000CLUSTER_DOMAIN):14833"
+#              value: "http://$(HOSTNAME).$(HEADLESS_SERVICE_NAME).$(POD_NAMESPACE).svc.$(CLUSTER_DOMAIN):$(LUPINE_PORT)"
 #            - name: ADVERTISE_AGENT_ENDPOINT
-#              value: "grpc://1000 1000HOSTNAME).1000 1000HEADLESS_SERVICE_NAME).1000 1000POD_NAMESPACE).svc.1000 1000CLUSTER_DOMAIN):14834"
+#              value: "grpc://$(HOSTNAME).$(HEADLESS_SERVICE_NAME).$(POD_NAMESPACE).svc.$(CLUSTER_DOMAIN):$(LISTEN_PORT)"
             # gRPC 监听，逗号分隔可多个：grpc://:14834 供其他节点的 dra-inject 调 EnsureSession；
             # 追加 unix:///etc/vgpu-manager/agent.sock 可让同节点的 dra-server 走套接字
             - name: LISTEN_SERVER_ENDPOINT        # ← EnsureSession gRPC 端口(hostNetwork)
-              value: "grpc://:14834,unix:///etc/vgpu-manager/agent.sock"
+              value: "grpc://:$(LISTEN_PORT),unix:///etc/vgpu-manager/agent.sock"
             - name: CONTAINER_MANAGER_DIR
               value: /etc/vgpu-manager
             - name: FEATURE_GATES
               value: SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
             # 会话目录在 manager-root hostPath 下（与 lupine-server、monitor 共享）
             - name: VGPU_CONFIG_SESSION_BASE
-              value: /etc/vgpu-manager/remote-sessions
+              value: $(CONTAINER_MANAGER_DIR)/remote-sessions
             - name: SESSION_OWNER
               value: "claim"
           ports:
@@ -233,15 +236,17 @@ spec:
           env:
             - name: LUPINE_PORT
               value: "14833"                               # ← 服务端监听端口(hostNetwork)
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
             - name: VGPU_CONFIG_SESSION_BASE
-              value: /etc/vgpu-manager/remote-sessions
+              value: $(CONTAINER_MANAGER_DIR)/remote-sessions
             - name: VGPU_REMOTE_MODE
               value: "1"
             # 隔离库既是 LD_PRELOAD hook 库又是 lupine checkpoint provider，两个变量指向同一个 .so。
             # 它由 init-install 从 vgpu-manager 镜像落盘到节点 /etc/vgpu-manager/driver/，
             # 经 manager-root hostPath 挂进来，server 镜像里不需要自带。
             - name: LUPINE_CHECKPOINT_LIBRARY
-              value: /etc/vgpu-manager/driver/libvgpu-control.so
+              value: $(CONTAINER_MANAGER_DIR)/driver/libvgpu-control.so
             - name: CUDA_VISIBLE_DEVICES
               value: all
             - name: NVIDIA_VISIBLE_DEVICES
@@ -319,8 +324,10 @@ spec:
               value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
             - name: VGPU_CONFIG_SESSION_BASE
-              value: /etc/vgpu-manager/remote-sessions
+              value: $(CONTAINER_MANAGER_DIR)/remote-sessions
           securityContext:
             privileged: true
           resources: {}

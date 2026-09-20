@@ -199,7 +199,7 @@ func setHostnameEnv(pod *corev1.Pod, hostname string) {
 		if slicesContainsEnv(container.Env, HostnameEnv) {
 			continue
 		}
-		container.Env = append(container.Env, corev1.EnvVar{Name: HostnameEnv, Value: hostname})
+		container.Env = append([]corev1.EnvVar{{Name: HostnameEnv, Value: hostname}}, container.Env...)
 	}
 }
 
