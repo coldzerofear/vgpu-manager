@@ -24,6 +24,7 @@ import (
 	"github.com/Masterminds/semver"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
@@ -50,6 +51,11 @@ type GpuDeviceInfo struct {
 	// includes this GPU. Used to publish the `partition1`/`partition2`/
 	// `partition4`/`partition8` device attributes.
 	partitionsBySize map[int]int
+
+	// nvlink is this GPU's NVLink connectivity, resolved at discovery when the
+	// NVLinkTopologyAttributes gate is on. The zero value means "no NVLink
+	// peer, or not resolved", and publishes no attributes.
+	nvlink nvlinkTopology
 }
 
 // Represents a specific (concrete, incarnated, created) MIG device. Annotated
@@ -185,7 +191,31 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 		d.addFabricManagerAttributes(attrs)
 	}
 
+	if featuregates.Enabled(featuregates.NVLinkTopologyAttributes) {
+		d.addNVLinkTopologyAttributes(attrs)
+	}
+
 	return attrs
+}
+
+// addNVLinkTopologyAttributes publishes this GPU's NVLink connectivity. Both
+// attributes are omitted when unknown rather than published empty: a
+// matchAttribute constraint skips devices that lack the attribute, which is
+// exactly the right answer for a GPU that cannot offer NVLink.
+func (d *GpuDeviceInfo) addNVLinkTopologyAttributes(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute) {
+	if d == nil {
+		return
+	}
+	if d.nvlink.Clique != "" {
+		attrs[util.CliqueDeviceAttribute] = resourceapi.DeviceAttribute{
+			StringValue: ptr.To(d.nvlink.Clique),
+		}
+	}
+	if d.nvlink.Domain != "" {
+		attrs[util.NVLinkDomainDeviceAttribute] = resourceapi.DeviceAttribute{
+			StringValue: ptr.To(d.nvlink.Domain),
+		}
+	}
 }
 
 // addFabricManagerAttributes publishes the Fabric Manager-derived attributes
@@ -290,6 +320,14 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 			klog.V(4).Infof("No parent GPU for %s; skipping Fabric Manager attributes", d.CanonicalName())
 		} else {
 			d.parent.addFabricManagerAttributes(device.Attributes)
+		}
+	}
+
+	if featuregates.Enabled(featuregates.NVLinkTopologyAttributes) {
+		if d.parent == nil {
+			klog.V(4).Infof("No parent GPU for %s; skipping NVLink topology attributes", d.CanonicalName())
+		} else {
+			d.parent.addNVLinkTopologyAttributes(device.Attributes)
 		}
 	}
 

@@ -31,6 +31,20 @@ import (
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 )
 
+// setVGPUSupport saves and restores the process-wide VGPUSupport gate; not
+// parallel-safe. The gate defaults to enabled, so a test covering behaviour
+// that only exists with vGPU off has to say so explicitly.
+func setVGPUSupport(t *testing.T, enabled bool) {
+	t.Helper()
+	original := featuregates.Enabled(featuregates.VGPUSupport)
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(
+		map[string]bool{string(featuregates.VGPUSupport): enabled}))
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(
+			map[string]bool{string(featuregates.VGPUSupport): original}))
+	})
+}
+
 func TestValidateNoOverlappingPreparedDevices(t *testing.T) {
 	perGPU := &PerGPUAllocatableDevices{
 		allocatablesMap: map[PCIBusID]AllocatableDevices{
@@ -409,6 +423,7 @@ func TestSharingReferenceCountingHelpers(t *testing.T) {
 
 type testFMClient struct {
 	partitions     []fabricmanager.Partition
+	activatedIDs   []int
 	deactivatedIDs []int
 }
 
@@ -417,7 +432,10 @@ func (c *testFMClient) Shutdown() error { return nil }
 func (c *testFMClient) GetSupportedFabricPartitions() ([]fabricmanager.Partition, error) {
 	return c.partitions, nil
 }
-func (c *testFMClient) ActivateFabricPartition(id int) error { return nil }
+func (c *testFMClient) ActivateFabricPartition(id int) error {
+	c.activatedIDs = append(c.activatedIDs, id)
+	return nil
+}
 func (c *testFMClient) DeactivateFabricPartition(id int) error {
 	c.deactivatedIDs = append(c.deactivatedIDs, id)
 	return nil
@@ -427,6 +445,10 @@ func (c *testFMClient) IsFabricPartitionActive(id int) (bool, error) {
 }
 
 func TestDeactivateFabricPartitionRefCounting(t *testing.T) {
+	// Per-claim FM partitioning with consumable shares: a configuration that
+	// requires vGPU off, both because the two gates are mutually exclusive and
+	// because vGPU nodes drive one node-wide partition instead.
+	setVGPUSupport(t, false)
 	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
 		string(featuregates.FabricManagerPartitioning): true,
 		string(featuregates.ConsumableShares):          true,
@@ -852,4 +874,78 @@ func TestNormalizeAndValidateConfig(t *testing.T) {
 
 	_, err = normalizeAndValidateConfig(&resourceapi.ResourceClaim{})
 	require.Error(t, err)
+}
+
+// TestNodeFabricPartitionUnderVGPUSupport covers the vGPU FM policy: one
+// node-wide partition activated at startup, and no per-claim FM traffic at
+// all. Per-claim partitioning cannot work here because vGPU claims may hold
+// overlapping GPU sets, which Fabric Manager refuses to activate.
+func TestNodeFabricPartitionUnderVGPUSupport(t *testing.T) {
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+		string(featuregates.FabricManagerPartitioning): true,
+		string(featuregates.ConsumableShares):          false,
+	}))
+
+	// Two GPUs, and the partitions Fabric Manager supports over them: one per
+	// GPU, plus the pair.
+	newState := func(t *testing.T) (*DeviceState, *testFMClient) {
+		t.Helper()
+		client := &testFMClient{
+			partitions: []fabricmanager.Partition{
+				{ID: 1, GPUs: []fabricmanager.PartitionGPU{{PhysicalID: 1}}},
+				{ID: 2, GPUs: []fabricmanager.PartitionGPU{{PhysicalID: 2}}},
+				{ID: 3, GPUs: []fabricmanager.PartitionGPU{{PhysicalID: 1}, {PhysicalID: 2}}},
+			},
+		}
+		manager, err := fabricmanager.Open(client)
+		require.NoError(t, err)
+		return &DeviceState{
+			config:    &Config{Flags: &Flags{}},
+			fmManager: manager,
+			nvdevlib: &deviceLib{gpuInfosByUUID: map[string]*GpuDeviceInfo{
+				"GPU-0000": {GpuInfo: &nvidia.GpuInfo{UUID: "GPU-0000"}, gpuModuleID: 1},
+				"GPU-1111": {GpuInfo: &nvidia.GpuInfo{UUID: "GPU-1111"}, gpuModuleID: 2},
+			}},
+		}, client
+	}
+
+	t.Run("vgpu drives the node partition, not per-claim ones", func(t *testing.T) {
+		setVGPUSupport(t, true)
+		state, client := newState(t)
+
+		require.False(t, state.perClaimFabricPartitioning())
+		require.NoError(t, state.activateNodeFabricPartition())
+		require.Equal(t, []int{3}, client.activatedIDs,
+			"the node partition MUST be the one covering every GPU")
+	})
+
+	t.Run("without vgpu the claim path stays in charge", func(t *testing.T) {
+		setVGPUSupport(t, false)
+		state, _ := newState(t)
+
+		require.True(t, state.perClaimFabricPartitioning())
+	})
+
+	// A node whose GPUs do not form a partition must keep running: the
+	// partitionN attributes still work, and taking the node out of service
+	// over an unavailable optimisation would be worse than not having it.
+	t.Run("no partition covering every GPU is not a startup failure", func(t *testing.T) {
+		setVGPUSupport(t, true)
+		state, client := newState(t)
+		state.nvdevlib.gpuInfosByUUID["GPU-2222"] = &GpuDeviceInfo{
+			GpuInfo: &nvidia.GpuInfo{UUID: "GPU-2222"}, gpuModuleID: 3,
+		}
+
+		require.NoError(t, state.activateNodeFabricPartition())
+		require.Empty(t, client.activatedIDs)
+	})
+
+	t.Run("a node with no GPUs activates nothing", func(t *testing.T) {
+		setVGPUSupport(t, true)
+		state, client := newState(t)
+		state.nvdevlib.gpuInfosByUUID = map[string]*GpuDeviceInfo{}
+
+		require.NoError(t, state.activateNodeFabricPartition())
+		require.Empty(t, client.activatedIDs)
+	})
 }

@@ -105,6 +105,7 @@ devicePlugin:
 | `DevicePluginClientMode` | `false` | Alpha |
 | `NRISupport` | `false` | Alpha |
 | `FabricManagerPartitioning` | `false` | Alpha |
+| `NVLinkTopologyAttributes` | `false` | Alpha |
 | `DRAListTypeAttributes` | `false` | Alpha |
 
 ## Dependencies and mutual exclusions
@@ -315,9 +316,40 @@ is on.
 
 * action scope: kubelet-plugin
 
-Enables Fabric Manager (NVSwitch) partition management for full-GPU and VFIO devices. Prepare
-activates the FM partition whose member set exactly matches the claim's allocated GPUs, and fails if
-no partition matches. Requires Fabric Manager running with `FABRIC_MODE=1`.
+Enables Fabric Manager (NVSwitch) partition management. Requires Fabric Manager running with
+`FABRIC_MODE=1`. What it does depends on whether `VGPUSupport` is on:
+
+* **`VGPUSupport` off** (full-GPU and VFIO devices): Prepare activates the FM partition whose member
+  set exactly matches the claim's allocated GPUs, and fails if no partition matches. Unprepare
+  releases it.
+* **`VGPUSupport` on**: the node activates one partition covering all of its GPUs at startup, and
+  Prepare/Unprepare never touch Fabric Manager. Per-claim partitioning cannot work here — vGPU
+  devices allow multiple allocations, so claims hold overlapping rather than identical GPU sets and
+  FM refuses to activate an overlapping partition. Fabric isolation between claims is given up,
+  which vGPU cannot provide anyway since two claims may share one physical GPU. A node whose GPU
+  count is not a supported partition size logs a warning and leaves the fabric untouched; the
+  `partitionN` attributes are still published either way. The node partition is never deactivated,
+  so a node that ran this combination keeps it active until it reboots.
+
+### NVLinkTopologyAttributes
+
+* action scope: kubelet-plugin
+
+Publishes each device's NVLink connectivity as two attributes:
+
+* `clique` — the hardware fabric identity (`clique:<clusterUUID>.<cliqueID>`, from NVML). On MNNVL
+  systems one clique spans several nodes.
+* `nvlinkDomain` — equal exactly for GPUs that can reach each other over NVLink. It falls back to a
+  node-local connected-component key when the hardware reports no fabric identity, so it also works
+  on NVLink hardware without NVSwitch.
+
+A GPU with no NVLink peer publishes neither, so a `matchAttribute` constraint on `nvlinkDomain`
+correctly refuses it. This gate is what the webhook's `--link-topology-attribute=nvlinkDomain`
+depends on: enable it on every node that should be able to satisfy a `link` topology constraint
+before switching the webhook over, otherwise those pods become unschedulable.
+
+Independent of `FabricManagerPartitioning` — it reads fabric identities from NVML and never talks to
+Fabric Manager.
 
 ### DeviceMetadata
 

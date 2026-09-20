@@ -85,6 +85,16 @@ const (
 	// on, only full-GPU claims are.
 	FabricManagerPartitioning featuregate.Feature = "FabricManagerPartitioning"
 
+	// NVLinkTopologyAttributes makes the kubelet plugin publish each device's
+	// NVLink connectivity as the `clique` and `nvlinkDomain` attributes.
+	// `clique` is the hardware fabric identity (MNNVL cliques span nodes);
+	// `nvlinkDomain` is equal exactly for GPUs that can reach each other over
+	// NVLink, and is what a link-topology matchAttribute should constrain on.
+	// A GPU with no NVLink peer publishes neither, so a link constraint
+	// correctly refuses it. Independent of FabricManagerPartitioning: it reads
+	// fabric identities from NVML and never talks to Fabric Manager.
+	NVLinkTopologyAttributes featuregate.Feature = "NVLinkTopologyAttributes"
+
 	// DRAListTypeAttributes allows the GPU kubelet plugin to publish list-valued
 	// DRA device attributes. The cluster must have the Kubernetes feature gate
 	// of the same name enabled before enabling this in the driver.
@@ -212,6 +222,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		},
 	},
 	FabricManagerPartitioning: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 5),
+		},
+	},
+	NVLinkTopologyAttributes: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
