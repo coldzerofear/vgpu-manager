@@ -440,14 +440,20 @@ func (alloc *allocator) sendEventf(object runtime.Object, eventtype, reason, mes
 func (alloc *allocator) allocateByTopologyMode(
 	req *AllocationRequest, deviceStore []*device.Device, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, *reason.FilterReason) {
-	switch req.Topology.BaseTopology() {
-	case util.LinkTopology:
+	mode := req.Topology.BaseTopology()
+	switch mode {
+	case util.LinkTopology, util.PCIeTopology:
+		floor := topologyFloor(mode)
 		// Cross-pod anchor: when enabled and this pod belongs to a gang, find the
 		// NVLink component a sibling already pre-allocated on this node so we keep
 		// this pod's GPUs connected to them. -1 = no anchor (non-gang, gate off,
 		// or this is the gang's first pod here) → unchanged single-pod link path.
+		//
+		// pcie mode never anchors: every anchor key (component root, rail
+		// signature) is defined over NVLink components, so honouring one here
+		// would silently narrow a pcie request to an NVLink island.
 		anchorRoot := -1
-		if req.CrossPodTopology && (req.GangName != "" || req.ControllerOwner != nil) {
+		if mode == util.LinkTopology && req.CrossPodTopology && (req.GangName != "" || req.ControllerOwner != nil) {
 			if root, ok := alloc.nodeInfo.GangAnchorComponent(req.GangName, req.ControllerOwner, sets.New(req.Pod.UID)); ok {
 				// Priority 1: same-node sibling → exact NVLink component (UUID-based).
 				// Intra-node connectivity is a hard requirement (NVLink doesn't cross
@@ -461,32 +467,33 @@ func (alloc *allocator) allocateByTopologyMode(
 				anchorRoot = root
 			}
 		}
-		klog.V(4).InfoS("Pod Links device topology mode", "pod", klog.KObj(req.Pod),
-			"strict", req.TopologyStrict, "anchorComponent", anchorRoot, "dryRun", alloc.simulate)
-		if plan, ok := alloc.allocateLink(deviceStore, req, anchorRoot, needNumber); ok {
-			// Placed — but link mode promises NVLink, and the tier walk may have
-			// had to settle for less. Report that, because otherwise a pod that
-			// asked for NVLink and got a PCIe-switch group (or, on a link-less
-			// node, cards with no connectivity at all) is indistinguishable in
-			// the logs from one that got exactly what it wanted.
+		klog.V(4).InfoS("Pod link-tier device topology mode", "pod", klog.KObj(req.Pod), "mode", mode,
+			"floor", floor, "strict", req.TopologyStrict, "anchorComponent", anchorRoot, "dryRun", alloc.simulate)
+		if plan, ok := alloc.allocateLink(deviceStore, req, anchorRoot, needNumber, floor); ok {
+			// Placed — but the mode promises connectivity at the floor tier, and
+			// the tier walk may have had to settle for less. Report that, because
+			// otherwise a pod that asked for NVLink and got a PCIe-switch group
+			// (or, on a link-less node, cards with no connectivity at all) is
+			// indistinguishable in the logs from one that got exactly what it
+			// wanted.
 			//
 			// The DEGRADED SET IS STILL USED. It is chosen from the tightest
 			// tier that could host the request, so it is never worse than the
 			// non-topology fallback and usually better — discarding it just to
 			// signal the downgrade would trade real placement quality for a
 			// message. Strict never reaches here: allocateLink refuses anything
-			// below NVLink for it.
-			if plan.Tier != device.TierNVLink || plan.Spanned {
-				alloc.reportLinkDowngrade(req.Pod, plan, needNumber)
+			// below the floor for it.
+			if plan.Tier > floor || plan.Spanned {
+				alloc.reportLinkDowngrade(req.Pod, plan, needNumber, mode, floor)
 			}
 			alloc.recordOutcome(req, linkResult(plan), alignmentOf(req, anchorRoot))
 			return buildClaims(plan.Devices, needCores, needMemory), nil
 		}
 		if rsn := alloc.handleTopologyFallback(
 			req.Pod, req.TopologyStrict,
-			reason.LinkTopologyUnsatisfied, util.LinkTopology,
-			"Link topology", "non-topology allocation",
-			alloc.linkFallbackReason(needNumber)); rsn != nil {
+			topologyUnsatisfiedCode(mode), mode,
+			topologyAttemptKind(mode), "non-topology allocation",
+			alloc.linkFallbackReason(needNumber, floor)); rsn != nil {
 			return nil, rsn
 		}
 		// Non-strict fell all the way through to resource-ordered allocation.
@@ -555,16 +562,18 @@ func (alloc *allocator) handleTopologyFallback(
 // Returns (plan, true) on success; (nil, false) means the caller should fall
 // back (non-strict) or reject the node (strict). The plan carries the tier
 // actually achieved so the caller can report a downgrade — a non-strict request
-// can legitimately be placed BELOW NVLink, and that needs to be visible rather
-// than silently indistinguishable from a full-connectivity placement.
+// can legitimately be placed BELOW its floor, and that needs to be visible
+// rather than silently indistinguishable from a full-connectivity placement.
 //
-// strict is satisfied only when the chosen set is connected at the NVLink tier.
-// That check is a direct property of the selection — the tier the walk landed
-// on — rather than a post-hoc validation of an opaque search result, which is
-// what previously made it possible to receive a disconnected set and have to
-// re-verify it.
+// strict is satisfied only when the chosen set is connected at the floor tier
+// or tighter. That check is a direct property of the selection — the tier the
+// walk landed on — rather than a post-hoc validation of an opaque search
+// result, which is what previously made it possible to receive a disconnected
+// set and have to re-verify it.
+// floor is the loosest tier the caller's mode accepts; a plan at a TIGHTER
+// tier is better than asked for and is accepted too, since the tiers nest.
 func (alloc *allocator) allocateLink(
-	deviceStore []*device.Device, req *AllocationRequest, anchorRoot int, needNumber int,
+	deviceStore []*device.Device, req *AllocationRequest, anchorRoot int, needNumber int, floor device.LinkTier,
 ) (*linkPlan, bool) {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return nil, false
@@ -606,10 +615,10 @@ func (alloc *allocator) allocateLink(
 	}
 
 	// acceptable decides whether a plan honours the caller's contract. strict
-	// demands a single NVLink-connected set; non-strict takes whatever the tier
-	// walk produced.
+	// demands a single set connected at the floor tier or better; non-strict
+	// takes whatever the tier walk produced.
 	acceptable := func(p *linkPlan) bool {
-		return p != nil && (!req.TopologyStrict || (p.Tier == device.TierNVLink && !p.Spanned))
+		return p != nil && (!req.TopologyStrict || (p.Tier <= floor && !p.Spanned))
 	}
 
 	// Build the attempt list explicitly. A nil entry means "no window", so the
@@ -701,8 +710,9 @@ func alignmentOf(req *AllocationRequest, anchorRoot int) string {
 	}
 }
 
-// reportLinkDowngrade records that a non-strict link request was placed BELOW
-// the NVLink connectivity the mode promises.
+// reportLinkDowngrade records that a non-strict request was placed BELOW the
+// connectivity its mode promises — below floor, which is NVLink for link and
+// the PCIe switch tier for pcie.
 //
 // Before the tier walk there was no way to say this: the old search returned a
 // device set with no indication of how well connected it was, and only the
@@ -713,7 +723,7 @@ func alignmentOf(req *AllocationRequest, anchorRoot int) string {
 //
 // Emitted at most once per placement — the filter stops at the first node that
 // accepts the pod, and a downgrade is still an acceptance.
-func (alloc *allocator) reportLinkDowngrade(pod *corev1.Pod, plan *linkPlan, needNumber int) {
+func (alloc *allocator) reportLinkDowngrade(pod *corev1.Pod, plan *linkPlan, needNumber int, mode util.TopologyMode, floor device.LinkTier) {
 	achieved := plan.Tier.String()
 	if plan.Spanned {
 		// Spanning means the set could not be contained in ONE component even
@@ -723,12 +733,39 @@ func (alloc *allocator) reportLinkDowngrade(pod *corev1.Pod, plan *linkPlan, nee
 		achieved += " (spanning multiple components)"
 	}
 
-	klog.V(3).InfoS("Link topology downgraded", "node", alloc.nodeInfo.GetName(),
-		"pod", klog.KObj(pod), "want", device.TierNVLink.String(), "got", achieved, "devices", getDeviceUUIDs(plan.Devices))
+	klog.V(3).InfoS("Link topology downgraded", "node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod),
+		"mode", mode, "want", floor.String(), "got", achieved, "devices", getDeviceUUIDs(plan.Devices))
 
 	alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventTopologyFallback,
-		"Link topology downgraded on node %q: %d GPUs connected at %q, not NVLink; "+
-			"use link-strict to reject such nodes instead", alloc.nodeInfo.GetName(), needNumber, achieved)
+		"%s downgraded on node %q: %d GPUs connected at %q, not %q; "+
+			"use %s-strict to reject such nodes instead",
+		topologyAttemptKind(mode), alloc.nodeInfo.GetName(), needNumber, achieved, floor.String(), mode)
+}
+
+// topologyFloor is the loosest link tier a topology mode accepts. Callers only
+// reach it for modes handled by the tier walk; anything else is treated as the
+// tightest floor, which can only ever be more conservative.
+func topologyFloor(mode util.TopologyMode) device.LinkTier {
+	if mode == util.PCIeTopology {
+		return device.TierSwitch
+	}
+	return device.TierNVLink
+}
+
+// topologyUnsatisfiedCode is the filter reason a strict rejection carries.
+func topologyUnsatisfiedCode(mode util.TopologyMode) reason.Code {
+	if mode == util.PCIeTopology {
+		return reason.PCIeTopologyUnsatisfied
+	}
+	return reason.LinkTopologyUnsatisfied
+}
+
+// topologyAttemptKind names the mode in operator-facing events and messages.
+func topologyAttemptKind(mode util.TopologyMode) string {
+	if mode == util.PCIeTopology {
+		return "PCIe topology"
+	}
+	return "Link topology"
 }
 
 // allocateNUMA attempts to satisfy the request within a single NUMA node,
@@ -759,20 +796,20 @@ func (alloc *allocator) allocateNUMA(
 	return claims, true
 }
 
-func (alloc *allocator) linkFallbackReason(needNumber int) string {
+func (alloc *allocator) linkFallbackReason(needNumber int, floor device.LinkTier) string {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return "node has no GPU link topology"
 	}
 	// HasGPUTopology was true → the cause is connectivity, in one of two shapes:
-	// strict refused every plan because none reached TierNVLink, or an anchor /
-	// rail window left too few candidates to form a group at all.
+	// strict refused every plan because none reached the floor tier, or an
+	// anchor / rail window left too few candidates to form a group at all.
 	//
-	// Report the largest NVLink component, NOT the largest any-P2P one. The
-	// latter is the number the node-wide component map would give and it is
+	// Report the largest component AT THE FLOOR, not the largest any-P2P one.
+	// The latter is the number the node-wide component map would give and it is
 	// almost always the full card count (every GPU is PCIe-reachable), which
-	// would render as the nonsense "no NVLink set of 4 (largest component 8)".
-	return fmt.Sprintf("no NVLink-connected set of %d GPUs (largest NVLink component %d)",
-		needNumber, alloc.nodeInfo.LinkTierMaxComponentSize(device.TierNVLink))
+	// would render as the nonsense "no nvlink set of 4 (largest component 8)".
+	return fmt.Sprintf("no %s-connected set of %d GPUs (largest %s component %d)",
+		floor.String(), needNumber, floor.String(), alloc.nodeInfo.LinkTierMaxComponentSize(floor))
 }
 
 func (alloc *allocator) numaFallbackReason(needNumber int, deviceStore []*device.Device) string {

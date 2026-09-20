@@ -435,6 +435,16 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 					Requests:       []string{request.Name},
 					MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.NVLinkDomainDeviceAttribute),
 				})
+			case util.PCIeTopology:
+				// pcieDomain, not the standard pcieRoot: a root complex groups
+				// GPUs that may still have to cross the host bridge to talk,
+				// while the extender's pcie mode means peer-to-peer DMA that
+				// does not. pcieRoot stays available for hand-written claims
+				// that need one topology key shared with other DRA drivers.
+				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+					Requests:       []string{request.Name},
+					MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.PCIeDomainDeviceAttribute),
+				})
 			case util.NUMATopology:
 				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
 					Requests:       []string{request.Name},

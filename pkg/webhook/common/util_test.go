@@ -69,6 +69,21 @@ func TestBuildResourceClaimTopologyConstraint(t *testing.T) {
 		require.Equal(t, []resourceapi.FullyQualifiedName{nvlinkDomain}, matchAttributes(claim))
 	})
 
+	// pcie means peer-to-peer DMA without crossing a host bridge, which the
+	// standard pcieRoot attribute does not express: a root complex also pairs
+	// GPUs that have to cross the bridge to talk.
+	pcieDomain := resourceapi.FullyQualifiedName(util.DRADriverName + "/pcieDomain")
+
+	t.Run("pcie matches on pcieDomain", func(t *testing.T) {
+		claim := BuildResourceClaim(podWithTopology(util.PCIeTopology), requests(2), "c", "owner", "1")
+		require.Equal(t, []resourceapi.FullyQualifiedName{pcieDomain}, matchAttributes(claim))
+	})
+
+	t.Run("pcie-strict resolves to the same attribute", func(t *testing.T) {
+		claim := BuildResourceClaim(podWithTopology(util.PCIeTopologyStrict), requests(2), "c", "owner", "1")
+		require.Equal(t, []resourceapi.FullyQualifiedName{pcieDomain}, matchAttributes(claim))
+	})
+
 	// numa is a separate axis and must keep its own attribute.
 	t.Run("numa still matches on the NUMA node attribute", func(t *testing.T) {
 		claim := BuildResourceClaim(podWithTopology(util.NUMATopology), requests(2), "c", "owner", "1")

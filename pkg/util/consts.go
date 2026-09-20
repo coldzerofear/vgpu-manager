@@ -322,6 +322,16 @@ const (
 	// this when NVLink-tier interconnect is a hard requirement (e.g. NCCL
 	// performance contracts).
 	LinkTopologyStrict TopologyMode = "link-strict"
+	// PCIeTopology finds the best device set among GPUs that can reach each
+	// other by peer-to-peer DMA without crossing a PCIe host bridge — the
+	// level below NVLink and above NUMA. It is the useful topology on servers
+	// with no NVLink at all, where `link` can only downgrade and `numa` is too
+	// coarse to promise P2P. Best-effort: allocation falls back to
+	// non-topology-aware selection when no such set exists.
+	PCIeTopology TopologyMode = "pcie"
+	// PCIeTopologyStrict same as PCIeTopology but does NOT fall back. The node
+	// is rejected if no PCIe-switch-connected set can be found.
+	PCIeTopologyStrict TopologyMode = "pcie-strict"
 )
 
 // DRA device attributes published by the kubelet plugin that other components
@@ -330,17 +340,37 @@ const (
 const (
 	// NVLinkDomainDeviceAttribute is equal exactly for GPUs that can reach
 	// each other over NVLink. Published only with the kubelet plugin's
-	// NVLinkTopologyAttributes feature gate.
+	// TopologyDeviceAttributes feature gate.
 	NVLinkDomainDeviceAttribute = "nvlinkDomain"
+	// PCIeDomainDeviceAttribute is equal exactly for GPUs that can reach each
+	// other by peer-to-peer DMA without crossing a PCIe host bridge. It is
+	// NOT the standard pcieRoot attribute, which groups by root complex and
+	// so also pairs GPUs that have to cross the bridge to talk.
+	PCIeDomainDeviceAttribute = "pcieDomain"
 	// CliqueDeviceAttribute is the NVLink fabric identity, published
 	// alongside NVLinkDomainDeviceAttribute when the hardware reports one.
 	CliqueDeviceAttribute = "clique"
 )
 
+// UsesLinkTiers reports whether the mode allocates through the link tier walk,
+// as opposed to NUMA grouping or no topology at all. Both link and pcie do;
+// they differ only in the loosest tier they accept. Callers use it to decide
+// whether a node's tiered connectivity view has to be computed — which is not
+// the same question as whether cross-pod NVLink alignment applies, that one
+// being link-only.
+func (m TopologyMode) UsesLinkTiers() bool {
+	switch m.BaseTopology() {
+	case LinkTopology, PCIeTopology:
+		return true
+	default:
+		return false
+	}
+}
+
 // IsStrictTopology reports whether the topology mode requires hard
 // satisfaction (no silent fallback to non-topology allocation).
 func (m TopologyMode) IsStrictTopology() bool {
-	return m == NUMATopologyStrict || m == LinkTopologyStrict
+	return m == NUMATopologyStrict || m == LinkTopologyStrict || m == PCIeTopologyStrict
 }
 
 // BaseTopology returns the underlying topology mode without the strict
@@ -352,6 +382,8 @@ func (m TopologyMode) BaseTopology() TopologyMode {
 		return NUMATopology
 	case LinkTopology, LinkTopologyStrict:
 		return LinkTopology
+	case PCIeTopology, PCIeTopologyStrict:
+		return PCIeTopology
 	case NoneTopology, "":
 		return NoneTopology
 	default:

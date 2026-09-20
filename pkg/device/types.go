@@ -961,6 +961,18 @@ var linkTierThreshold = [numLinkTiers]int{
 	TierAny:    int(links.P2PLinkCrossCPU),
 }
 
+// LinkTierThreshold exposes the table above so that code computing the same
+// connectivity outside this package -- the DRA kubelet plugin, which derives
+// its nvlinkDomain / pcieDomain attributes from the same link types -- can be
+// checked against it instead of carrying a copy that silently drifts.
+// An out-of-range tier returns 0, which no link type reaches.
+func LinkTierThreshold(tier LinkTier) int {
+	if tier < 0 || tier >= numLinkTiers {
+		return 0
+	}
+	return linkTierThreshold[tier]
+}
+
 func (t LinkTier) String() string {
 	switch t {
 	case TierNVLink:

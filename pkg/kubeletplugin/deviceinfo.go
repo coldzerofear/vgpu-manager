@@ -52,10 +52,10 @@ type GpuDeviceInfo struct {
 	// `partition4`/`partition8` device attributes.
 	partitionsBySize map[int]int
 
-	// nvlink is this GPU's NVLink connectivity, resolved at discovery when the
-	// NVLinkTopologyAttributes gate is on. The zero value means "no NVLink
-	// peer, or not resolved", and publishes no attributes.
-	nvlink nvlinkTopology
+	// topology is this GPU's interconnect, resolved at discovery when the
+	// TopologyDeviceAttributes gate is on. The zero value means "no peer at
+	// any level, or not resolved", and publishes no attributes.
+	topology deviceTopology
 }
 
 // Represents a specific (concrete, incarnated, created) MIG device. Annotated
@@ -191,30 +191,30 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 		d.addFabricManagerAttributes(attrs)
 	}
 
-	if featuregates.Enabled(featuregates.NVLinkTopologyAttributes) {
-		d.addNVLinkTopologyAttributes(attrs)
+	if featuregates.Enabled(featuregates.TopologyDeviceAttributes) {
+		d.addTopologyDeviceAttributes(attrs)
 	}
 
 	return attrs
 }
 
-// addNVLinkTopologyAttributes publishes this GPU's NVLink connectivity. Both
-// attributes are omitted when unknown rather than published empty: a
+// addTopologyDeviceAttributes publishes this GPU's interconnect. Each
+// attribute is omitted when unknown rather than published empty: a
 // matchAttribute constraint skips devices that lack the attribute, which is
-// exactly the right answer for a GPU that cannot offer NVLink.
-func (d *GpuDeviceInfo) addNVLinkTopologyAttributes(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute) {
+// exactly the right answer for a GPU that cannot offer that connectivity.
+func (d *GpuDeviceInfo) addTopologyDeviceAttributes(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute) {
 	if d == nil {
 		return
 	}
-	if d.nvlink.Clique != "" {
-		attrs[util.CliqueDeviceAttribute] = resourceapi.DeviceAttribute{
-			StringValue: ptr.To(d.nvlink.Clique),
+	for name, value := range map[resourceapi.QualifiedName]string{
+		util.CliqueDeviceAttribute:       d.topology.Clique,
+		util.NVLinkDomainDeviceAttribute: d.topology.NVLinkDomain,
+		util.PCIeDomainDeviceAttribute:   d.topology.PCIeDomain,
+	} {
+		if value == "" {
+			continue
 		}
-	}
-	if d.nvlink.Domain != "" {
-		attrs[util.NVLinkDomainDeviceAttribute] = resourceapi.DeviceAttribute{
-			StringValue: ptr.To(d.nvlink.Domain),
-		}
+		attrs[name] = resourceapi.DeviceAttribute{StringValue: ptr.To(value)}
 	}
 }
 
@@ -323,11 +323,11 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 		}
 	}
 
-	if featuregates.Enabled(featuregates.NVLinkTopologyAttributes) {
+	if featuregates.Enabled(featuregates.TopologyDeviceAttributes) {
 		if d.parent == nil {
-			klog.V(4).Infof("No parent GPU for %s; skipping NVLink topology attributes", d.CanonicalName())
+			klog.V(4).Infof("No parent GPU for %s; skipping topology attributes", d.CanonicalName())
 		} else {
-			d.parent.addNVLinkTopologyAttributes(device.Attributes)
+			d.parent.addTopologyDeviceAttributes(device.Attributes)
 		}
 	}
 

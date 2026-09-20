@@ -723,6 +723,8 @@ func Test_BaseTopology(t *testing.T) {
 		NUMATopologyStrict:    NUMATopology,
 		LinkTopology:          LinkTopology,
 		LinkTopologyStrict:    LinkTopology,
+		PCIeTopology:          PCIeTopology,
+		PCIeTopologyStrict:    PCIeTopology,
 		TopologyMode("bogus"): TopologyMode("bogus"),
 	}
 	for mode, want := range cases {
@@ -731,14 +733,28 @@ func Test_BaseTopology(t *testing.T) {
 		}
 	}
 	// IsStrictTopology pairs with the -strict variants only.
-	for _, m := range []TopologyMode{NUMATopologyStrict, LinkTopologyStrict} {
+	for _, m := range []TopologyMode{NUMATopologyStrict, LinkTopologyStrict, PCIeTopologyStrict} {
 		if !m.IsStrictTopology() {
 			t.Fatalf("(%q).IsStrictTopology() = false, want true", m)
 		}
 	}
-	for _, m := range []TopologyMode{NoneTopology, NUMATopology, LinkTopology, "bogus"} {
+	for _, m := range []TopologyMode{NoneTopology, NUMATopology, LinkTopology, PCIeTopology, "bogus"} {
 		if m.IsStrictTopology() {
 			t.Fatalf("(%q).IsStrictTopology() = true, want false", m)
+		}
+	}
+
+	// UsesLinkTiers selects the modes allocated through the link tier walk.
+	// numa groups by NUMA node instead and must stay out, or a numa request
+	// would start paying for a connectivity view it never reads.
+	for _, m := range []TopologyMode{LinkTopology, LinkTopologyStrict, PCIeTopology, PCIeTopologyStrict} {
+		if !m.UsesLinkTiers() {
+			t.Fatalf("(%q).UsesLinkTiers() = false, want true", m)
+		}
+	}
+	for _, m := range []TopologyMode{NoneTopology, "", NUMATopology, NUMATopologyStrict, "bogus"} {
+		if m.UsesLinkTiers() {
+			t.Fatalf("(%q).UsesLinkTiers() = true, want false", m)
 		}
 	}
 }

@@ -144,6 +144,9 @@ func setDefaultDeviceTopologyMode(pod *corev1.Pod, options *options.Options, log
 		case string(util.LinkTopology), string(util.LinkTopologyStrict):
 			setTopoMode = true
 			util.InsertAnnotation(pod, util.DeviceTopologyModeAnnotation, defaultTopologyMode)
+		case string(util.PCIeTopology), string(util.PCIeTopologyStrict):
+			setTopoMode = true
+			util.InsertAnnotation(pod, util.DeviceTopologyModeAnnotation, defaultTopologyMode)
 		}
 		if setTopoMode {
 			logger.V(4).Info("Successfully set default device topology mode", "DeviceTopologyMode", defaultTopologyMode)

@@ -221,7 +221,15 @@ func (p *vgpuPreempt) Preempt(
 	parallel := watcher.NewBatchParallel(len(victimKeys), batchSize)
 
 	nodeInfoByName := make(map[string]*allocator.NodeInfo, len(victimsMap))
-	topologyEnabled := p.gpuTopology && req.Topology.BaseTopology() == util.LinkTopology
+	// topologyEnabled decides whether NodeInfo computes the tiered connectivity
+	// view below. Both link and pcie allocate through the tier walk, so both
+	// need it: without it the simulated allocation has no topology at all and a
+	// strict request would be refused on every candidate node.
+	topologyEnabled := p.gpuTopology && req.Topology.UsesLinkTiers()
+	// Cross-pod alignment is defined over NVLink components only (see
+	// anchorComponentUUIDs), so it stays link-only now that topologyEnabled no
+	// longer implies link mode.
+	crossPodEnabled := topologyEnabled && req.Topology.BaseTopology() == util.LinkTopology
 
 	parallel.Execute(func(_ int, config watcher.BatchConfig) {
 		for _, nodeName := range victimKeys[config.StartIndex : config.EndIndex+1] {
@@ -253,7 +261,7 @@ func (p *vgpuPreempt) Preempt(
 	})
 	parallel.WaitDone()
 
-	if req.CrossPodTopology && topologyEnabled && (req.GangName != "" || req.ControllerOwner != nil) {
+	if req.CrossPodTopology && crossPodEnabled && (req.GangName != "" || req.ControllerOwner != nil) {
 		var gangPods []*corev1.Pod
 		switch {
 		case req.GangName != "":

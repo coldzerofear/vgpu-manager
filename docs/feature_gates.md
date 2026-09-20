@@ -105,7 +105,7 @@ devicePlugin:
 | `DevicePluginClientMode` | `false` | Alpha |
 | `NRISupport` | `false` | Alpha |
 | `FabricManagerPartitioning` | `false` | Alpha |
-| `NVLinkTopologyAttributes` | `false` | Alpha |
+| `TopologyDeviceAttributes` | `false` | Alpha |
 | `DRAListTypeAttributes` | `false` | Alpha |
 
 ## Dependencies and mutual exclusions
@@ -331,26 +331,38 @@ Enables Fabric Manager (NVSwitch) partition management. Requires Fabric Manager 
   `partitionN` attributes are still published either way. The node partition is never deactivated,
   so a node that ran this combination keeps it active until it reboots.
 
-### NVLinkTopologyAttributes
+### TopologyDeviceAttributes
 
 * action scope: kubelet-plugin
 
-Publishes each device's NVLink connectivity as two attributes:
+Publishes each device's interconnect as three attributes:
 
 * `clique` — the hardware fabric identity (`clique:<clusterUUID>.<cliqueID>`, from NVML). On MNNVL
   systems one clique spans several nodes.
 * `nvlinkDomain` — equal exactly for GPUs that can reach each other over NVLink. It falls back to a
   node-local connected-component key when the hardware reports no fabric identity, so it also works
   on NVLink hardware without NVSwitch.
+* `pcieDomain` — equal exactly for GPUs that can reach each other by peer-to-peer DMA **without
+  crossing a PCIe host bridge**. Always node-local. The tiers nest, so NVLink peers are included
+  and a GPU normally carries both domains.
 
-A GPU with no NVLink peer publishes neither, so a `matchAttribute` constraint on `nvlinkDomain`
-correctly refuses it.
+A GPU with no peer at a level publishes no attribute for that level, so a `matchAttribute`
+constraint correctly refuses it.
+
+`pcieDomain` is deliberately not the standard `resource.kubernetes.io/pcieRoot`: a root complex also
+groups GPUs that have to cross the host bridge to talk. `pcieRoot` stays untouched and is the right
+key for hand-written ResourceClaims that need one topology key shared with another DRA driver — for
+example pinning GPUs and CPUs to the same root complex together with
+[dra-driver-cpu](https://github.com/kubernetes-sigs/dra-driver-cpu).
 
 The webhook converts a `nvidia.com/device-topology-mode: link` pod into a `matchAttribute`
-constraint on `nvlinkDomain`, so **enable this gate on every node that should be able to satisfy a
-`link` constraint**. A node without the attribute cannot satisfy one, and such pods stay
-Unschedulable there — which is the intended meaning of `link`, but it does mean a cluster using
-`link` has to roll the gate out before the pods can land.
+constraint on `nvlinkDomain`, and a `pcie` pod into one on `pcieDomain`, so **enable this gate on
+every node that should be able to satisfy either constraint**. A node without the attribute cannot
+satisfy one, and such pods stay Unschedulable there — which is the intended meaning of those modes,
+but it does mean a cluster using them has to roll the gate out before the pods can land.
+
+The connectivity thresholds are the same ones the scheduler-extender's link tiers use, so a `link`
+or `pcie` pod means the same thing on both paths.
 
 Independent of `FabricManagerPartitioning` — it reads fabric identities from NVML and never talks to
 Fabric Manager.

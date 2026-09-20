@@ -10,8 +10,21 @@ Annotation `nvidia.com/device-topology-mode` supports values:
 
 * numa: Recognize the affinity of numa and try to allocate GPUs on numa nodes of the same side.
 * link: Identify nvlinks and try to allocate to the optimal nvlink topology to improve multi card performance.
-* numa-strict / link-strict: same as above, but a node that cannot satisfy the
+* pcie: Allocate GPUs that can reach each other by peer-to-peer DMA **without crossing a PCIe host
+  bridge**. This is the level between `link` and `numa`, and it is the useful mode on servers with
+  no NVLink at all — there `link` can only downgrade, and `numa` is too coarse to promise P2P at
+  all. On an NVSwitch node `link` is strictly better, so use `pcie` only where NVLink is absent or
+  not required.
+* numa-strict / link-strict / pcie-strict: same as above, but a node that cannot satisfy the
   topology is **rejected** instead of falling back to plain resource ordering.
+
+The three modes nest: a set connected over NVLink also satisfies `pcie`, and a set satisfying
+`pcie` also sits within one NUMA node. A mode therefore accepts anything **tighter** than what it
+asked for — `pcie-strict` is happy with an NVLink group — and only rejects what is looser.
+
+> Cross-pod topology affinity (`nvidia.com/cross-pod-topology`) applies to `link` only: its
+> alignment keys are defined over NVLink components, so a `pcie` pod never anchors to a gang
+> sibling's component.
 
 ### Single-card requests
 

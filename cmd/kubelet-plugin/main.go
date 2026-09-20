@@ -348,9 +348,9 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 				return fmt.Errorf("--plugin-mode=%s requires feature gate %s to be disabled",
 					pkgkubeletplugin.ModeInject, featuregates.SharedSMUtilizationWatcher)
 			}
-			if featuregates.Enabled(featuregates.NVLinkTopologyAttributes) {
+			if featuregates.Enabled(featuregates.TopologyDeviceAttributes) {
 				return fmt.Errorf("--plugin-mode=%s requires feature gate %s to be disabled",
-					pkgkubeletplugin.ModeInject, featuregates.NVLinkTopologyAttributes)
+					pkgkubeletplugin.ModeInject, featuregates.TopologyDeviceAttributes)
 			}
 		}
 	default:

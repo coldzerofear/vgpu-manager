@@ -89,12 +89,12 @@ type DeviceState struct {
 
 	fmManager *fabricmanager.Manager
 
-	// nvlinkDomains is this node's NVLink topology by GPU UUID, resolved once
-	// at startup when NVLinkTopologyAttributes is on. Retained (rather than
-	// only pushed into the GpuDeviceInfos) so a GPU rediscovered later — a
-	// VFIO device rebinding to the nvidia driver — can be given its topology
-	// back without re-walking every NVLink on the node.
-	nvlinkDomains map[string]nvlinkTopology
+	// topologyDomains is this node's interconnect topology by GPU UUID,
+	// resolved once at startup when TopologyDeviceAttributes is on. Retained
+	// (rather than only pushed into the GpuDeviceInfos) so a GPU rediscovered
+	// later — a VFIO device rebinding to the nvidia driver — can be given its
+	// topology back without re-walking every link on the node.
+	topologyDomains map[string]deviceTopology
 
 	// Checkpoint read/write lock, file-based for multi-process synchronization.
 	cplock *flock.Flock
@@ -260,17 +260,17 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		}
 	}
 
-	// Resolve the node's NVLink topology and attach it to every discovered
+	// Resolve the node's interconnect topology and attach it to every discovered
 	// GPU. This fails startup rather than degrading quietly: the gate is
-	// opt-in, and a node that silently published no NVLink attributes would
-	// make every link-topology pod unschedulable with nothing to point at.
-	if featuregates.Enabled(featuregates.NVLinkTopologyAttributes) {
-		state.nvlinkDomains, err = nvdevlib.discoverNVLinkDomains(config.Flags.NodeName)
+	// opt-in, and a node that silently published no topology attributes would
+	// make every link/pcie-topology pod unschedulable with nothing to point at.
+	if featuregates.Enabled(featuregates.TopologyDeviceAttributes) {
+		state.topologyDomains, err = nvdevlib.discoverTopologyDomains(config.Flags.NodeName)
 		if err != nil {
-			return nil, fmt.Errorf("resolving NVLink topology: %w", err)
+			return nil, fmt.Errorf("resolving interconnect topology: %w", err)
 		}
 		for _, gpu := range nvdevlib.gpuInfosByUUID {
-			state.attachNVLinkTopology(gpu)
+			state.attachTopologyDomains(gpu)
 		}
 	}
 
@@ -1481,9 +1481,9 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 		if err := s.attachFabricManagerPartitions(gpu.Gpu); err != nil {
 			return fmt.Errorf("error attaching fabric manager partitions for gpu %q: %w", gpu.Gpu.CanonicalName(), err)
 		}
-		// Same for the NVLink topology: the GPU is visible to NVML again, and
+		// Same for the interconnect topology: the GPU is visible to NVML again, and
 		// the node's links did not change while it was passed through.
-		s.attachNVLinkTopology(gpu.Gpu)
+		s.attachTopologyDomains(gpu.Gpu)
 	case MigStaticDeviceType:
 		// TODO: Implement once partitionable device is supported with PassthroughSupport feature gate.
 		return nil
@@ -1782,20 +1782,20 @@ func (s *DeviceState) activateNodeFabricPartition() error {
 	return nil
 }
 
-// attachNVLinkTopology copies the node's resolved NVLink topology onto a GPU.
-// It is a no-op when the feature is off or the GPU was not part of the walk —
-// a GPU bound to vfio-pci at discovery time is invisible to NVML, so it has no
-// entry, and publishing nothing for it is the honest answer.
-func (s *DeviceState) attachNVLinkTopology(gpu *GpuDeviceInfo) {
-	if gpu == nil || s.nvlinkDomains == nil {
+// attachTopologyDomains copies the node's resolved interconnect topology onto
+// a GPU. It is a no-op when the feature is off or the GPU was not part of the
+// walk — a GPU bound to vfio-pci at discovery time is invisible to NVML, so it
+// has no entry, and publishing nothing for it is the honest answer.
+func (s *DeviceState) attachTopologyDomains(gpu *GpuDeviceInfo) {
+	if gpu == nil || s.topologyDomains == nil {
 		return
 	}
-	topo, ok := s.nvlinkDomains[gpu.UUID]
+	topo, ok := s.topologyDomains[gpu.UUID]
 	if !ok {
-		klog.V(4).Infof("No NVLink topology recorded for GPU %s; publishing none", gpu.CanonicalName())
+		klog.V(4).Infof("No topology recorded for GPU %s; publishing none", gpu.CanonicalName())
 		return
 	}
-	gpu.nvlink = topo
+	gpu.topology = topo
 }
 
 // activateFabricPartition activates the FM partition formed by the physical

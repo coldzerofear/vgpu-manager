@@ -98,7 +98,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.TlsKeyName, "tls-key-name", o.TlsKeyName, "Specify the tls key file name in the certificate directory.")
 	pflag.StringVar(&o.DefaultNodePolicy, "default-node-policy", "", "Default node scheduling policy. (supported values: \"binpack\" | \"spread\")")
 	pflag.StringVar(&o.DefaultDevicePolicy, "default-device-policy", "", "Default device scheduling policy. (supported values: \"binpack\" | \"spread\")")
-	pflag.StringVar(&o.DefaultTopologyMode, "default-topology-mode", "", "Default device list topology mode. (supported values: \"numa\" | \"link\")")
+	pflag.StringVar(&o.DefaultTopologyMode, "default-topology-mode", "", "Default device list topology mode. (supported values: \"numa\" | \"link\" | \"pcie\", each also with a \"-strict\" variant)")
 	pflag.StringVar(&o.DefaultRuntimeClass, "default-runtime-class", "", "Specify the default container runtimeClassName for the vGPU pod.")
 	pflag.StringVar(&o.VGPUDeviceClassName, "vgpu-device-class-name", o.VGPUDeviceClassName, "Specify the name of the vGPU device class for DRA conversion.")
 	pflag.BoolVar(&o.DRAAdmissionEnabled, "dra-admission-enabled", false, "Enable access verification for requests related to DRA resources.")

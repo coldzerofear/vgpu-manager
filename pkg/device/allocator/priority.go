@@ -195,7 +195,12 @@ func cachedNodeScore(cache map[string]float64, info *NodeInfo, req AllocationReq
 func ApplyTopologyMode(req AllocationRequest, less ...LessFunc[*NodeInfo]) []LessFunc[*NodeInfo] {
 	var fitness LessFunc[*NodeInfo]
 	switch req.Topology.BaseTopology() {
-	case util.LinkTopology:
+	case util.LinkTopology, util.PCIeTopology:
+		// One comparator serves both: LinkTopologyFitness already ranks
+		// NVLink (5) above PCIe switch (4) above NUMA (3), and a pcie request
+		// is happy with either of the top two while still preferring the
+		// tighter one. A separate pcie comparator would only re-order nodes
+		// that all satisfy it equally.
 		fitness = ByNodeGPUTopologyFitness(req.Max.Number)
 	case util.NUMATopology:
 		fitness = ByNodeNUMATopologyFitness(req.Max.Number)

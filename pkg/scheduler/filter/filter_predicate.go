@@ -906,11 +906,19 @@ func (f *gpuFilter) preFilterNodeInfos(
 		nodeInfoList         = make([]*allocator.NodeInfo, 0, len(nodes))
 		nodeOriginalPosition = make(map[string]int, len(nodes))
 		nodeInfoByName       map[string]*allocator.NodeInfo
-		topologyEnabled      = f.gpuTopology && req.Topology.BaseTopology() == util.LinkTopology
+		// topologyEnabled decides whether each NodeInfo computes the tiered
+		// connectivity view. Both link and pcie allocate through the tier walk,
+		// so both need it.
+		topologyEnabled = f.gpuTopology && req.Topology.UsesLinkTiers()
 		// nodeInfoByName is consumed only by the cross-pod gang ordinal lookup below.
 		// Build and populate it solely when that path will run so the common
 		// (non-gang / non-cross-pod) scheduling pays nothing for it.
-		needGangOrdinal = req.CrossPodTopology && topologyEnabled && (req.GangName != "" || req.ControllerOwner != nil)
+		//
+		// Cross-pod alignment is defined over NVLink components only, so it stays
+		// link-only now that topologyEnabled no longer implies link mode.
+		needGangOrdinal = req.CrossPodTopology && topologyEnabled &&
+			req.Topology.BaseTopology() == util.LinkTopology &&
+			(req.GangName != "" || req.ControllerOwner != nil)
 	)
 	if needGangOrdinal {
 		nodeInfoByName = make(map[string]*allocator.NodeInfo, len(nodes))

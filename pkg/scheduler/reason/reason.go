@@ -89,6 +89,7 @@ const (
 	InsufficientGPUCards      Code = "InsufficientGPUCards"
 	InsufficientGPUResources  Code = "InsufficientGPUResources"
 	LinkTopologyUnsatisfied   Code = "LinkTopologyUnsatisfied"
+	PCIeTopologyUnsatisfied   Code = "PCIeTopologyUnsatisfied"
 	NUMATopologyUnsatisfied   Code = "NUMATopologyUnsatisfied"
 	AlreadyScheduledElsewhere Code = "AlreadyScheduledElsewhere"
 	// AllocatorInternalError is not a property of the node: the allocator hit a
@@ -144,6 +145,7 @@ var phrase = map[Code]string{
 	InsufficientGPUCards:      "Insufficient GPU cards",
 	InsufficientGPUResources:  "Insufficient GPU resources",
 	LinkTopologyUnsatisfied:   "Link topology unsatisfied",
+	PCIeTopologyUnsatisfied:   "PCIe topology unsatisfied",
 	NUMATopologyUnsatisfied:   "NUMA topology unsatisfied",
 	AlreadyScheduledElsewhere: "pod already scheduled to another node",
 	AllocatorInternalError:    "allocator internal error",
