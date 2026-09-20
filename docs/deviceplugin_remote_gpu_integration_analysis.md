@@ -1149,7 +1149,7 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
      但集群禁止 hostNetwork 时服务端 Pod 每次重建都换 IP，而 `LUPINE_SERVER` 是 `Allocate` 时烧进容器的、
      容器重启不重注入 —— 于是给每个节点的服务端一个稳定域名：headless Service（`publishNotReadyAddresses: true`）
      + 由 webhook 按目标节点名生成的 `spec.hostname`（新入口 `/pods/hostname`，Pod 模板标签
-     `vgpu-manager.io/node-hostname=true` opt-in，`failurePolicy: Fail`，同时注入 `HOSTNAME` 供 `1000 1000VAR)` 展开）。
+     `vgpu-manager.io/node-hostname=true` opt-in，`failurePolicy: Fail`，同时注入 `HOSTNAME` 供 `$(VAR)` 展开）。
      agent 侧零改动地复用 `ADVERTISE_SERVER_ENDPOINT`，并新增 `ADVERTISE_AGENT_ENDPOINT`（否则 agent 自己的
      endpoint 仍是 Pod IP，重建后要等一轮注解刷新）。节点名→DNS label 的转换会在需要改写时追加节点名摘要，
      否则 `a.b` 与 `a-b` 会撞成同一个域名、把客户端引到另一台服务器。

@@ -133,6 +133,19 @@ func TestMutateCreate(t *testing.T) {
 	assert.Equal(t, "written-by-hand", pod.Spec.Hostname)
 	assert.Equal(t, "written-by-hand", pod.Spec.Containers[0].Env[0].Value)
 
+	// HOSTNAME goes first: Kubernetes expands $(VAR) from the entries before
+	// it in the same container, so an ADVERTISE_SERVER_ENDPOINT written with
+	// $(HOSTNAME) would keep the literal text if the injection landed last.
+	pod = optedInPod("gpu-node-1")
+	pod.Spec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "LUPINE_PORT", Value: "14833"},
+		{Name: "ADVERTISE_SERVER_ENDPOINT", Value: "http://$(HOSTNAME).svc:$(LUPINE_PORT)"},
+	}
+	h.MutateCreate(ctx, pod)
+	require.Len(t, pod.Spec.Containers[0].Env, 3)
+	assert.Equal(t, HostnameEnv, pod.Spec.Containers[0].Env[0].Name,
+		"the hostname must precede anything that expands it")
+
 	// So is a HOSTNAME the author set.
 	pod = optedInPod("gpu-node-1")
 	pod.Spec.Containers[0].Env = []corev1.EnvVar{{Name: HostnameEnv, Value: "mine"}}

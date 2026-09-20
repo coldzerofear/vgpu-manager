@@ -46,14 +46,53 @@ kubectl apply -f vgpu-manager-dra-webhook.yaml -f vgpu-manager-deviceclass.yaml
 | **server 状态（版本 / endpoint）** | 自动：remote-agent 每 5s GET `http://<REMOTE_SERVER_ENDPOINT>/` 读响应头 `x-lupine-cuda-version`；dra-server 只向 agent 的 `ServerInfo` gRPC 取结果（5s 一次直到首次成功，之后 60s） | — | dra-server / inject **不再直接访问 lupine-server**，只需知道 agent 地址。发布为设备属性 `serverCudaVersion`（inject 选制品按 **min(驱动上限, server 版本)** 取 ≤ 的最高版本）与 `serverEndpoint`；版本或地址变化都会自动重发 slice。agent 探测地址是回环时，会在本机地址里找一个 server 同样应答的（优先节点 InternalIP，物理网卡优先于 docker/cni/flannel 等虚拟网卡）作为对外 endpoint，并粘住直到它不再应答 |
 | **vgpu-manager 镜像** | 四个文件所有 `coldzerofear/vgpu-manager-dra:latest` | latest | 换成内网 registry / 钉版本；remote-server 的 agent 容器要求镜像内含 `remote-agent` 二进制 |
 | **可达域 selector** | `vgpu-manager-dra-remote-server.yaml` → `REMOTE_NODE_SELECTOR` | `vgpu-manager.io/remote-inject=true` | 标准 label selector 语法（`k=v,k2 in (a,b),!k3`）；决定 pool 可调度到哪些节点。**要允许本机消费必须覆盖 GPU 节点自身**（默认值配合上面打标签方式已覆盖） |
-| **服务端 endpoint** | `vgpu-manager-dra-gpu-server.yaml` `LUPINE_PORT` + agent 的 `REMOTE_SERVER_ENDPOINT`（探测地址，默认 127.0.0.1）；可选 `ADVERTISE_SERVER_ENDPOINT`（对外地址，运维指定，`https://` 默认 443） | `:14833` | **dra-server 不再配置它**：对外地址由 agent 报告（自动发现或 advertise），发布为设备属性 `serverEndpoint`；inject 在 EnsureSession 回包里也拿到它，所以即使属性还没发布出来（或调度器忽略了污点）也能正确注入。改端口只改 remote-server 两处 |
-| **agent endpoint** | `vgpu-manager-dra-gpu-server.yaml` `LISTEN_SERVER_ENDPOINT`（逗号分隔可多个：`grpc://:14834` 与 `unix:///etc/vgpu-manager/agent.sock`）、`vgpu-manager-dra-remote-server.yaml` `REMOTE_AGENT_ENDPOINT`（本机怎么连 agent：grpc:// 留空 host = 节点 InternalIP，或 unix://） | `:14834` | agent 自己报告对外可达的 `grpc://<可路由 host>:<TCP 端口>`，发布为设备属性 `agentEndpoint`，inject 按它调 EnsureSession（dra-inject 无需再配端口）。unix 套接字只供同节点组件，不会被发布；agent 只监听 unix 时没有 agentEndpoint，设备保持污点 |
+| **服务端端口** | `vgpu-manager-dra-gpu-server.yaml` 的 `LUPINE_PORT`（agent 与 lupine-server 两个容器各一份，一起改）；agent 的 `REMOTE_SERVER_ENDPOINT` / `ADVERTISE_SERVER_ENDPOINT` 都从它展开 | `14833` | **dra-server 不再配置它**：对外地址由 agent 报告（自动发现或 advertise），发布为设备属性 `serverEndpoint`；inject 在 EnsureSession 回包里也拿到它，所以即使属性还没发布出来（或调度器忽略了污点）也能正确注入。改端口只改 `LUPINE_PORT` 那两处（同一个值，两个容器） |
+| **agent 端口** | `vgpu-manager-dra-gpu-server.yaml` 的 `LISTEN_PORT`（`LISTEN_SERVER_ENDPOINT` 与 `ADVERTISE_AGENT_ENDPOINT` 从它展开；套接字仍写在 `LISTEN_SERVER_ENDPOINT` 里）、`vgpu-manager-dra-remote-server.yaml` `REMOTE_AGENT_ENDPOINT`（本机怎么连 agent：grpc:// 留空 host = 节点 InternalIP，或 unix://） | `:14834` | agent 自己报告对外可达的 `grpc://<可路由 host>:<TCP 端口>`，发布为设备属性 `agentEndpoint`，inject 按它调 EnsureSession（dra-inject 无需再配端口）。unix 套接字只供同节点组件，不会被发布；agent 只监听 unix 时没有 agentEndpoint，设备保持污点 |
 | **monitor 端口** | `vgpu-manager-dra-gpu-server.yaml` `--server-bind-port` | `3456` | hostNetwork，与节点上其他进程冲突时修改（Service targetPort 联动） |
 | **SM watcher** | `vgpu-manager-dra-remote-server.yaml` 与 `vgpu-manager-dra-gpu-server.yaml` 两处 `FEATURE_GATES` 的 `SharedSMUtilizationWatcher` | 均开启 | 联动开关：dra-server 写节点级采样缓存，agent 把会话标记为使用它。关闭时两处同时关 |
 | **webhook DRA class** | `vgpu-manager-dra-webhook.yaml` `--vgpu-device-class-name`，与 `vgpu-manager-deviceclass.yaml` 里的 class 名一致 | `vgpu-manager` | webhook 目前只转换一个 class。集群同时有 dra-local 时两边的 class 同名同选择器，claim 可能拿到本地卡——要区分就给远程 class 换个名字并打开 deviceclass 里注释的 accessMode 选择器 |
 | **整卡远程 class** | `vgpu-manager-deviceclass.yaml` 再加一个 `type == 'gpu'` 的 class（本地版见 `deploy/dra-local` 的 `gpu-manager`） | 未提供 | dra-server 关掉 `VGPUSupport` 改发布 `type=gpu` 时才需要 |
 | **NRI 按容器会话** | `vgpu-manager-dra-remote-inject.yaml` `FEATURE_GATES` 加 `NRISupport=true` + 放开 nri-root 挂载注释 | 关闭 | 开启后同 claim 不同容器各自独立会话记账（需 containerd NRI 开启） |
 | **命名空间** | 全部文件 | `kube-system` | 整体替换时注意 webhook 证书 dnsNames 联动 |
+
+## 按域名寻址（集群禁止 hostNetwork 时）
+
+默认形态是 `hostNetwork: true`：节点 IP 天生稳定，数据面也不经 CNI 封装。集群策略禁止
+hostNetwork（PSS `baseline` 连 hostPort 一起禁）时，服务端 Pod 每次重建都换 IP，而 inject
+注入给消费容器的 `LUPINE_SERVER` 只在 NodePrepare 时写一次、容器重启不会重写——连着旧 IP
+的容器恢复不了。解决办法是给每个节点的服务端 Pod 一个稳定域名：
+
+```
+<spec.hostname>.<headless svc>.<namespace>.svc.<cluster domain>
+```
+
+DaemonSet 自己做不到：它只有一份 Pod 模板，`spec.hostname` 也不支持字段引用。所以由
+device-webhook 在准入时按目标节点名生成（本目录的 webhook 清单已含 `/pods/hostname` 入口）。
+
+**切换步骤**（都在 `vgpu-manager-dra-gpu-server.yaml` 里，按注释打开）：
+
+1. Pod 模板标签打开 `vgpu-manager.io/node-hostname: "true"`；
+2. `hostNetwork: false`、`dnsPolicy: ClusterFirst`、`subdomain: vgpu-manager-dra-gpu-server-headless`；
+3. remote-agent 打开 `POD_NAMESPACE` / `HEADLESS_SERVICE_NAME` / `CLUSTER_DOMAIN` /
+   `ADVERTISE_SERVER_ENDPOINT` / `ADVERTISE_AGENT_ENDPOINT` 这一组环境变量。
+
+几个要点：
+
+- **两个 ADVERTISE 都要开**：`serverEndpoint` 与 `agentEndpoint` 都是 dra-server 从 agent 的
+  `ServerInfo` 取来发布成设备属性的。只开 server 那条时，`agentEndpoint` 仍是 Pod IP——Pod 重建后
+  要等一轮重发才恢复，窗口内 inject 的 EnsureSession 会失败。
+- **节点名 → hostname 的转换**：节点名是 DNS subdomain（可带点、最长 253），`spec.hostname` 必须是
+  DNS label。需要改写时（大写、下划线、点、超长）会追加节点名摘要，否则 `a.b` 与 `a-b` 会撞成同一个
+  域名，客户端可能被解析到另一台 GPU 服务器。
+- **headless Service 的 `publishNotReadyAddresses: true`** 是刻意的：记录只要 Pod 有 IP 就存在，不随
+  Pod 就绪状态抖动（服务端是否可用由设备属性与 `remote-unavailable` 污点表达），也避免重建期间的
+  NXDOMAIN 被 CoreDNS 否定缓存住（默认 30s）。
+- **消费侧必须能解析集群 DNS**：默认 `ClusterFirst` 即可，`hostNetwork: true` 的业务 Pod 必须写
+  `dnsPolicy: ClusterFirstWithHostNet`。校验 webhook 会拒绝 `vgpu-access-mode: remote` 且
+  `dnsPolicy: Default`、或 `hostNetwork` + `ClusterFirst` 的 Pod；`None` 要求自带 `dnsConfig.nameservers`。
+- **代价**：数据面改走 CNI，overlay 封装与 MTU 会吃掉一部分 H2D/D2H 带宽；能用 hostNetwork 时仍然推荐
+  hostNetwork。另外要放通消费 Pod → 服务端 Pod 的 14833/14834。headless Service 在 hostNetwork 模式下
+  也可以照常部署，那时记录解析到节点 IP。
 
 ## 端口一览（GPU 节点 hostNetwork）
 

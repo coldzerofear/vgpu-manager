@@ -66,7 +66,7 @@ spec:
         vgpu-manager.io/ignore-webhook: "true"
         # 【按域名寻址时打开】让 webhook 按本 Pod 所在节点名生成 spec.hostname 并注入
         # HOSTNAME 环境变量，配合 subdomain 与本文件末尾的 headless Service 得到每节点
-        # 一个稳定域名（详见 deploy/classic-remote/README.md 的"按域名寻址"一节）。
+        # 一个稳定域名（见本目录 README 的"按域名寻址"一节）。
 #        vgpu-manager.io/node-hostname: "true"
     spec:
       tolerations:
@@ -88,7 +88,7 @@ spec:
       # 【集群禁止 hostNetwork 时】改成下面这套按域名寻址（见 README"按域名寻址"一节）：
       #   hostNetwork: false
       #   dnsPolicy: ClusterFirst
-      #   subdomain: vgpu-manager-remote-gpu-server-headless   # = 本文件末尾 headless Service 名
+      #   subdomain: vgpu-manager-dra-gpu-server-headless   # = 本文件末尾 headless Service 名
       # 并打开上面的 node-hostname 标签与下面的两个 ADVERTISE_* 环境变量。
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
@@ -141,7 +141,7 @@ spec:
             # agent 探测 server 的地址（同 pod，host 留空 = 127.0.0.1）。host 是回环时，agent 会
             # 在本机地址里找一个 server 同样应答的（优先节点 InternalIP），作为对外 endpoint 经
             # ServerInfo 报给 dra-server，dra-server 再发布为设备属性——因此 dra-server 不再需要
-            # 知道 lupine-server 的地址；改端口只改这里与 LUPINE_PORT。
+            # 知道 lupine-server 的地址。端口从上面的 LUPINE_PORT 展开，改端口只改那一处（和 lupine-server 容器里的同名变量）。
             - name: REMOTE_SERVER_ENDPOINT
               value: ":$(LUPINE_PORT)"
             # 【按域名寻址时打开这一组】HOSTNAME 由 webhook 按节点名注入；两个 ADVERTISE_*
