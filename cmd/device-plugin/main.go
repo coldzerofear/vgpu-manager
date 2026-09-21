@@ -28,6 +28,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/component-base/logs"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -43,6 +44,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
 	devm "github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"github.com/fsnotify/fsnotify"
 	corev1 "k8s.io/api/core/v1"
@@ -55,12 +57,10 @@ import (
 	metrics "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-func runApp(opt *options.Options) (exitCode int) {
+func runApp(ctx context.Context, opt *options.Options) (exitCode int) {
 	exitCode = 1
 
-	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
 	util.MustInitGlobalDomain(opt.Domain)
-
 	kubeConfig, err := client.NewKubeConfig(
 		client.WithConfigMasterURL(opt.MasterURL),
 		client.WithKubeConfigPath(opt.KubeConfigFile),
@@ -111,13 +111,20 @@ func runApp(opt *options.Options) (exitCode int) {
 	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
 
 	klog.V(3).Info("Initialize Device Resource Manager")
-	deviceManager, err := devm.NewDeviceManager(
-		nodeConfig,
-		devm.WithKubeClient(kubeClient),
-		devm.WithFeatureGate(opt.FeatureGate))
-	if err != nil {
-		klog.Errorf("Create device manager failed: %v", err)
-		return exitCode
+	var deviceManager *devm.DeviceManager
+	if opt.RemoteConsumer && !opt.RemoteServer {
+		// Only consumer nodes do not need to detect GPUs
+		deviceManager = devm.NewDevicelessManager(
+			nodeConfig, devm.WithKubeClient(kubeClient),
+			devm.WithFeatureGate(opt.FeatureGate))
+	} else {
+		deviceManager, err = devm.NewDeviceManager(
+			nodeConfig, devm.WithKubeClient(kubeClient),
+			devm.WithFeatureGate(opt.FeatureGate))
+		if err != nil {
+			klog.Errorf("Create device manager failed: %v", err)
+			return exitCode
+		}
 	}
 
 	devicePluginSocket := filepath.Join(opt.DevicePluginPath, "kubelet.sock")
@@ -129,35 +136,7 @@ func runApp(opt *options.Options) (exitCode int) {
 	defer func() { _ = watcher.Close() }()
 
 	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	manager, err := ctrm.New(kubeConfig, ctrm.Options{
-		LeaderElection:         false,
-		HealthProbeBindAddress: "0", // Disable manager health probe service
-		PprofBindAddress: func() string {
-			if opt.PprofBindPort > 0 {
-				return fmt.Sprintf(":%d", opt.PprofBindPort)
-			}
-			return "0"
-		}(),
-		Cache: rtcache.Options{
-			// Trim managedFields to reduce cache memory usage.
-			DefaultTransform:         rtcache.TransformStripManagedFields(),
-			DefaultWatchErrorHandler: toolscache.DefaultWatchErrorHandler,
-			// Enable bookmark event adaptation WatchListClient feature.
-			DefaultEnableWatchBookmarks: ptr.To[bool](true),
-			ByObject: map[rtclient.Object]rtcache.ByObject{
-				// Preheat cache in advance.
-				&corev1.Pod{}: {
-					Field:     fields.OneTermEqualSelector("spec.nodeName", opt.NodeName),
-					Transform: rtcache.TransformStripManagedFields(),
-				},
-				&corev1.Node{}: {
-					Field:     fields.OneTermEqualSelector("metadata.name", opt.NodeName),
-					Transform: rtcache.TransformStripManagedFields(),
-				},
-			},
-		},
-		Metrics: metrics.Options{BindAddress: "0"}, // Disable manager metrics service
-	})
+	manager, err := CreateClusterManager(kubeConfig, opt)
 	if err != nil {
 		klog.Errorf("Create cluster manager failed: %v", err)
 		return exitCode
@@ -169,20 +148,27 @@ func runApp(opt *options.Options) (exitCode int) {
 		klog.Errorf("Register controller to manager failed: %v", err)
 		return exitCode
 	}
-	plugins, err := deviceplugin.GetDevicePlugins(opt, deviceManager, manager, kubeClient)
+	clusterCtx, cancelFunc := context.WithCancel(ctx)
+	defer cancelFunc()
+
+	plugins, err := deviceplugin.GetDevicePlugins(clusterCtx, opt, deviceManager, manager, kubeClient)
 	if err != nil {
 		klog.Errorf("Get device plugins failed: %v", err)
 		return exitCode
 	}
 
-	klog.Infoln("Starting cluster manager.")
-	clusterCtx, cancelFunc := context.WithCancel(context.Background())
+	// Plugins that hand their resource over to another process on this node
+	// ask for the start loop to run again through these.
+	restartCh := pluginRestartCh(plugins)
+
 	go func() {
+		klog.Infoln("Starting cluster manager.")
 		if err = manager.Start(clusterCtx); err != nil {
 			klog.V(3).ErrorS(err, "failed staring cluster manager")
 			cancelFunc()
 		}
 	}()
+
 	deviceManager.Start()
 
 restart:
@@ -226,6 +212,10 @@ restart:
 		// Watch for any other fs errors and log them.
 		case err := <-watcher.Errors:
 			klog.Infof("inotify: %v", err)
+		// A plugin asked for a restart (the node's resource changed hands
+		// between the remote roles of two processes).
+		case <-restartCh:
+			goto restart
 		// When cluster cache stops abnormally, exit the program.
 		case <-clusterCtx.Done():
 			exitCode = 1
@@ -245,13 +235,44 @@ restart:
 		}
 	}
 exit:
-	cancelFunc()
 	deviceManager.Stop()
 	for _, p := range plugins {
 		_ = p.Stop()
 	}
 
 	return exitCode
+}
+
+func CreateClusterManager(kubeConfig *rest.Config, opt *options.Options) (ctrm.Manager, error) {
+	return ctrm.New(kubeConfig, ctrm.Options{
+		LeaderElection:         false,
+		HealthProbeBindAddress: "0", // Disable manager health probe service
+		PprofBindAddress: func() string {
+			if opt.PprofBindPort > 0 {
+				return fmt.Sprintf(":%d", opt.PprofBindPort)
+			}
+			return "0"
+		}(),
+		Cache: rtcache.Options{
+			// Trim managedFields to reduce cache memory usage.
+			DefaultTransform:         rtcache.TransformStripManagedFields(),
+			DefaultWatchErrorHandler: toolscache.DefaultWatchErrorHandler,
+			// Enable bookmark event adaptation WatchListClient feature.
+			DefaultEnableWatchBookmarks: ptr.To[bool](true),
+			ByObject: map[rtclient.Object]rtcache.ByObject{
+				// Preheat cache in advance.
+				&corev1.Pod{}: {
+					Field:     fields.OneTermEqualSelector("spec.nodeName", opt.NodeName),
+					Transform: rtcache.TransformStripManagedFields(),
+				},
+				&corev1.Node{}: {
+					Field:     fields.OneTermEqualSelector("metadata.name", opt.NodeName),
+					Transform: rtcache.TransformStripManagedFields(),
+				},
+			},
+		},
+		Metrics: metrics.Options{BindAddress: "0"}, // Disable manager metrics service
+	})
 }
 
 func main() {
@@ -262,7 +283,38 @@ func main() {
 	defer logs.FlushLogs()
 	log.SetLogger(klog.NewKlogr())
 
-	if exitCode := runApp(opt); exitCode != 0 {
+	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
+	if err := opt.Validate(); err != nil {
+		klog.Exitf("Invalid options: %v", err)
+	}
+
+	if exitCode := runApp(context.Background(), opt); exitCode != 0 {
 		klog.FlushAndExit(klog.ExitFlushTimeout, exitCode)
 	}
+}
+
+// pluginRestartCh merges the restart requests of every plugin that makes any
+// (see base.RestartNotifier); nil when no plugin does.
+func pluginRestartCh(plugins []base.DevicePlugin) <-chan struct{} {
+	merged := make(chan struct{}, 1)
+	notifiers := 0
+	for _, p := range plugins {
+		notifier, ok := p.(base.RestartNotifier)
+		if !ok {
+			continue
+		}
+		notifiers++
+		go func(ch <-chan struct{}) {
+			for range ch {
+				select {
+				case merged <- struct{}{}:
+				default: // a restart is already pending
+				}
+			}
+		}(notifier.RestartCh())
+	}
+	if notifiers == 0 {
+		return nil
+	}
+	return merged
 }

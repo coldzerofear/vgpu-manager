@@ -48,7 +48,7 @@ const Name = "BindPredicate"
 var _ predicate.BindPredicate = &nodeBinding{}
 
 func New(client kubernetes.Interface, recorder record.EventRecorder, podLister client.PodLister, serialBindNode bool) (*nodeBinding, error) {
-	minLockingDuration := 30 * time.Millisecond
+	minLockingDuration := 20 * time.Millisecond
 	locker := serial.NewLocker(serial.WithName(Name),
 		serial.WithEnabled(serialBindNode),
 		serial.WithLockDuration(&minLockingDuration))
@@ -84,7 +84,11 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 	// node this is queueing, not work.
 	lockStart := time.Now()
 	b.locker.Lock(args.Node)
-	defer b.locker.Unlock(args.Node)
+	lockedTime := time.Now()
+	defer func() {
+		metrics.ObserveStage(metrics.VerbBind, metrics.StageLockedTime, lockedTime)
+		b.locker.Unlock(args.Node)
+	}()
 	metrics.ObserveStage(metrics.VerbBind, metrics.StageLockWait, lockStart)
 
 	var (
@@ -112,7 +116,9 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 	}
 	if util.IsVGPUResourcePod(pod) {
 		nodeName, _ := util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
-		if nodeName != args.Node {
+		// A remote pod's predicate node is its GPU server; the pod is bound to a consumer node.
+		mode, _ := util.PodVGPUAccessMode(pod)
+		if nodeName == "" || (mode == util.AccessModeLocal && nodeName != args.Node) {
 			outcome = metrics.ResultBindNodeMismatch
 			err = fmt.Errorf("predicate node %q does not match the bound node %q", nodeName, args.Node)
 			klog.ErrorS(err, "", "pod", klog.KObj(pod), "predicateNode", nodeName, "bindingNode", args.Node)

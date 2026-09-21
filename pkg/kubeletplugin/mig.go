@@ -218,15 +218,6 @@ func (m *MigSpec) CanonicalName() DeviceName {
 	return m.Tuple().ToCanonicalName(m.Profile.String())
 }
 
-type MigProfileInfo struct {
-	profile    nvdev.MigProfile
-	placements []*MigDevicePlacement
-}
-
-func (p MigProfileInfo) String() string {
-	return p.profile.String()
-}
-
 type MigDevicePlacement struct {
 	nvml.GpuInstancePlacement
 }

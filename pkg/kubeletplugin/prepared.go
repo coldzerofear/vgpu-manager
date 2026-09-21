@@ -200,20 +200,20 @@ func (l PreparedDeviceList) UUIDs() []string {
 }
 
 // UUIDs for full GPUs, MIG devices, and Vfio devices.
-//func (g *PreparedDeviceGroup) UUIDs() []string {
-//	uuids := append(g.GpuUUIDs(), g.MigDeviceUUIDs()...)
-//	uuids = append(uuids, g.VfioDeviceUUIDs()...)
-//	slices.Sort(uuids)
-//	return uuids
-//}
+func (g *PreparedDeviceGroup) UUIDs() []string {
+	uuids := append(g.GpuUUIDs(), g.MigDeviceUUIDs()...)
+	uuids = append(uuids, g.VfioDeviceUUIDs()...)
+	slices.Sort(uuids)
+	return uuids
+}
 
 // UUIDs for full GPUs, MIG devices, and Vfio devices.
-//func (d PreparedDevices) UUIDs() []string {
-//	uuids := append(d.GpuUUIDs(), d.MigDeviceUUIDs()...)
-//	uuids = append(uuids, d.VfioDeviceUUIDs()...)
-//	slices.Sort(uuids)
-//	return uuids
-//}
+func (d PreparedDevices) UUIDs() []string {
+	uuids := append(d.GpuUUIDs(), d.MigDeviceUUIDs()...)
+	uuids = append(uuids, d.VfioDeviceUUIDs()...)
+	slices.Sort(uuids)
+	return uuids
+}
 
 // UUIDs only for full GPUs.
 func (l PreparedDeviceList) GpuUUIDs() []string {
@@ -223,6 +223,9 @@ func (l PreparedDeviceList) GpuUUIDs() []string {
 	}
 	for _, device := range l.VGpus() {
 		uuids.Insert(device.VGpu.Info.UUID)
+	}
+	if uuids.Len() == 0 {
+		return nil
 	}
 	return uuids.List()
 }
@@ -262,9 +265,9 @@ func (d PreparedDevices) MigDeviceUUIDs() []string {
 	return uuids
 }
 
-//func (g *PreparedDeviceGroup) VfioDeviceUUIDs() []string {
-//	return g.Devices.VfioDevices().UUIDs()
-//}
+func (g *PreparedDeviceGroup) VfioDeviceUUIDs() []string {
+	return g.Devices.VfioDevices().UUIDs()
+}
 
 func (l PreparedDeviceList) VfioDeviceUUIDs() []string {
 	var uuids []string
@@ -275,23 +278,24 @@ func (l PreparedDeviceList) VfioDeviceUUIDs() []string {
 	return uuids
 }
 
-//func (d PreparedDevices) VfioDeviceUUIDs() []string {
-//	var uuids []string
-//	for _, group := range d {
-//		uuids = append(uuids, group.VfioDeviceUUIDs()...)
-//	}
-//	slices.Sort(uuids)
-//	return uuids
-//}
+func (d PreparedDevices) VfioDeviceUUIDs() []string {
+	var uuids []string
+	for _, group := range d {
+		uuids = append(uuids, group.VfioDeviceUUIDs()...)
+	}
+	slices.Sort(uuids)
+	return uuids
+}
 
 // GetNonAdminDevices returns a map of device names that were requested
 // without admin access in the prepared claim.
 func (c *PreparedClaim) GetNonAdminDevices() map[string]struct{} {
+	if c.Status.Allocation == nil {
+		return map[string]struct{}{}
+	}
+
 	requested := make(map[string]struct{}, len(c.Status.Allocation.Devices.Results))
 
-	if c.Status.Allocation == nil {
-		return requested
-	}
 	for _, r := range c.Status.Allocation.Devices.Results {
 		if r.Driver != util.DRADriverName {
 			continue

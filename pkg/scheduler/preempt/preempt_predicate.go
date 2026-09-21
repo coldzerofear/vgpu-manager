@@ -184,6 +184,12 @@ func (p *vgpuPreempt) Preempt(
 		klog.V(5).InfoS("Preempt: pod is not a vGPU pod, passing input through", "pod", klog.KObj(pod))
 		return passthrough(args)
 	}
+	// Remote pods are not preempted: their GPUs are on other nodes, which the
+	// extender protocol cannot express. Keep kube-scheduler's own decision.
+	if req.AccessMode == util.AccessModeRemote {
+		klog.V(5).InfoS("Preempt: remote vGPU pod, passing input through", "pod", klog.KObj(pod))
+		return passthrough(args)
+	}
 
 	victimsMap, err := p.resolveVictimsMap(args)
 	if err != nil {
@@ -222,6 +228,10 @@ func (p *vgpuPreempt) Preempt(
 			node, err := p.nodeLister.Get(nodeName)
 			if err != nil {
 				klog.V(3).ErrorS(err, "Preempt: get node failed", "node", nodeName)
+				continue
+			}
+			if !node.DeletionTimestamp.IsZero() {
+				klog.V(4).InfoS("Preempt: node is already marked as deleted", "node", nodeName)
 				continue
 			}
 			nodeInfo, err := device.NewNodeInfo(node, device.WithGPUTopologyEnabled(topologyEnabled))
@@ -407,6 +417,12 @@ func (p *vgpuPreempt) refineForNode(
 	node := nodeInfo.GetNode()
 	nodeName := nodeInfo.GetName()
 
+	// Local pods do not get devices on a remote GPU server, as in the filter.
+	if util.IsRemoteServerNode(node) {
+		klog.V(3).InfoS("Preempt: node serves remote pods", "node", nodeName, "pod", klog.KObj(req.Pod))
+		metrics.RecordNodeReject(metrics.VerbPreempt, string(reason.NodeIsRemoteServer))
+		return nil, 0, false
+	}
 	// Fast-reject: if the node itself doesn't meet vGPU prerequisites,
 	// preempting any pod on it won't help.
 	if r := filter.CheckNode(node, filter.GetMemoryPolicyFunc(req.Pod)); r != nil {
@@ -415,6 +431,7 @@ func (p *vgpuPreempt) refineForNode(
 		metrics.RecordNodeReject(metrics.VerbPreempt, string(r.Primary))
 		return nil, 0, false
 	}
+
 	if req.Max.Number > nodeInfo.GetSchedulableDeviceCount() {
 		filterReason := reason.New(reason.InsufficientGPUCards).
 			WithDetail("max %d devices, node has %d schedulable",

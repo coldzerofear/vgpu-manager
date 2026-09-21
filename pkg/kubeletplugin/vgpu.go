@@ -29,6 +29,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/docker/go-units"
@@ -118,7 +119,7 @@ type VGPUManager struct {
 func NewVGPUManager(deviceLib *deviceLib, config *Config) *VGPUManager {
 	return &VGPUManager{
 		nvdevlib:          deviceLib,
-		contManagerPath:   util.ManagerRootPath,
+		contManagerPath:   config.Flags.ContainerManagerDir,
 		hostManagerPath:   config.Flags.HostManagerDir,
 		clientSets:        config.ClientSets,
 		deviceCoresRatio:  config.DeviceCoresRatio,
@@ -130,17 +131,6 @@ var (
 	CoresResourceName  = resourceapi.QualifiedName("cores")
 	MemoryResourceName = resourceapi.QualifiedName("memory")
 )
-
-func (m *VGPUManager) getComputePolicy(claim *resourceapi.ResourceClaim) util.ComputePolicy {
-	computePolicy := util.FixedComputePolicy
-	for key, val := range claim.GetAnnotations() {
-		if strings.HasSuffix(key, "/vgpu-compute-policy") && val != "" {
-			computePolicy = vgpu2.GetComputePolicy(val)
-			break
-		}
-	}
-	return computePolicy
-}
 
 func (m *VGPUManager) ensureClaimDirectories(claimUID string) (string, string) {
 	baseContPath := filepath.Join(m.contManagerPath, util.Claims, claimUID)
@@ -159,8 +149,7 @@ func (m *VGPUManager) ensurePartitionDirectories(claimUID, partitionKey string) 
 	baseHostPath := filepath.Join(m.hostManagerPath, util.Claims, claimUID, partitionKey)
 	configContPath := filepath.Join(baseContPath, util.Config)
 	preparedDirs := []string{
-		baseContPath,
-		configContPath,
+		baseContPath, configContPath,
 		filepath.Join(baseContPath, vgpu.VGPULockDirName),
 		filepath.Join(baseContPath, util.VMemNode),
 		filepath.Join(baseContPath, util.SMNode),
@@ -195,7 +184,7 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 		compMode |= util.CGroupv1Mode
 	}
 	compMode |= util.OpenKernelMode
-	containerDriverFile := filepath.Join(m.contManagerPath, "driver", vgpu.VGPUControlFileName)
+	containerDriverFile := filepath.Join(m.contManagerPath, util.Driver, vgpu.VGPUControlFileName)
 
 	oversold := "FALSE"
 	ratio := float64(m.deviceMemoryRatio) / float64(util.HundredCore)
@@ -221,12 +210,26 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	// by the NRI plugin at CreateContainer, not here. Carry the claim UID via CDI
 	// env so the NRI hook can correlate the container to its claim (validated
 	// against node prepared state; see §12.12.1 in dra_nri_integration_design.md).
+	//
+	// TODO(nri#282): this spec is also where we will declare the NRI plugin as
+	// required for the container, closing the one gap strict enforcement cannot
+	// reach on its own — a runtime restart between Prepare and CreateContainer
+	// skips the hook while these CDI edits still apply, so the container starts
+	// with the library but without its partition. The declaration would be a
+	// containerEdits.annotations entry naming util.DRADriverName under
+	// required-plugins.noderesource.dev, after which the runtime's default
+	// validator aborts container creation with a CreateContainerError naming the
+	// missing plugin. It cannot be written yet: CDI has no
+	// ContainerEdits.Annotations field (specs-go v1.1.0), and the NRI default
+	// validator reads required-plugins only from PodSandbox annotations as of
+	// v0.12.3. See the package comment in pkg/kubeletplugin/nri for the details
+	// and for what changes when the upstream work lands.
 	if featuregates.Enabled(featuregates.NRISupport) {
-		envs = append(envs, fmt.Sprintf("%s=%s", util.ManagerVGpuClaimUid, string(claim.UID)))
+		envs = append(envs, nri.NRIClaimEnv(claim))
 	} else {
-		envs = append(envs, fmt.Sprintf("%s=", util.ManagerVGpuClaimUid))
+		envs = append(envs, nri.NRIClaimEnv(nil))
 	}
-	hostLibraryPath := filepath.Join(m.hostManagerPath, vgpu.VGPUControlFileName)
+	hostLibraryPath := filepath.Join(m.hostManagerPath, util.Driver, vgpu.VGPUControlFileName)
 	hostLibraryPath = fmt.Sprintf("%s.%s", hostLibraryPath, version.Get().Version)
 	mounts := []*cdispec.Mount{
 		{
@@ -270,14 +273,24 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	}
 }
 
+func GetComputePolicy(obj metav1.Object) util.ComputePolicy {
+	computePolicy := util.FixedComputePolicy
+	if obj != nil {
+		for key, val := range obj.GetAnnotations() {
+			if val != "" && strings.HasSuffix(key, "/vgpu-compute-policy") {
+				computePolicy = vgpu2.GetComputePolicy(val)
+				break
+			}
+		}
+	}
+	return computePolicy
+}
+
 func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult, device *AllocatableDevice) *cdiapi.ContainerEdits {
 	if result == nil || device == nil || device.Type() != VGpuDeviceType {
 		return nil
 	}
-
-	computePolicy := m.getComputePolicy(claim)
 	idx := device.VGpu.Index
-
 	deviceMemoryRatio := device.VGpu.deviceMemoryRatio
 	if deviceMemoryRatio == 0 {
 		deviceMemoryRatio = m.deviceMemoryRatio
@@ -298,6 +311,7 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 		fmt.Sprintf("%s_%d=%s", util.ManagerVisibleDevice, idx, device.VGpu.UUID),
 	}
 
+	computePolicy := GetComputePolicy(claim)
 	if quantity, ok := result.ConsumedCapacity[CoresResourceName]; ok {
 		if hardVal, ok := quantity.AsInt64(); ok {
 			softVal := hardVal
@@ -434,8 +448,11 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 // Prepare-time GetPartitionMountContainerEdits, this mints no register UUID and
 // patches no claim annotation: in NRI mode the library registers via the pod-uid
 // path using the VGPU_POD_UID / VGPU_CONTAINER_NAME env injected here.
-func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
-	partitionKey := fmt.Sprintf("%s_%s", podUID, containerName)
+// The ctx carries the NRI request budget; it is accepted for signature
+// symmetry with the other hook callbacks and for future blocking work here.
+// Today this only touches the local filesystem.
+func (m *VGPUManager) GetNRIPartitionInjection(_ context.Context, claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
+	partitionKey := remote.NRIPartitionKey(podUID, containerName)
 	contBase, hostBase, err := m.ensurePartitionDirectories(claimUID, partitionKey)
 	if err != nil {
 		return nil, err
@@ -497,6 +514,10 @@ func (m *VGPUManager) Unprepare(claimRef kubeletplugin.NamespacedObject, _ Prepa
 	}
 	// claim marked for deletion, fast return
 	if !claim.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	if claim.UID != claimRef.UID {
+		klog.V(4).Infof("Cleaning vGPU registry failed, claim UID mismatch (%s != %s)", claimRef.UID, claim.UID)
 		return nil
 	}
 	metadata := client.PatchMetadata{Annotations: map[string]*string{}}

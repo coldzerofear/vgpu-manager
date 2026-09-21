@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
@@ -40,29 +41,35 @@ type Options struct {
 	Burst          int
 	Timeout        uint
 
-	Domain              string
-	NodeName            string
-	CGroupDriver        string
-	DeviceListStrategy  []string
-	DeviceSplitCount    int
-	DeviceMemoryScaling float64
-	DeviceMemoryFactor  int
-	DeviceCoresScaling  float64
-	NodeConfigPath      string
-	ExcludeDevices      string
-	DevicePluginPath    string
-	PprofBindPort       int
-	GDSEnabled          bool
-	MOFEDEnabled        bool
-	GDRCopyEnabled      bool
-	OpenKernelModules   bool
-	MigStrategy         string
-	ImexChannelIDs      []int
-	ImexRequired        bool
-	CDIAnnotationPrefix string
-	HostDriverRoot      string
-	ContainerDriverRoot string
-	FeatureGate         featuregate.MutableFeatureGate
+	Domain               string
+	NodeName             string
+	CGroupDriver         string
+	DeviceListStrategy   []string
+	DeviceSplitCount     int
+	DeviceMemoryScaling  float64
+	DeviceMemoryFactor   int
+	DeviceCoresScaling   float64
+	NodeConfigPath       string
+	ExcludeDevices       string
+	DevicePluginPath     string
+	PprofBindPort        int
+	GDSEnabled           bool
+	MOFEDEnabled         bool
+	GDRCopyEnabled       bool
+	OpenKernelModules    bool
+	MigStrategy          string
+	ImexChannelIDs       []int
+	ImexRequired         bool
+	CDIAnnotationPrefix  string
+	CDIRoot              string
+	HostDriverRoot       string
+	ContainerDriverRoot  string
+	RemoteServer         bool
+	RemoteConsumer       bool
+	RemoteConsumerNum    int
+	RemoteAgentEndpoint  string
+	IgnoreClientShimEtag bool
+	FeatureGate          featuregate.MutableFeatureGate
 }
 
 const (
@@ -76,7 +83,12 @@ const (
 	defaultDeviceMemoryScaling = 1.0
 	defaultDeviceCoresScaling  = 1.0
 	defaultPprofBindPort       = 0
-	defaultMigStrategy         = util.MigStrategyMixed
+	defaultMigStrategy         = util.MigStrategyNone
+	// defaultRemoteConsumerVGPU is how many remote vGPUs one consumer node
+	// runs at a time. It has no local GPUs to derive a number from, so this
+	// is a plain concurrency cap.
+	defaultRemoteConsumerVGPU = 1000
+
 	defaultCDIAnnotationPrefix = util.CDIDefaultAnnotationPrefix
 	defaultDriverRoot          = util.CDIDefaultDriverRoot
 
@@ -98,6 +110,8 @@ const (
 	DevicePluginClientMode featuregate.Feature = util.DevicePluginClientMode
 	// HonorPreAllocatedDeviceIDs makes preferred allocation follow pre-allocated device IDs whenever possible.
 	HonorPreAllocatedDeviceIDs featuregate.Feature = util.HonorPreAllocatedDeviceIDs
+	// RemoteGPUSupport feature gate allows this node to serve its GPUs to remote vGPU pods.
+	RemoteGPUSupport featuregate.Feature = util.RemoteGPUSupport
 )
 
 var (
@@ -111,6 +125,7 @@ var (
 		VirtualMemoryTracking:       {Default: false, PreRelease: featuregate.Alpha},
 		DevicePluginClientMode:      {Default: false, PreRelease: featuregate.Alpha},
 		HonorPreAllocatedDeviceIDs:  {Default: false, PreRelease: featuregate.Alpha},
+		RemoteGPUSupport:            {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
@@ -131,30 +146,38 @@ func NewOptions() *Options {
 			imexChannelIDs = append(imexChannelIDs, atoi)
 		}
 	}
+	agentEndpoint := util.GetEnvDefault("REMOTE_AGENT_ENDPOINT",
+		fmt.Sprintf(":%d", remotegpu.DefaultAgentPort))
 	return &Options{
-		QPS:                 defaultQPS,
-		Burst:               defaultBurst,
-		Timeout:             defaultTimeout,
-		Domain:              util.GetGlobalDomain(),
-		NodeName:            os.Getenv("NODE_NAME"),
-		CGroupDriver:        os.Getenv("CGROUP_DRIVER"),
-		DeviceListStrategy:  []string{defaultDeviceListStrategy},
-		DeviceSplitCount:    defaultDeviceSplitCount,
-		DeviceCoresScaling:  defaultDeviceCoresScaling,
-		DeviceMemoryScaling: defaultDeviceMemoryScaling,
-		DeviceMemoryFactor:  defaultDeviceMemoryFactor,
-		DevicePluginPath:    pluginapi.DevicePluginPath,
-		PprofBindPort:       defaultPprofBindPort,
-		MigStrategy:         defaultMigStrategy,
-		CDIAnnotationPrefix: defaultCDIAnnotationPrefix,
-		FeatureGate:         featureGate,
-		ImexChannelIDs:      imexChannelIDs,
-		ImexRequired:        util.GetEnvEnabled("IMEX_REQUIRED"),
-		GDSEnabled:          util.GetEnvEnabled("GDS_ENABLED"),
-		MOFEDEnabled:        util.GetEnvEnabled("MOFED_ENABLED"),
-		GDRCopyEnabled:      util.GetEnvEnabled("GDRCOPY_ENABLED"),
-		HostDriverRoot:      util.GetEnvDefault("NVIDIA_DRIVER_ROOT", defaultDriverRoot),
-		ContainerDriverRoot: util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
+		QPS:                  defaultQPS,
+		Burst:                defaultBurst,
+		Timeout:              defaultTimeout,
+		Domain:               util.GetGlobalDomain(),
+		NodeName:             os.Getenv("NODE_NAME"),
+		CGroupDriver:         os.Getenv("CGROUP_DRIVER"),
+		DeviceListStrategy:   []string{defaultDeviceListStrategy},
+		DeviceSplitCount:     defaultDeviceSplitCount,
+		DeviceCoresScaling:   defaultDeviceCoresScaling,
+		DeviceMemoryScaling:  defaultDeviceMemoryScaling,
+		DeviceMemoryFactor:   defaultDeviceMemoryFactor,
+		DevicePluginPath:     pluginapi.DevicePluginPath,
+		PprofBindPort:        defaultPprofBindPort,
+		MigStrategy:          defaultMigStrategy,
+		CDIRoot:              util.GetEnvDefault("CDI_ROOT", util.CDIRoot),
+		CDIAnnotationPrefix:  defaultCDIAnnotationPrefix,
+		FeatureGate:          featureGate,
+		ImexChannelIDs:       imexChannelIDs,
+		ImexRequired:         util.GetEnvEnabled("IMEX_REQUIRED"),
+		GDSEnabled:           util.GetEnvEnabled("GDS_ENABLED"),
+		MOFEDEnabled:         util.GetEnvEnabled("MOFED_ENABLED"),
+		GDRCopyEnabled:       util.GetEnvEnabled("GDRCOPY_ENABLED"),
+		HostDriverRoot:       util.GetEnvDefault("NVIDIA_DRIVER_ROOT", defaultDriverRoot),
+		ContainerDriverRoot:  util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
+		RemoteServer:         util.GetEnvEnabled("REMOTE_SERVER"),
+		RemoteConsumer:       util.GetEnvEnabled("REMOTE_CONSUMER"),
+		RemoteConsumerNum:    defaultRemoteConsumerVGPU,
+		IgnoreClientShimEtag: util.GetEnvEnabled("IGNORE_CLIENT_SHIM_ETAG"),
+		RemoteAgentEndpoint:  agentEndpoint,
 	}
 }
 
@@ -190,9 +213,15 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.MigStrategy, "mig-strategy", o.MigStrategy, "Strategy for starting MIG device plugin service. (supported values: \"none\" | \"single\" | \"mixed\")")
 	pflag.IntSliceVar(&o.ImexChannelIDs, "imex-channel-ids", o.ImexChannelIDs, "A list of IMEX channels to inject.")
 	pflag.BoolVar(&o.ImexRequired, "imex-required", o.ImexRequired, "The specified IMEX channels are required.")
+	pflag.StringVar(&o.CDIRoot, "cdi-root", o.CDIRoot, "Absolute path to the directory where CDI files will be generated.")
 	pflag.StringVar(&o.CDIAnnotationPrefix, "cdi-annotation-prefix", o.CDIAnnotationPrefix, "The prefix to use for CDI container annotation keys. (only used with the \"cdi-annotations\" strategy)")
 	pflag.StringVar(&o.HostDriverRoot, "host-driver-root", o.HostDriverRoot, "The root path for the NVIDIA driver installation on the host. (typical values are '/' or '/run/nvidia/driver')")
 	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications.")
+	pflag.BoolVar(&o.RemoteServer, "remote-server", o.RemoteServer, "Serve this node's GPUs to remote vGPU pods on other nodes. (requires the RemoteGPUSupport feature gate)")
+	pflag.BoolVar(&o.RemoteConsumer, "remote-consumer", o.RemoteConsumer, "Run remote vGPU pods on this node, whose GPUs are on remote servers. (requires the RemoteGPUSupport feature gate)")
+	pflag.IntVar(&o.RemoteConsumerNum, "remote-consumer-number", o.RemoteConsumerNum, "How many remote vGPUs this consumer node runs at a time.")
+	pflag.StringVar(&o.RemoteAgentEndpoint, "remote-agent-endpoint", o.RemoteAgentEndpoint, "The remote-agent on this node: grpc://host:port or unix:///path. An empty host means the node's InternalIP.")
+	pflag.BoolVar(&o.IgnoreClientShimEtag, "ignore-client-shim-etag", o.IgnoreClientShimEtag, "Do not inject LUPINE_CLIENT_ETAG and LUPINE_CLIENT_PLATFORM, so lupine-server cannot check that the client shim is the build it embeds. A mismatch then surfaces later, as a runtime failure instead of a refused session.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)
@@ -200,6 +229,62 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 
 func (o *Options) FlagParse() {
 	pflag.Parse()
+}
+
+// Validate checks the option combinations the flags alone cannot express.
+func (o *Options) Validate() error {
+	if o.FeatureGate.Enabled(RemoteGPUSupport) {
+		if o.FeatureGate.Enabled(GPUCoreResourcePlugin) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, GPUCoreResourcePlugin)
+		}
+		if o.FeatureGate.Enabled(GPUMemoryResourcePlugin) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, GPUMemoryResourcePlugin)
+		}
+		if o.FeatureGate.Enabled(DevicePluginClientMode) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, DevicePluginClientMode)
+		}
+		if o.FeatureGate.Enabled(HonorPreAllocatedDeviceIDs) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, HonorPreAllocatedDeviceIDs)
+		}
+		if !o.RemoteServer && !o.RemoteConsumer {
+			return fmt.Errorf("invalid feature gate %s: --remote-server or --remote-consumer must be enabled", RemoteGPUSupport)
+		}
+	}
+	if o.RemoteServer || o.RemoteConsumer {
+		if !o.FeatureGate.Enabled(RemoteGPUSupport) {
+			return fmt.Errorf("--remote-server and --remote-consumer require the %s feature gate", RemoteGPUSupport)
+		}
+		// Consumer no need to set up agent communication endpoints
+		if o.RemoteServer {
+			if _, err := remotegpu.ParseAgentEndpoint(o.RemoteAgentEndpoint); err != nil {
+				return err
+			}
+		}
+	}
+	if o.RemoteServer && !o.RemoteConsumer {
+		// No pod is admitted on a node that only serves its GPUs, so there is no
+		// failed allocation here to reschedule; that happens on consumer nodes.
+		if o.FeatureGate.Enabled(AllocationFailureReschedule) {
+			return fmt.Errorf("feature gate %s has nothing to do with --remote-server alone: pods are admitted on consumer nodes, enable it there", AllocationFailureReschedule)
+		}
+	}
+	if !o.RemoteServer && o.RemoteConsumer {
+		// A node that only consumes remote GPUs has no GPUs to partition. The
+		// plugin factory skips MIG for it either way; asking for a strategy
+		// here is a configuration mistake worth saying so.
+		if o.MigStrategy != util.MigStrategyNone {
+			return fmt.Errorf("--mig-strategy=%s: a node with --remote-consumer alone has no GPUs to partition, use \"none\"", o.MigStrategy)
+		}
+	}
+	if o.RemoteConsumer {
+		if o.MigStrategy == util.MigStrategySingle {
+			return fmt.Errorf("--remote-consumer=true and --mig-strategy=single, currently mutually exclusive")
+		}
+		if o.RemoteConsumerNum <= 0 {
+			return fmt.Errorf("--remote-consumer-number must be greater than 0")
+		}
+	}
+	return nil
 }
 
 func (o *Options) PrintAndExitIfRequested() {

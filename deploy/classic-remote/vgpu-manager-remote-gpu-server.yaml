@@ -1,0 +1,439 @@
+# remote-gpu-server: GPU 节点上的远程 GPU 服务端 Pod（一个 DaemonSet 三个容器）
+#   [remote-agent]   会话物化/回收 + EnsureSession gRPC(:14834) + client bundle 下发 + 就绪文件
+#   [lupine-server]  远程 GPU 数据面(:14833)，等 agent 就绪文件后再启动（不依赖 init/sidecar 容器，兼容旧集群）
+#   [device-monitor] 指标采集（远程容器按会话 pids.config 归账，需 RemoteGPUSupport gate）
+#
+# 与 DRA 路径（deploy/dra-remote）的唯一区别是 agent 的 SESSION_OWNER：这里的会话归属是
+# **Pod**（设备插件路径），而不是 ResourceClaim。因此本 Pod 不需要任何 resource.k8s.io 权限。
+# 部署在打了 vgpu-manager=remote-server 标签的 GPU 节点上。
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vgpu-manager-remote-gpu-server
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vgpu-manager-remote-gpu-server:role
+rules:
+  # remote-agent（SESSION_OWNER=pod）：watch 本节点服务的远程 Pod（标签 nvidia.com/metrics-node=<本节点>）
+  #   与本节点 Node 对象（设备快照来自 node-device-register 注解）；缓存落后时按名字直读 Pod。
+  # device-monitor：同一组 Pod/Node 读权限。
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
+#  # SESSION_OWNER=auto（同时服务 claim 与 pod 会话，用于 DRA 与设备插件混布的集群）时补上：
+#  - apiGroups: ["resource.k8s.io"]
+#    resources: ["resourceslices", "resourceclaims"]
+#    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vgpu-manager-remote-gpu-server-as-role
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vgpu-manager-remote-gpu-server:role
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-remote-gpu-server
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vgpu-manager-remote-gpu-server
+  namespace: kube-system
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: vgpu-manager-remote-gpu-server
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: vgpu-manager-remote-gpu-server
+        vgpu-manager.io/ignore-webhook: "true"
+        # 【按域名寻址时打开】让 webhook 按本 Pod 所在节点名生成 spec.hostname 并注入 HOSTNAME
+        # 环境变量，配合下面的 subdomain 与 headless Service 得到每节点一个稳定域名。
+        # 需要部署本目录的 webhook（它多了一个 /pods/hostname 入口）。
+#        vgpu-manager.io/node-hostname: "true"
+    spec:
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+        - effect: NoSchedule
+          operator: Exists
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      # SESSION 记账硬要求：pids.config 记子进程 getpid()，NVML 返回宿主 PID，
+      # 无 hostPID 两者对不上，限额与监控静默失效。
+      hostPID: true
+      # endpoint = 节点 IP:14833/:14834；lupine-server 与 agent 直接监听 underlay 网卡。
+      # 这也是推荐形态：数据面不经 CNI 封装，且节点 IP 天然稳定（Pod 重建后地址不变）。
+      #
+      # 【集群禁止 hostNetwork 时】改成下面这套按域名寻址（见 README"按域名寻址"一节）：
+      #   hostNetwork: false
+      #   dnsPolicy: ClusterFirst
+      #   subdomain: vgpu-manager-remote-gpu-server-headless   # = 本文件末尾 headless Service 名
+      # 并打开上面的 node-hostname 标签与 remote-agent 的两个 ADVERTISE_* 环境变量。
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-node-critical
+      nodeSelector:
+        # 运维打的标签。注意不要用 nvidia.com/remote-server：那一个是设备插件自己发布的，
+        # 插件没跑起来时它并不存在，拿它当 nodeSelector 会导致本 DaemonSet 永远调度不上。
+        vgpu-manager: remote-server
+      serviceAccountName: vgpu-manager-remote-gpu-server
+      initContainers:
+        # 把 libvgpu-control.so / nvidia-cdi-hook 等文件从镜像落盘到节点 hostPath，
+        # lupine-server 的 LD_PRELOAD 与 checkpoint provider 都指向它。
+        - name: init-install
+          image: coldzerofear/vgpu-manager:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
+          env:
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
+          resources:
+            requests:
+              cpu: 10m
+              memory: 15Mi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: manager-root
+              mountPath: /etc/vgpu-manager
+              mountPropagation: Bidirectional
+      containers:
+        - name: remote-agent
+          image: coldzerofear/vgpu-manager:latest      # ← 需含 remote-agent 二进制
+          imagePullPolicy: IfNotPresent
+          command:
+            - remote-agent
+            - --kube-api-qps=20
+            - --kube-api-burst=30
+            - --v=4
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # 会话归属：pod = 设备插件路径（本部署形态）；claim = DRA 路径；
+            # auto = 两种都服务（混布集群用，集群没有 DRA API 时只打日志跳过 claim，
+            # 需要上面 RBAC 里被注释的 resource.k8s.io 权限）。
+            - name: SESSION_OWNER
+              value: "pod"
+            # 就绪文件放 pod 级 emptyDir：hostPath 上的陈旧文件会破坏"agent 先起"的排序语义。
+            - name: READY_FILE
+              value: /run/vgpu/ready
+            - name: LISTEN_PORT
+              value: "14834"
+            - name: LUPINE_PORT
+              value: "14833"   # ← 与 lupine-server的LUPINE_PORT 保持一致
+            # agent 探测 server 的地址（同 pod，host 留空 = 127.0.0.1）。host 是回环时，agent 会在
+            # 本机地址里找一个 server 同样应答的（优先节点 InternalIP）作为对外 endpoint，由设备插件
+            # 发布成节点注解 nvidia.com/remote-endpoints
+            - name: REMOTE_SERVER_ENDPOINT
+              value: ":$(LUPINE_PORT)"
+            # 【按域名寻址时打开这一组】HOSTNAME 由 webhook 按节点名注入；两个 ADVERTISE_*
+            # 让 agent 把域名（而不是 Pod IP）报给设备插件去发布。少了 agent 那条，消费侧
+            # 会拿到 Pod IP：每次 Pod 重建后要等一轮（5s）注解刷新才恢复。
+#            - name: POD_NAMESPACE
+#              valueFrom:
+#                fieldRef:
+#                  fieldPath: metadata.namespace
+#            - name: HEADLESS_SERVICE_NAME
+#              value: "vgpu-manager-remote-gpu-server-headless"
+#            - name: CLUSTER_DOMAIN
+#              value: "cluster.local"
+#            - name: ADVERTISE_SERVER_ENDPOINT
+#              value: "http://$(HOSTNAME).$(HEADLESS_SERVICE_NAME).$(POD_NAMESPACE).svc.$(CLUSTER_DOMAIN):$(LUPINE_PORT)"
+#            - name: ADVERTISE_AGENT_ENDPOINT
+#              value: "grpc://$(HOSTNAME).$(HEADLESS_SERVICE_NAME).$(POD_NAMESPACE).svc.$(CLUSTER_DOMAIN):$(LISTEN_PORT)"
+            # gRPC 监听，逗号分隔可多个：grpc://:14834 供消费节点的设备插件调 EnsureSession /
+            # FetchClientBundle；追加 unix 套接字供同节点的设备插件（server 角色）探测 ServerInfo。
+            - name: LISTEN_SERVER_ENDPOINT
+              value: "grpc://:$(LISTEN_PORT),unix:///etc/vgpu-manager/agent.sock"
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
+            - name: FEATURE_GATES
+              value: SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
+            # 会话目录在 manager-root hostPath 下（与 lupine-server、monitor 共享）
+            - name: VGPU_CONFIG_SESSION_BASE
+              value: $(CONTAINER_MANAGER_DIR)/remote-sessions
+          ports:
+            - name: grpc
+              containerPort: 14834
+          startupProbe:
+            grpc:
+              port: 14834
+              service: liveness
+            failureThreshold: 60
+            periodSeconds: 10
+            timeoutSeconds: 10
+          livenessProbe:
+            grpc:
+              port: 14834
+              service: liveness
+            failureThreshold: 3
+            periodSeconds: 30
+            timeoutSeconds: 10
+          # readiness = 缓存已同步 且 lupine-server 最近一次探测应答；只是可观测性信号，不会杀容器。
+          readinessProbe:
+            grpc:
+              port: 14834
+              service: readiness
+            failureThreshold: 1
+            periodSeconds: 10
+            timeoutSeconds: 5
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: manager-root
+              mountPath: /etc/vgpu-manager
+            - name: agent-ready
+              mountPath: /run/vgpu
+        - name: lupine-server
+          # fork 自产的静态 server 镜像：只依赖 glibc，不带 cuda-compat，也不覆盖 LD_LIBRARY_PATH，
+          # 驱动库全部由 nvidia-container-runtime 注入。镜像的 CUDA 版本必须 ≤ 节点驱动支持的 CUDA
+          # （13.3 需驱动 ≥ 580，老驱动换 cuda-12.9.1 / cuda-11.8.0）。
+          # 正式环境请改用 release tag 或 @sha256 digest。
+          image: ghcr.io/coldzerofear/lupine-server-static:cuda-13.3.1    # ← 按节点驱动 / release 修改
+          imagePullPolicy: IfNotPresent
+          command: [bash, -c]
+          args:
+            - |-
+              # 等待 remote-agent preflight 完成（会话目录骨架就绪）后再启动，
+              # 保证启动先后顺序且不依赖 init/sidecar 容器（兼容旧 k8s）。
+              until [ -f /run/vgpu/ready ]; do
+                echo "waiting for remote-agent ready file..."
+                sleep 2
+              done
+              # 前置校验：隔离库必须已由 init-install 落盘且可读，否则 LD_PRELOAD 会静默跳过、
+              # checkpoint provider 装不上，server 会以"无隔离"状态跑起来——宁可启动失败。
+              : "${LUPINE_CHECKPOINT_LIBRARY:?must point to libvgpu-control.so}"
+              if [ ! -r "$LUPINE_CHECKPOINT_LIBRARY" ]; then
+                echo "LUPINE_CHECKPOINT_LIBRARY=$LUPINE_CHECKPOINT_LIBRARY is missing or unreadable; was init-install run?" >&2
+                exit 1
+              fi
+              LD_PRELOAD=$LUPINE_CHECKPOINT_LIBRARY:$LD_PRELOAD exec /opt/lupine/bin/lupine_driver_server
+          env:
+            - name: LUPINE_PORT
+              value: "14833"                               # ← 服务端监听端口
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
+            - name: VGPU_CONFIG_SESSION_BASE
+              value: $(CONTAINER_MANAGER_DIR)/remote-sessions
+            - name: VGPU_REMOTE_MODE
+              value: "1"
+            # 隔离库既是 LD_PRELOAD hook 库又是 lupine checkpoint provider，两个变量指向同一个 .so。
+            # 它由 init-install 从 vgpu-manager 镜像落盘到节点 /etc/vgpu-manager/driver/。
+            - name: LUPINE_CHECKPOINT_LIBRARY
+              value: $(CONTAINER_MANAGER_DIR)/driver/libvgpu-control.so
+            - name: CUDA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: all
+            - name: NVIDIA_MIG_CONFIG_DEVICES
+              value: all
+            - name: LUPINE_LOG_LEVEL
+              value: "1"
+            - name: LUPINE_TRACE
+              value: "1"
+            - name: LOGGER_LEVEL    # vGPU library 日志级别
+              value: "2"
+            - name: LD_LIBRARY_PATH
+              value: /usr/lib64:/lib64:/usr/lib/x86_64-linux-gnu:/usr/lib/aarch64-linux-gnu:/lib/x86_64-linux-gnu:/lib/aarch64-linux-gnu:/usr/local/cuda/compat:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs
+          securityContext:
+            privileged: true
+          resources: {}
+          ports:
+            - name: http
+              containerPort: 14833
+          # 端口开着就算就绪。不用 httpGet：14833 也答 HTTP/1.x，但 bundle 路径会整包下载。
+          readinessProbe:
+            failureThreshold: 3
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            successThreshold: 1
+          livenessProbe:
+            failureThreshold: 3
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            successThreshold: 1
+          volumeMounts:
+            - name: manager-root
+              mountPath: /etc/vgpu-manager
+            - name: agent-ready
+              mountPath: /run/vgpu
+              readOnly: true
+        - name: device-monitor
+          image: coldzerofear/vgpu-manager:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - device-monitor
+            # 设备插件路径：不要加 --enable-dra-monitor（那是 DRA 路径的采集器）。
+            # 远程容器的实时用量按会话的 pids.config 归账（消费 Pod 在别的节点，cgroup 归账不可用）；
+            # 容器级指标 node=<本服务器>、pod_node=<消费节点>、access_mode=remote。
+            - --feature-gates=RemoteGPUSupport=true,SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
+            - --server-bind-port=3456                      # ← hostNetwork 端口，冲突时修改
+            - --container-driver-root=/driver-root
+            - --kube-api-qps=20
+            - --kube-api-burst=30
+            - --v=4
+          ports:
+            - name: metrics
+              containerPort: 3456
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CGROUP_DRIVER
+              value: auto
+            - name: KUBE_FEATURE_WatchListClient
+              value: "true"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_MIG_MONITOR_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
+            - name: VGPU_CONFIG_SESSION_BASE
+              value: $(CONTAINER_MANAGER_DIR)/remote-sessions
+          securityContext:
+            privileged: true
+          resources: {}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: kubelet-root
+              mountPath: /var/lib/kubelet
+              readOnly: true
+            - name: pod-resources
+              mountPath: /var/lib/kubelet/pod-resources
+              readOnly: true
+            - name: manager-root
+              mountPath: /etc/vgpu-manager
+            - name: cgroup-root
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: driver-root
+              mountPath: /driver-root
+              readOnly: true
+      volumes:
+        - name: manager-root
+          hostPath:
+            path: /etc/vgpu-manager
+            type: DirectoryOrCreate
+        - name: agent-ready
+          emptyDir: {}
+        - name: kubelet-root
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: pod-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+            type: Directory
+        - name: cgroup-root
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: driver-root
+          hostPath:
+            path: /
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vgpu-manager-remote-gpu-server
+  namespace: kube-system
+spec:
+  ports:
+    - name: grpc
+      port: 14834
+      protocol: TCP
+      targetPort: grpc
+    - name: http
+      port: 14833
+      protocol: TCP
+      targetPort: http
+    - name: metrics
+      port: 3456
+      protocol: TCP
+      targetPort: metrics
+  selector:
+    app: vgpu-manager-remote-gpu-server
+  type: ClusterIP
+---
+# 每节点一个稳定域名：<spec.hostname>.<本 Service 名>.<namespace>.svc.<cluster domain>
+# spec.hostname 由 webhook 按节点名生成（标签 vgpu-manager.io/node-hostname=true），
+# Pod 的 subdomain 必须等于本 Service 名。消费容器拿到的 LUPINE_SERVER 是这个域名，
+# 所以服务端 Pod 重建换 IP 后，连着它的容器重启即可恢复，不需要删 Pod 重新调度。
+#
+# publishNotReadyAddresses: true 是刻意的：记录只要 Pod 有 IP 就存在。否则 Pod 就绪与否
+# （三个容器全 Ready 才算）会牵动 DNS，monitor 探针抖一下整台服务器就解析不出来了，而且
+# 重建期间的 NXDOMAIN 会被 CoreDNS 否定缓存住（默认 30s）。服务端健康与否由节点注解
+# nvidia.com/remote-endpoints（探测失败发 {}）告诉调度器，不靠 DNS 表达。
+#
+# hostNetwork 模式下同样可以部署它：那时记录解析到节点 IP，是同一套寻址的另一种落地。
+apiVersion: v1
+kind: Service
+metadata:
+  name: vgpu-manager-remote-gpu-server-headless
+  namespace: kube-system
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: vgpu-manager-remote-gpu-server
+  ports:
+    - name: http
+      port: 14833
+      protocol: TCP
+      targetPort: http
+    - name: grpc
+      port: 14834
+      protocol: TCP
+      targetPort: grpc

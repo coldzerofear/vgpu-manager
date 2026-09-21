@@ -14,6 +14,9 @@ spec:
             requests:
               cores: 50
               memory: 4Gi
+          selectors:
+            - cel:
+                expression: "device.attributes['manager.nvidia.com'].type == 'vgpu' && device.attributes['manager.nvidia.com'].accessMode == 'local'"
           allocationMode: ExactCount
           count: 2
 ---

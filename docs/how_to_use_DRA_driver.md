@@ -21,7 +21,8 @@ Using DRA requires the independent installation of the DRA driver for the vgpu-m
 You can use the following command to deploy the vgpu-manager's DRA driver
 
 ```bash
-kubectl apply -f deploy/dra/vgpu-manager-kubeletplugin.yaml
+kubectl apply -f deploy/dra-local/vgpu-manager-dra-driver.yaml
+kubectl apply -f deploy/dra-local/vgpu-manager-deviceclass.yaml
 ```
 
 ## Usage example
@@ -45,7 +46,7 @@ DRA Webhook supports converting the traditional vGPU resource request format of 
 You can deploy a webhook using the following command
 
 ```yaml
-kubectl apply -f deploy/dra/vgpu-manager-webhook.yaml
+kubectl apply -f deploy/dra-local/vgpu-manager-dra-webhook.yaml
 ```
 
 Request VGPU like using device plugins

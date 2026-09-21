@@ -158,8 +158,8 @@ func runApp(opt *options.Options) (exitCode int) {
 		klog.Errorln("The watch-lease and leader-elect functions are mutually exclusive and cannot be enabled simultaneously")
 		return exitCode
 	}
-	podName := strings.TrimSpace(os.Getenv("POD_NAME"))
-	podNamespace := strings.TrimSpace(os.Getenv("POD_NAMESPACE"))
+	podName := util.GetEnvDefault("POD_NAME", "")
+	podNamespace := util.GetEnvDefault("POD_NAMESPACE", "")
 	leaseName := strings.TrimSpace(opt.LeaderElectResourceName)
 	leaseNamespace := strings.TrimSpace(opt.LeaderElectResourceNamespace)
 	if opt.WatchLease || opt.LeaderElect {
@@ -188,17 +188,10 @@ func runApp(opt *options.Options) (exitCode int) {
 			klog.Errorln("Enabling watch-lease requires specifying leader-identity-prefix")
 			return exitCode
 		}
-		leaseDetector, err := NewLeaseDetector(factory,
-			leaseNamespace, leaseName, leaderIdentityPrefix,
-			WithStartCallback(func() {
-				patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower)
-			}),
-			WithLeaderCallback(func() {
-				patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueLeader)
-			}),
-			WithReleaseCallback(func() {
-				patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower)
-			}),
+		leaseDetector, err := NewLeaseDetector(factory, leaseNamespace, leaseName, leaderIdentityPrefix,
+			WithStartCallback(func() { patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower) }),
+			WithLeaderCallback(func() { patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueLeader) }),
+			WithReleaseCallback(func() { patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower) }),
 		)
 		if err != nil {
 			klog.Errorf("Initialization of LeaseDetector failed: %v", err)
@@ -212,6 +205,8 @@ func runApp(opt *options.Options) (exitCode int) {
 		leaderIdentity := uuid.NewString()
 		if leaderIdentityPrefix := strings.TrimSpace(opt.LeaderIdentityPrefix); leaderIdentityPrefix != "" {
 			leaderIdentity = fmt.Sprintf("%s_%s", leaderIdentityPrefix, leaderIdentity)
+		} else if hostname, err := os.Hostname(); err == nil && hostname != "" {
+			leaderIdentity = fmt.Sprintf("%s_%s", hostname, leaderIdentity)
 		}
 		leaderElector, err := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
 			Lock: &resourcelock.LeaseLock{

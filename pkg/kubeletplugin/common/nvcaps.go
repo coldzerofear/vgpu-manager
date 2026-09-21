@@ -166,7 +166,7 @@ func ParseNVCapDeviceInfo(nvcapsFilePath string) (*NVcapDeviceInfo, error) {
 	info.Path = fmt.Sprintf("%s/nvidia-cap%d", devNvidiaCapsPath, info.Minor)
 
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error reading '%s': %w", nvcapsFilePath, err)
 	}
 
 	return info, nil
@@ -207,7 +207,7 @@ func GetDeviceMajor(name string) (int, error) {
 	// unix.Mkdev()).
 	major, err := strconv.ParseInt(matches[1], 10, 32)
 	if err != nil {
-		return -1, fmt.Errorf("int conversion failed for '%v': %w", matches[1], err)
+		return -1, fmt.Errorf("error parsing device major %s from '%s': %w", matches[1], procDevicesPath, err)
 	}
 
 	// ParseInt() always returns an integer of explicit type `int64`. We have

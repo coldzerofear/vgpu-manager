@@ -74,13 +74,13 @@ vgpu-manager 的设备插件原先只支持两种把「设备列表」传递给�
 > 此时只需设置 `--driver-root` 为宿主机上的驱动路径（如 `/run/nvidia/driver`），**宿主机同名路径会
 > 被挂载到容器的相同路径**，因此容器内读取路径与写入规范的宿主机路径天然一致，无需再设 target 参数。
 > Helm chart 会在 `driverRoot` 设为非 `/` 值时，自动把该路径同时挂载进 **device-plugin 与
-> device-monitor** 两个容器；`deploy/` 原始 YAML 中也提供了对应的注释示例，按需取消注释。
+> device-monitor** 两个容器；`deploy/classic-local/` 原始 YAML 中也提供了对应的注释示例，按需取消注释。
 
 ## 4. 运行时前提
 
 1. **容器运行时已启用 CDI**：containerd ≥ 1.7 或 CRI-O（开启 CDI），或 NVIDIA 运行时的 cdi 模式；
 2. **`/var/run/cdi` 从宿主机挂载进设备插件容器**：插件把生成的规范写到这里，运行时才能读到；
-   - `deploy/vgpu-manager-deviceplugin.yaml` 已新增 `cdi-root` 卷与挂载；
+   - `deploy/classic-local/vgpu-manager-deviceplugin.yaml` 已新增 `cdi-root` 卷与挂载；
    - Helm chart 在 `deviceListStrategy` 含 `cdi` 时自动挂载（host 路径由 `cdiRoot` 控制）。
 3. **CDI hook 二进制存在于宿主机**：CDI 规范里的 hook 由**宿主机容器运行时**在拉起业务容器时执行，
    因此该二进制必须在宿主机上对应路径存在（生成规范本身不需要它，插件也不会执行它）。

@@ -18,6 +18,7 @@ spec:
       {{- else }}
       scheme: http
       {{- end }}
+      honorLabels: true
   namespaceSelector:
     matchNames:
       - {{ .Release.Namespace | quote }}

@@ -1,0 +1,331 @@
+# 调度器：与 deploy/classic-local/vgpu-manager-scheduler.yaml 完全相同 —— 远程 vGPU 不需要
+# 调度器侧的任何额外配置，同一个扩展器同时服务本地 Pod 与远程 Pod：
+#   * 本地 Pod：候选节点就是 GPU 节点，行为不变（仍然只返回预分配成功的那一个节点）；
+#   * 远程 Pod（注解 nvidia.com/vgpu-access-mode: remote）：候选节点是消费节点，扩展器在
+#     服务器节点上跑原有 nodeFilter → deviceFilter → allocator，把 predicate-node 写成服务器节点，
+#     然后把结果映射回所有可用的消费节点，由 kube-scheduler 打分选定。
+# 集群里已经部署过 classic-local 的调度器时，跳过本文件即可（不要重复部署两份扩展器）。
+#
+# managedResources 的含义对远程 Pod 同样成立：vgpu-number 是消费节点真实上报的扩展资源
+# （ignoredByScheduler: false），而 vgpu-memory / vgpu-cores 只给扩展器看（true）——消费节点
+# 不注册这两项，kubelet 准入时会把节点未上报的扩展资源从请求里丢掉，所以远程 Pod 照常可以写它们。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vgpu-manager-scheduler
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vgpu-manager-scheduler-as-kube-scheduler
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-scheduler
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: system:kube-scheduler
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vgpu-manager-scheduler-as-volume-scheduler
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-scheduler
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: system:volume-scheduler
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vgpu-manager-scheduler-as-daemon-set-controller
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-scheduler
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: system:controller:daemon-set-controller
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vgpu-manager-scheduler:leader-election-role
+  namespace: kube-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resourceNames: ["vgpu-manager-scheduler"]
+    resources: ["leases"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vgpu-manager-scheduler:role
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["patch", "update"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  # Here are some resources that scheduling plugins may use
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["deviceclasses", "resourceclaims", "resourceslices", "resourceclaimtemplates"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["topology.node.k8s.io"]
+    resources: ["noderesourcetopologies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.x-k8s.io"]
+    resources: ["podgroups", "elasticquotas", "podgroups/status", "elasticquotas/status"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  - apiGroups: [ "appgroup.diktyo.x-k8s.io" ]
+    resources: [ "appgroups" ]
+    verbs: [ "get", "list", "watch", "create", "delete", "update", "patch" ]
+  - apiGroups: [ "networktopology.diktyo.x-k8s.io" ]
+    resources: [ "networktopologies" ]
+    verbs: [ "get", "list", "watch", "create", "delete", "update", "patch" ]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["security-profiles-operator.x-k8s.io"]
+    resources: ["seccompprofiles", "profilebindings"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vgpu-manager-scheduler-as-role
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-scheduler
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: vgpu-manager-scheduler:role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vgpu-manager-scheduler-as-leader-election-role
+  namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-scheduler
+    namespace: kube-system
+roleRef:
+  kind: Role
+  name: vgpu-manager-scheduler:leader-election-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vgpu-manager-scheduler-as-authentication-reader
+  namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-scheduler
+    namespace: kube-system
+roleRef:
+  kind: Role
+  name: extension-apiserver-authentication-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vgpu-manager-scheduler-config
+  namespace: kube-system
+data:
+  config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: true
+      resourceName: vgpu-manager-scheduler
+      resourceNamespace: kube-system
+    profiles:
+    - schedulerName: vgpu-scheduler
+    extenders:
+    - urlPrefix: "http://127.0.0.1:3456/scheduler"
+      filterVerb: filter
+      bindVerb: bind
+      preemptVerb: preempt
+      enableHTTPS: false
+      nodeCacheCapable: true
+      weight: 1
+      httpTimeout: 30s
+      ignorable: false
+      managedResources:
+      - name: "nvidia.com/vgpu-number"
+        ignoredByScheduler: false
+      - name: "nvidia.com/vgpu-cores"
+        ignoredByScheduler: true
+      - name: "nvidia.com/vgpu-memory"
+        ignoredByScheduler: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: vgpu-manager-scheduler
+  name: vgpu-manager-scheduler
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: vgpu-manager-scheduler
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        vgpu-manager.io/ignore-webhook: "true"
+        app: vgpu-manager-scheduler
+    spec:
+      serviceAccountName: vgpu-manager-scheduler
+      # Mark this pod as a critical add-on; when enabled, the critical add-on
+      # scheduler reserves resources for critical add-on pods so that they can
+      # be rescheduled after a failure.
+      # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
+      priorityClassName: system-node-critical
+      terminationGracePeriodSeconds: 30
+      restartPolicy: Always
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+        - key: CriticalAddonsOnly
+          operator: Exists
+      affinity:
+        nodeAffinity:
+          # Pod should run as much as possible on control plane nodes.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+        podAntiAffinity:
+          # When there are multiple replicas, try to disperse pods on different nodes as much as possible.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values: ["vgpu-manager-scheduler"]
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler:v1.28.15
+          imagePullPolicy: IfNotPresent
+          name: kube-scheduler
+          command:
+            - kube-scheduler
+            - --config=/config/config.yaml
+            - --v=4
+          resources:
+            requests:
+              cpu: 100m
+          volumeMounts:
+            - name: scheduler-config
+              mountPath: /config
+          ports:
+            - name: https
+              containerPort: 10259
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            successThreshold: 1
+            timeoutSeconds: 5
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+        - image: coldzerofear/vgpu-manager:latest
+          imagePullPolicy: IfNotPresent
+          name: device-scheduler
+          command:
+            - device-scheduler
+            - --server-bind-port=3456
+            - --watch-lease
+            - --leader-elect-resource-name=vgpu-manager-scheduler
+            - --leader-elect-resource-namespace=kube-system
+            - --v=4
+          env:
+            - name: KUBE_FEATURE_WatchListClient
+              value: "true"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 3456
+          resources: {}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: scheduler-config
+          configMap:
+            name: vgpu-manager-scheduler-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vgpu-manager-scheduler
+  namespace: kube-system
+spec:
+  ports:
+    - name: http
+      port: 3456
+      protocol: TCP
+      targetPort: http
+  selector:
+    app: vgpu-manager-scheduler
+    vgpu-manager.io/scheduler-role: leader
+  type: ClusterIP
