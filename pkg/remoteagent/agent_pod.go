@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -224,7 +225,8 @@ func (a *Agent) ensurePodSession(ctx context.Context, req *remoteagent.EnsureSes
 	if err != nil {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
-	if err = a.store.Materialize(req.Session, spec, nd); err != nil {
+	policy := kubeletplugin.GetComputePolicy(pod)
+	if err = a.store.Materialize(req.Session, spec, nd, policy); err != nil {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
 	return nil

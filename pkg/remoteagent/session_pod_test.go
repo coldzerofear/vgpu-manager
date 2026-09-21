@@ -25,6 +25,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -169,7 +170,7 @@ func TestMaterializePodSession(t *testing.T) {
 	require.NoError(t, err)
 	token := remotegpu.SessionToken("pod-uid", "app")
 
-	require.NoError(t, store.Materialize(token, spec, nd))
+	require.NoError(t, store.Materialize(token, spec, nd, kubeletplugin.GetComputePolicy(pod)))
 
 	root := filepath.Join(base, token)
 	for _, name := range []string{
@@ -197,10 +198,10 @@ func TestMaterializePodSession(t *testing.T) {
 	assert.Equal(t, []string{token}, store.TokensOfOwner("pod-uid"))
 
 	// Idempotent: the library may already have state in the session.
-	require.NoError(t, store.Materialize(token, spec, nd))
+	require.NoError(t, store.Materialize(token, spec, nd, kubeletplugin.GetComputePolicy(pod)))
 
 	// Another pod must not take over a live session.
 	other := spec
 	other.Owner.UID = "other-uid"
-	assert.Error(t, store.Materialize(token, other, nd))
+	assert.Error(t, store.Materialize(token, other, nd, kubeletplugin.GetComputePolicy(pod)))
 }

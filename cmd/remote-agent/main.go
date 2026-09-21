@@ -119,7 +119,7 @@ func main() {
 		},
 		Action: func(c *cli.Context) error {
 			if util.PathIsNotExist(cfg.ContainerManagerDir) {
-				return fmt.Errorf("container-manager-dir %q does not exist", cfg.ContainerManagerDir)
+				return fmt.Errorf("invalid --container-manager-dir %q: does not exist", cfg.ContainerManagerDir)
 			}
 			switch cfg.SessionOwnerKind = remoteagent.OwnerKind(sessionOwner); cfg.SessionOwnerKind {
 			case remoteagent.OwnerClaim, remoteagent.OwnerPod, remoteagent.OwnerAuto:

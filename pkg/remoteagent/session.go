@@ -365,7 +365,7 @@ func (s *SessionStore) dir(token string) string {
 // Materialize writes the session directory for spec. It is idempotent: an
 // already complete session of the same owner is left untouched (the library
 // may have live state in it), so retries are safe.
-func (s *SessionStore) Materialize(token string, spec SessionSpec, nd *NodeDevices) error {
+func (s *SessionStore) Materialize(token string, spec SessionSpec, nd *NodeDevices, policy util.ComputePolicy) error {
 	if err := validateToken(token); err != nil {
 		return err
 	}
@@ -391,8 +391,8 @@ func (s *SessionStore) Materialize(token string, spec SessionSpec, nd *NodeDevic
 	},
 		vgpuconfig.WithDeviceInfos(spec.Infos),
 		vgpuconfig.WithDeviceClaims(spec.Claims),
+		vgpuconfig.WithComputePolicy(policy),
 		vgpuconfig.WithCompatibilityMode(util.SessionMode),
-		vgpuconfig.WithComputePolicy(util.FixedComputePolicy),
 		vgpuconfig.WithDriverVersion(nvidia.DriverVersion{
 			DriverVersion: driverVersion,
 			CudaDriverVersion: nvidia.NewCudaVersion(

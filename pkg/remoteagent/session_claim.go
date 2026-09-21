@@ -25,6 +25,7 @@ import (
 	"github.com/Masterminds/semver"
 	vgpuconfig "github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/collector"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -101,7 +102,7 @@ func (s *SessionStore) MaterializeClaim(token string, claim *resourceapi.Resourc
 	if err != nil {
 		return err
 	}
-	return s.Materialize(token, spec, nd)
+	return s.Materialize(token, spec, nd, kubeletplugin.GetComputePolicy(claim))
 }
 
 func (s *SessionStore) claimSessionSpec(token string, claim *resourceapi.ResourceClaim, nd *NodeDevices, requests []string) (SessionSpec, error) {

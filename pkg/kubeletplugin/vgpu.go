@@ -132,17 +132,6 @@ var (
 	MemoryResourceName = resourceapi.QualifiedName("memory")
 )
 
-func (m *VGPUManager) getComputePolicy(claim *resourceapi.ResourceClaim) util.ComputePolicy {
-	computePolicy := util.FixedComputePolicy
-	for key, val := range claim.GetAnnotations() {
-		if strings.HasSuffix(key, "/vgpu-compute-policy") && val != "" {
-			computePolicy = vgpu2.GetComputePolicy(val)
-			break
-		}
-	}
-	return computePolicy
-}
-
 func (m *VGPUManager) ensureClaimDirectories(claimUID string) (string, string) {
 	baseContPath := filepath.Join(m.contManagerPath, util.Claims, claimUID)
 	baseHostPath := filepath.Join(m.hostManagerPath, util.Claims, claimUID)
@@ -284,14 +273,24 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	}
 }
 
+func GetComputePolicy(obj metav1.Object) util.ComputePolicy {
+	computePolicy := util.FixedComputePolicy
+	if obj != nil {
+		for key, val := range obj.GetAnnotations() {
+			if val != "" && strings.HasSuffix(key, "/vgpu-compute-policy") {
+				computePolicy = vgpu2.GetComputePolicy(val)
+				break
+			}
+		}
+	}
+	return computePolicy
+}
+
 func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult, device *AllocatableDevice) *cdiapi.ContainerEdits {
 	if result == nil || device == nil || device.Type() != VGpuDeviceType {
 		return nil
 	}
-
-	computePolicy := m.getComputePolicy(claim)
 	idx := device.VGpu.Index
-
 	deviceMemoryRatio := device.VGpu.deviceMemoryRatio
 	if deviceMemoryRatio == 0 {
 		deviceMemoryRatio = m.deviceMemoryRatio
@@ -312,6 +311,7 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 		fmt.Sprintf("%s_%d=%s", util.ManagerVisibleDevice, idx, device.VGpu.UUID),
 	}
 
+	computePolicy := GetComputePolicy(claim)
 	if quantity, ok := result.ConsumedCapacity[CoresResourceName]; ok {
 		if hardVal, ok := quantity.AsInt64(); ok {
 			softVal := hardVal
