@@ -88,13 +88,11 @@ func NewOptions() *Options {
 	featureGate := featuregate.NewFeatureGate()
 	runtime.Must(featureGate.Add(defaultFeatureGates))
 	runtime.Must(compatibility.DefaultComponentGlobalsRegistry.Register(
-		Component,
-		compatibility.DefaultBuildEffectiveVersion(),
-		featureGate,
+		Component, compatibility.DefaultBuildEffectiveVersion(), featureGate,
 	))
-	identityPrefix := util.GetEnvDefault("POD_NAME", os.Getenv("HOSTNAME"))
-	if identityPrefix == "" {
-		identityPrefix, _ = os.Hostname()
+	identityPrefix, err := os.Hostname()
+	if err != nil || identityPrefix == "" {
+		identityPrefix = util.GetEnvDefault("HOSTNAME", os.Getenv("POD_NAME"))
 	}
 	return &Options{
 		QPS:                  defaultQPS,
