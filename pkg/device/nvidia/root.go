@@ -27,6 +27,10 @@ import (
 
 type RootPath string
 
+// librarySearchPaths and binarySearchPaths are where the driver files are
+// looked for inside a driver root, in order; the first match wins. The
+// /usr/local entries are what an immutable distribution installs its driver
+// into (Talos system extensions, for one).
 var librarySearchPaths = []string{
 	"/usr/lib64",
 	"/usr/lib/x86_64-linux-gnu",
@@ -36,6 +40,15 @@ var librarySearchPaths = []string{
 	"/lib/aarch64-linux-gnu",
 	"/usr/local/lib",
 	"/usr/local/lib64",
+}
+
+var binarySearchPaths = []string{
+	"/opt/bin",
+	"/usr/bin",
+	"/usr/sbin",
+	"/bin",
+	"/sbin",
+	"/usr/local/bin",
 }
 
 // GetDriverLibraryPath returns path to `libnvidia-ml.so.1` in the driver root.
@@ -59,15 +72,6 @@ func (r RootPath) GetFMLibraryPath() (string, error) {
 
 // GetNvidiaSMIPath returns path to the `nvidia-smi` executable in the driver root.
 func (r RootPath) GetNvidiaSMIPath() (string, error) {
-	binarySearchPaths := []string{
-		"/opt/bin",
-		"/usr/bin",
-		"/usr/sbin",
-		"/bin",
-		"/sbin",
-		"/usr/local/bin",
-	}
-
 	binaryPath, err := r.findFile("nvidia-smi", binarySearchPaths...)
 	if err != nil {
 		return "", err

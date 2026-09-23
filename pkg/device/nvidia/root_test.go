@@ -25,24 +25,8 @@ import (
 )
 
 func TestFindFile(t *testing.T) {
-	// Mirrors the search paths used by getDriverLibraryPath.
-	librarySearchPaths := []string{
-		"/usr/lib64",
-		"/usr/lib/x86_64-linux-gnu",
-		"/usr/lib/aarch64-linux-gnu",
-		"/lib64",
-		"/lib/x86_64-linux-gnu",
-		"/lib/aarch64-linux-gnu",
-	}
-	// Mirrors the search paths used by GetNvidiaSMIPath.
-	binarySearchPaths := []string{
-		"/opt/bin",
-		"/usr/bin",
-		"/usr/sbin",
-		"/bin",
-		"/sbin",
-	}
-
+	// The production lists, not copies of them: a copy stops covering what
+	// the driver root actually gets searched for as soon as one is extended.
 	tests := map[string]struct {
 		// name is the file findFile searches for.
 		name string
@@ -85,6 +69,51 @@ func TestFindFile(t *testing.T) {
 			searchIn: binarySearchPaths,
 			files:    []string{"usr/bin/nvidia-smi"},
 			expected: "usr/bin/nvidia-smi",
+		},
+		// An immutable distribution puts the driver under /usr/local: Talos
+		// mounts its NVIDIA system extension there, so nothing is found in
+		// the paths a package manager would have used.
+		"library under /usr/local/lib": {
+			name:     "libnvidia-ml.so.1",
+			searchIn: librarySearchPaths,
+			files:    []string{"usr/local/lib/libnvidia-ml.so.1"},
+			expected: "usr/local/lib/libnvidia-ml.so.1",
+		},
+		"library under /usr/local/lib64": {
+			name:     "libnvidia-ml.so.1",
+			searchIn: librarySearchPaths,
+			files:    []string{"usr/local/lib64/libnvidia-ml.so.1"},
+			expected: "usr/local/lib64/libnvidia-ml.so.1",
+		},
+		"nvidia-smi under /usr/local/bin": {
+			name:     "nvidia-smi",
+			searchIn: binarySearchPaths,
+			files:    []string{"usr/local/bin/nvidia-smi"},
+			expected: "usr/local/bin/nvidia-smi",
+		},
+		"nvidia-smi under /opt/bin": {
+			name:     "nvidia-smi",
+			searchIn: binarySearchPaths,
+			files:    []string{"opt/bin/nvidia-smi"},
+			expected: "opt/bin/nvidia-smi",
+		},
+		// Order is what the lists declare: a driver root that has both keeps
+		// being read from where a package manager put it.
+		"package manager paths win over /usr/local": {
+			name:     "libnvidia-ml.so.1",
+			searchIn: librarySearchPaths,
+			files: []string{
+				"usr/local/lib/libnvidia-ml.so.1",
+				"lib64/libnvidia-ml.so.1",
+			},
+			expected: "lib64/libnvidia-ml.so.1",
+		},
+		"a directory under /usr/local does not shadow the library": {
+			name:     "libnvidia-ml.so.1",
+			searchIn: librarySearchPaths,
+			dirs:     []string{"usr/local/lib/libnvidia-ml.so.1"},
+			files:    []string{"usr/local/lib64/libnvidia-ml.so.1"},
+			expected: "usr/local/lib64/libnvidia-ml.so.1",
 		},
 		"directory in earlier search path does not shadow nvidia-smi": {
 			name:     "nvidia-smi",
@@ -209,4 +238,53 @@ func TestRootGetDriverAndBinaryPaths(t *testing.T) {
 
 	_, err = RootPath(t.TempDir()).GetDriverLibraryPath()
 	require.Error(t, err)
+}
+
+// A driver root laid out the way an immutable distribution mounts it: the
+// whole driver lives under /usr/local, and the paths a package manager would
+// have used do not exist at all.
+func TestRootGetDriverAndBinaryPathsUsrLocal(t *testing.T) {
+	testRoot := t.TempDir()
+	writeFile := func(rel string) string {
+		p := filepath.Join(testRoot, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte{}, 0o644))
+		want, err := filepath.EvalSymlinks(p)
+		require.NoError(t, err)
+		return want
+	}
+	wantNVML := writeFile("usr/local/lib/libnvidia-ml.so.1")
+	wantFM := writeFile("usr/local/lib/libnvfm.so")
+	wantSMI := writeFile("usr/local/bin/nvidia-smi")
+
+	r := RootPath(testRoot)
+
+	got, err := r.GetDriverLibraryPath()
+	require.NoError(t, err)
+	require.Equal(t, wantNVML, got)
+
+	got, err = r.GetFMLibraryPath()
+	require.NoError(t, err)
+	require.Equal(t, wantFM, got)
+
+	got, err = r.GetNvidiaSMIPath()
+	require.NoError(t, err)
+	require.Equal(t, wantSMI, got)
+}
+
+// The driver root may reach its files through a symlinked directory (a system
+// extension mounted elsewhere and linked into place); the search resolves it.
+func TestRootGetDriverLibraryPathThroughLinkedDir(t *testing.T) {
+	testRoot := t.TempDir()
+	real := filepath.Join(testRoot, "extension", "lib")
+	require.NoError(t, os.MkdirAll(real, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(real, "libnvidia-ml.so.1"), []byte{}, 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(testRoot, "usr", "local"), 0o755))
+	require.NoError(t, os.Symlink(real, filepath.Join(testRoot, "usr", "local", "lib")))
+
+	got, err := RootPath(testRoot).GetDriverLibraryPath()
+	require.NoError(t, err)
+	want, err := filepath.EvalSymlinks(filepath.Join(real, "libnvidia-ml.so.1"))
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }
