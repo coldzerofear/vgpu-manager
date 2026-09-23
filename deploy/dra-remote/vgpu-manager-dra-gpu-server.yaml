@@ -122,6 +122,7 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - remote-agent
+            - --domain=nvidia.com
             - --kube-api-qps=20
             - --kube-api-burst=30
             - --v=4

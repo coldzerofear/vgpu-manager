@@ -78,6 +78,7 @@ func main() {
 	var (
 		kube            pkgflags.KubeClientConfig
 		cfg             remoteagent.Config
+		domain          string
 		listenEndpoints string
 		sessionOwner    string
 		featureGate     = featuregate.NewFeatureGate()
@@ -94,6 +95,7 @@ func main() {
 	))
 
 	flags := append([]cli.Flag{
+		&cli.StringFlag{Name: "domain", Usage: "Set global domain name to replace all resource and annotation domains.", Value: util.NvidiaDomain, Destination: &domain, EnvVars: []string{"DOMAIN"}},
 		&cli.StringFlag{Name: "node-name", Usage: "Node this agent runs on (= the driver's pool name).", Destination: &cfg.NodeName, EnvVars: []string{"NODE_NAME"}, Required: true},
 		&cli.StringFlag{Name: "driver-name", Usage: "DRA driver name whose slices/claims are consumed.", Value: util.DRADriverName, Destination: &cfg.DriverName, EnvVars: []string{"DRIVER_NAME"}},
 		&cli.StringFlag{Name: "ready-file", Usage: "File written after preflight; the server container waits for it. Defaults to <session-base>/.agent-ready.", Destination: &cfg.ReadyFile, EnvVars: []string{"READY_FILE"}},
@@ -118,6 +120,7 @@ func main() {
 			return loggingConfig.Apply()
 		},
 		Action: func(c *cli.Context) error {
+			util.MustInitGlobalDomain(domain)
 			if util.PathIsNotExist(cfg.ContainerManagerDir) {
 				return fmt.Errorf("invalid --container-manager-dir %q: does not exist", cfg.ContainerManagerDir)
 			}

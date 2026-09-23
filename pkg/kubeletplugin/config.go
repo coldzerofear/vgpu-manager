@@ -30,6 +30,7 @@ type Flags struct {
 	KubeClientConfig              pkgflags.KubeClientConfig
 	HttpEndpoint                  string
 	MetricsPath                   string
+	Domain                        string
 	NodeName                      string
 	CdiRoot                       string
 	ContainerDriverRoot           string

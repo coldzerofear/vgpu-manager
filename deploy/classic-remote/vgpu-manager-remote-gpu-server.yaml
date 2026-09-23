@@ -119,6 +119,7 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - remote-agent
+            - --domain=nvidia.com
             - --kube-api-qps=20
             - --kube-api-burst=30
             - --v=4
@@ -291,6 +292,7 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor
+            - --domain=nvidia.com
             # 设备插件路径：不要加 --enable-dra-monitor（那是 DRA 路径的采集器）。
             # 远程容器的实时用量按会话的 pids.config 归账（消费 Pod 在别的节点，cgroup 归账不可用）；
             # 容器级指标 node=<本服务器>、pod_node=<消费节点>、access_mode=remote。

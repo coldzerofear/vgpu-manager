@@ -118,6 +118,7 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - device-plugin
+            - --domain=nvidia.com
             # RemoteGPUSupport 是 --remote-server/--remote-consumer 的前置门控（两者必须成对配置）。
             # SharedSMUtilizationWatcher 在这里是"写方"：设备管理器把节点级 SM 采样写到
             # /etc/vgpu-manager/watcher/sm_util.config，agent 与 monitor 都从那里读，

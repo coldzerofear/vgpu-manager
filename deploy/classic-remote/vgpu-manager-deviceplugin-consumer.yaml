@@ -124,6 +124,7 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - device-plugin
+            - --domain=nvidia.com
             # RemoteGPUSupport 是 --remote-consumer 的前置门控（必须成对配置）。
             - --feature-gates=RemoteGPUSupport=true,AllocationFailureReschedule=true
             - --mig-strategy=none

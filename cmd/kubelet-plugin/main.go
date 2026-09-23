@@ -61,6 +61,13 @@ func newApp() *cli.App {
 
 	cliFlags := []cli.Flag{
 		&cli.StringFlag{
+			Name:        "domain",
+			Usage:       "Set global domain name to replace all resource and annotation domains.",
+			Value:       util.NvidiaDomain,
+			Destination: &flags.Domain,
+			EnvVars:     []string{"DOMAIN"},
+		},
+		&cli.StringFlag{
 			Name:        "node-name",
 			Usage:       "The name of the node to be worked on.",
 			Required:    true,
@@ -367,6 +374,7 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 	}
 
 	if featuregates.Enabled(featuregates.VGPUSupport) {
+		util.MustInitGlobalDomain(flags.Domain)
 		if flags.HostManagerDir == "" {
 			return fmt.Errorf("--host-manager-dir is required when feature gate %s is enabled", featuregates.VGPUSupport)
 		}

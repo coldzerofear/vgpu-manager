@@ -275,6 +275,7 @@ spec:
           name: device-scheduler
           command:
             - device-scheduler
+            - --domain=nvidia.com
             - --server-bind-port=3456
             - --watch-lease
             - --leader-elect-resource-name=vgpu-manager-scheduler

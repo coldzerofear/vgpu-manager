@@ -274,16 +274,8 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 }
 
 func GetComputePolicy(obj metav1.Object) util.ComputePolicy {
-	computePolicy := util.FixedComputePolicy
-	if obj != nil {
-		for key, val := range obj.GetAnnotations() {
-			if val != "" && strings.HasSuffix(key, "/vgpu-compute-policy") {
-				computePolicy = vgpu2.GetComputePolicy(val)
-				break
-			}
-		}
-	}
-	return computePolicy
+	policy, _ := util.HasAnnotation(obj, util.VGPUComputePolicyAnnotation)
+	return vgpu2.GetComputePolicy(policy)
 }
 
 func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult, device *AllocatableDevice) *cdiapi.ContainerEdits {

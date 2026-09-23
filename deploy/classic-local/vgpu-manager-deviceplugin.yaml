@@ -147,6 +147,7 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - device-plugin
+            - --domain=nvidia.com
             - --device-list-strategy=envvar
             - --device-split-count=10
             - --device-cores-scaling=1
@@ -228,6 +229,7 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor
+            - --domain=nvidia.com
             - --server-bind-port=3456
             - --node-config-path=/config/nodeConfig.json
             - --container-driver-root=/driver-root

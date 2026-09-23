@@ -130,6 +130,7 @@ spec:
           command: [bash, -c]
           args:
             - kubelet-plugin
+            - --domain=nvidia.com
             - --kube-api-qps=20
             - --kube-api-burst=30
             - -v=6

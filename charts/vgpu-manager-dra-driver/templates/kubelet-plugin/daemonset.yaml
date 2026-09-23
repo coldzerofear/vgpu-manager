@@ -129,6 +129,7 @@ spec:
                 mount --bind root/gpu-params /proc/driver/nvidia/params
               fi
               exec kubelet-plugin "$@"
+            - --domain={{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}
             - --kube-api-qps={{ $plugin.commands.kubeApiQps | default 20 }}
             - --kube-api-burst={{ $plugin.commands.kubeApiBurst | default 30 }}
             - --nri-plugin-index={{ $plugin.commands.nriPluginIdx | default "00" }}
