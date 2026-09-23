@@ -70,7 +70,7 @@ func newApp() *cli.App {
 		&cli.StringFlag{
 			Name:        "cdi-root",
 			Usage:       "Absolute path to the directory where CDI files will be generated.",
-			Value:       "/etc/cdi",
+			Value:       util.CDIRoot,
 			Destination: &flags.CdiRoot,
 			EnvVars:     []string{"CDI_ROOT"},
 		},

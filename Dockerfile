@@ -19,12 +19,12 @@ ARG BASE_BUILD_IMAGE=unknown
 
 FROM ${BASE_BUILD_IMAGE} AS builder
 
-# Pull the nvidia-cdi-hook binary out of the relevant toolkit container (arch:
-# TARGETPLATFORM). It is installed onto the host by the `install` init container
+# Pull the nvidia-cdi-hook binary out of the relevant toolkit container.
+# It is installed onto the host by the `install` init container
 # (via install_files.sh) and referenced from the generated CDI specification when
 # a cdi-* device-list-strategy is enabled. The explicit --platform keeps the
 # binary matching the target node arch (and makes Dockerfile.cross skip it).
-FROM --platform=$TARGETPLATFORM ${TOOLKIT_CONTAINER_IMAGE} AS toolkit
+FROM ${TOOLKIT_CONTAINER_IMAGE} AS toolkit
 
 FROM quay.io/jitesoft/ubuntu:20.04
 

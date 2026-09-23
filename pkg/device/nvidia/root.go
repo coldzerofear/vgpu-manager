@@ -34,6 +34,8 @@ var librarySearchPaths = []string{
 	"/lib64",
 	"/lib/x86_64-linux-gnu",
 	"/lib/aarch64-linux-gnu",
+	"/usr/local/lib",
+	"/usr/local/lib64",
 }
 
 // GetDriverLibraryPath returns path to `libnvidia-ml.so.1` in the driver root.
@@ -58,10 +60,12 @@ func (r RootPath) GetFMLibraryPath() (string, error) {
 // GetNvidiaSMIPath returns path to the `nvidia-smi` executable in the driver root.
 func (r RootPath) GetNvidiaSMIPath() (string, error) {
 	binarySearchPaths := []string{
+		"/opt/bin",
 		"/usr/bin",
 		"/usr/sbin",
 		"/bin",
 		"/sbin",
+		"/usr/local/bin",
 	}
 
 	binaryPath, err := r.findFile("nvidia-smi", binarySearchPaths...)
