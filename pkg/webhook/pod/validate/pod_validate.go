@@ -964,7 +964,7 @@ func checkClusterDNS(pod *corev1.Pod) field.ErrorList {
 			return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsConfig"), pod.Spec.DNSConfig,
 				"dnsPolicy None needs nameservers of its own, and they must answer for the cluster zone: a remote vGPU pod resolves its GPU server through it")}
 		}
-		if servers := GetClusterDNSServers(); len(servers) > 0 {
+		if servers := clusterDNSServers(); len(servers) > 0 {
 			var hasClusterDNS bool
 			for _, nameserver := range pod.Spec.DNSConfig.Nameservers {
 				if slices.Contains(servers, nameserver) {
@@ -997,3 +997,9 @@ func GetClusterDNSServers() []string {
 	})
 	return dnsServers
 }
+
+// clusterDNSServers is the resolver set of the webhook pod itself, which is the
+// cluster DNS as long as the webhook runs with ClusterFirst. Indirected so a
+// test pins what the cluster answers with instead of reading the machine it
+// happens to run on.
+var clusterDNSServers = GetClusterDNSServers

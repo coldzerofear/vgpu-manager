@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
-	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
+	vgpuconfig "github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -111,7 +111,6 @@ func (a *Agent) startPodInformers(ctx context.Context) error {
 		nodeRegistration.HasSynced,
 	)
 	a.wg.Go(func() { a.podInformer.RunWithContext(ctx) })
-	a.wg.Go(func() { a.nodeInformer.RunWithContext(ctx) })
 
 	a.healthSynced = append(a.healthSynced, a.podInformer.HasSynced)
 
@@ -216,8 +215,7 @@ func (a *Agent) ensurePodSession(ctx context.Context, req *remoteagent.EnsureSes
 	if err != nil {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
-	node, _ := a.nodeLister.Get(a.cfg.NodeName)
-	policy := vgpu.GetDefaultComputePolicy(pod, node)
+	policy := vgpuconfig.GetDefaultComputePolicy(pod, a.store.nodeObject())
 	if err = a.store.Materialize(req.Session, spec, nd, policy); err != nil {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}

@@ -28,6 +28,7 @@ import (
 func TestCheckClusterDNS(t *testing.T) {
 	for _, test := range []struct {
 		name        string
+		clusterDNS  []string
 		policy      corev1.DNSPolicy
 		hostNetwork bool
 		dnsConfig   *corev1.PodDNSConfig
@@ -51,13 +52,29 @@ func TestCheckClusterDNS(t *testing.T) {
 			wantField: "spec.dnsConfig",
 		},
 		{
-			// Its own resolver may well answer for the cluster zone; that is
-			// the author's call, not ours.
-			name: "none with nameservers", policy: corev1.DNSNone,
+			// Nothing known about the cluster resolver: whether its own
+			// nameservers answer for the cluster zone is the author's call.
+			name: "none with nameservers, cluster DNS unknown", policy: corev1.DNSNone,
 			dnsConfig: &corev1.PodDNSConfig{Nameservers: []string{"10.96.0.10"}},
+		},
+		{
+			name: "none carrying the cluster resolver", policy: corev1.DNSNone,
+			clusterDNS: []string{"10.96.0.10"},
+			dnsConfig:  &corev1.PodDNSConfig{Nameservers: []string{"10.96.0.10", "1.1.1.1"}},
+		},
+		{
+			// Resolvers of its own that do not include the cluster's: the pod
+			// would never resolve its GPU server.
+			name: "none missing the cluster resolver", policy: corev1.DNSNone,
+			clusterDNS: []string{"10.96.0.10"},
+			dnsConfig:  &corev1.PodDNSConfig{Nameservers: []string{"1.1.1.1"}},
+			wantField:  "spec.dnsConfig.nameservers",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			previous := clusterDNSServers
+			clusterDNSServers = func() []string { return test.clusterDNS }
+			t.Cleanup(func() { clusterDNSServers = previous })
 			pod := &corev1.Pod{Spec: corev1.PodSpec{
 				DNSPolicy:   test.policy,
 				HostNetwork: test.hostNetwork,

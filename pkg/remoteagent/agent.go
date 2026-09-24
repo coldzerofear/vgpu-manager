@@ -254,6 +254,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		return fmt.Errorf("invalid session owner %q", a.cfg.SessionOwnerKind)
 	}
 
+	// The node informer serves both owner kinds - node-level compute policy
+	// defaults for either, plus the device registry the pod path reads - so it
+	// is started here, once the owner's handlers are registered.
+	a.wg.Go(func() { a.nodeInformer.RunWithContext(ctx) })
+
 	syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer syncCancel()
 	if !cache.WaitForNamedCacheSyncWithContext(syncCtx, a.healthSynced...) {

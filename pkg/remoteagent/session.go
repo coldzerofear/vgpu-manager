@@ -34,6 +34,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 )
@@ -208,6 +209,21 @@ type SessionStore struct {
 	refOf     map[string]sessionRef       // token -> owner
 	byOwner   map[string]sets.Set[string] // owner UID -> tokens
 	GetNodeFn func() (*corev1.Node, error)
+}
+
+// nodeObject returns the node whose annotations carry this node's defaults, or
+// a nil interface when it cannot be read. A typed nil *corev1.Node would
+// reach the annotation lookup as a non-nil metav1.Object and panic there.
+func (s *SessionStore) nodeObject() metav1.Object {
+	if s.GetNodeFn == nil {
+		return nil
+	}
+	node, err := s.GetNodeFn()
+	if err != nil || node == nil {
+		klog.V(5).Infof("Node %s unavailable, node-level defaults are skipped: %v", s.cfg.NodeName, err)
+		return nil
+	}
+	return node
 }
 
 func NewSessionStore(cfg Config) *SessionStore {
