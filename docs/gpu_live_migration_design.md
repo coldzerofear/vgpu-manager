@@ -1,9 +1,9 @@
 # GPU 热迁移（Live Migration）能力规划与设计
 
-> 状态：**分析 + 方案规划（2026-09-23）**，尚未动代码。
+> 状态：**分析 + 方案规划（2026-09-23 初版，2026-09-24 并入 mncr 实机结论）**，尚未动代码。
 > 分析对象：`cuda-checkpoint/`（NVIDIA 官方，驱动能力的唯一权威）、`GPU-CR/`（FAST'26 GCR 的开源实现）、
 > `cudackpt/`（社区 LD_PRELOAD + CRIU 方案）、`tensor-fusion/`（同类产品控制面）、`live-pod-migration/`
-> （CRIU 容器迁移 operator）、`lupine/`（我们远程 GPU 的底座）、本仓库 `library/` 与 Go 侧。
+> （CRIU 容器迁移 operator）、`lupine/`（我们远程 GPU 的底座）、**`cuda-checkpoint-aburan28/`（`mncr`，跨节点 C/R 实机验证，见 §2.7）**、本仓库 `library/` 与 Go 侧。
 > 外部参考：CRIU 4.0 `plugins/cuda`、CRIUgpu（arXiv 2502.16631）、趋动科技 OrionX 热迁移公开资料。
 > 关联设计：`remote_gpu_pool_research_design.md`、`remote_gpu_k8s_integration_design.md`、
 > `resource_data_seqlock_versioning_design.md`、`sm_multiproc_shared_bucket_design.md`。
@@ -45,6 +45,18 @@ SM watcher 与共享令牌桶的采样所有权、检查点期间 NVML `used` �
 **（5）整 Pod 迁移（L2）确实应该独立成项目**，与用户设想一致。边界见 §6：
 vgpu-manager 只提供 **GPU 侧原语 + 配额预留 + 配置重绑**三件事，CRIU/kubelet/OCI/Pod 重建全部交给外部 operator
 （`live-pod-migration/` 是现成的骨架），且优先走 **CRIU 上游 cuda 插件**，让对方连"GPU"这个词都不用知道。
+
+**（6）跨节点 GPU 迁移已经被开源实现跑通过一次，我们不必从零摸索。**
+`aburan28/cuda-checkpoint` 的 `mncr`（§2.7）在双节点上实测完成了 rank 互换迁移，
+**恢复到进程从未见过 UUID 的 GPU 上**，并留下两份实机测量文档与七个坑的记录。
+最值得立刻吸收的四条：
+- CRIU 的 CUDA 插件不支持设备重映射，但**在 `PATH` 前置一个 15 行 shim 包住 `cuda-checkpoint` 二进制**
+  就能给那一次 restore 调用追加 `--device-map`（§2.7.5 坑 7）——这补上了我们原以为是死路的缺口；
+- **提交点在 `lock` 与 `checkpoint` 之间**：之前可回滚，`checkpoint` 自身失败即**终态**。
+  我们原来写的"任何一步失败都回滚"是错的，已按此修正（§2.7.3）；
+- **CUDA IPC 的导入方 checkpoint 成功但 restore 必败且进程彻底丢失**，且失败发生在提交点之后
+  （§2.7.4）——这条直接决定了我们的准入必须拦死 IPC 导入方，含我们自己的跨 Pod NVLink/IMEX；
+- **主机可用内存必须 ≥ 在用显存**，否则任何驱动版本都不可检查点（§2.7.7）。
 
 ---
 
@@ -132,7 +144,12 @@ CLI 等价形式（`src/r580-migration-cli.c`）：`cuda-checkpoint --action res
 - 社区共识是 **kubelet checkpoint API 只能 checkpoint，不能 restore**：恢复要靠"把 checkpoint tar 转成 OCI 镜像
   再当作容器镜像拉起"这个既定技巧（`live-pod-migration/` 正是这么做的）；
 - **不支持 NCCL**（挂起会摧毁 communicator）、多 GPU 需要额外同步；
-- 插件不做设备重映射 → 跨节点落到不同 UUID 的卡上能否恢复，取决于**容器设备注入的序号**而非 UUID（§4.4）。
+- ~~插件不做设备重映射 → 跨节点落到不同 UUID 的卡上能否恢复取决于容器设备注入~~
+  → **已有经实机验证的解法（§2.7.5 坑 7）**：插件通过 `PATH` 解析 `cuda-checkpoint`，
+  在 `PATH` 前置一个 15 行 shell shim，只对 `--action restore` 且未带 `--device-map` 的那一次调用
+  追加 `--device-map`，其余调用透传。mncr 用它把两个 rank 迁到了**镜像从未见过 UUID 的 GPU** 上。
+  这也是**我们能在 CRIU 路径上插手的那个点**（§4.6.2 说"截不到具名符号"仍然成立——
+  这里包的是**二进制**，不是符号）。
 
 ### 2.3 `cudackpt` —— 路线不健全，不采纳
 
@@ -174,6 +191,28 @@ allocation/stream/module/symbol/event/context（`shim/tracker.hpp`），检查�
 把**数据面**从驱动手里抢过来自己做（重叠拷贝 + hugepage，远快于驱动串行拷到 pageable 主机内存），
 驱动只剩**控制面**要处理（很小很快）。附带效果是"显存降到 0 但进程还活着"，可以让别的负载切进来。
 
+**读代码补上的机制细节（比 README 精确）**：
+- 它**替换 `cudaMalloc` 为 VMM 分配**（`src/GPUs/NVIDIA/nv.cpp:268-384`：`cuMemAddressReserve` →
+  `cuMemCreate` → `cuMemMap` → `cuMemSetAccess`），并维护 `global_handle_map` 与
+  `allocated_memory_type`（0=cudaMalloc / 1=VMM）；
+- 检查点时 `cuMemUnmap` + `cuMemRelease` 但**不释放保留的虚拟地址**（`nv.cpp:175-193`），
+  恢复时在同一 VA 上 `cuMemCreate`+`cuMemMap`（`nv.cpp:222-235`）——这就是"显存降到 0 而指针仍有效"；
+- 控制通道是**共享内存 + 信号**（`src/comm/comm.h`：`ShareMemComm` + `INIT/CKPT/RESTORE/FINISH_MSG`
+  与 `IPC_TEARDOWN/EXPORT/IMPORT_MSG`），`cr_client` 发信号、进程内信号处理器干活——
+  与我们 §4.7.8 设想的"信号 + 控制线程"同构；
+- 它**在库里自己处理 IPC**（`src/ipc_hooks.h`）：`ipc_teardown_all_imports()`、
+  `ipc_save_and_teardown_all_exports()`、`ipc_teardown_all_events()`、`ipc_disable_all_peer_access()`，
+  恢复侧对称重建。**这正是 mncr 要求应用自己做的事，GPU-CR 放进了库里**——代价是接管分配语义；
+- 多 GPU 编排（`coordinator/multi_cr_client.cpp`）：`lock` 全部并行 → 失败则 `unlock` 全部（可回滚）
+  → `checkpoint` 全部并行。**比 mncr 宽松**：它在 checkpoint 失败后也去 unlock，
+  而 mncr 的混沌矩阵把 checkpoint 失败判为终态（§2.7.3）——**以 mncr 为准**。
+
+**一处与 mncr 冲突、需按驱动版本探测的结论**：`ipc_hooks.h:155-160` 写明
+*"the driver cannot restore cuMem VMM allocations with IPC handle types"*——即只要
+`requestedHandleTypes` 设了 IPC 类型、**哪怕从未导出**就不能恢复，所以它连非导出的 cuMem 分配
+都要拆掉重建。而 mncr 在 595 上实测"导出并持有 fd 也没事"。两者驱动版本不同（580.95.05 vs 595.91.07）
+→ 见 §2.7.4 第 3 条与 spike **S9**。
+
 **我们该吸收什么**：
 - ✅ **理念**：Data/Control 分离、以及"显存让渡"这个独立于迁移的能力（对我们的超卖/抢占场景极有价值）；
 - ✅ **可行性**：我们的 `library/` **已经**拦了 `cuMemAlloc*`、`cuMemCreate`，且 `cuMemAddressReserve/
@@ -212,6 +251,167 @@ client 申请新资源并恢复上下文；支持同节点跨卡与跨节点（�
 - "Client 端存储相关信息"对应我们的 `LUPINE_SESSION` + 会话目录，**已经有了**。
 
 ---
+
+### 2.7 `aburan28/cuda-checkpoint` 的 `mncr` —— **唯一一个把跨节点 GPU 迁移真正跑通的开源实现**
+
+> 分析对象：`cuda-checkpoint-aburan28/`（NVIDIA 官方仓库的 fork）。
+> **这是本文档最有价值的外部参考**：它有两份**实机测量**文档（不是推断），跑通了双节点 rank 互换迁移，
+> 并把过程中踩的坑逐条记录。下面凡标"实机"的都是它测出来的，不是我们推的。
+
+#### 2.7.1 与官方仓库的差异
+
+`diff -rq` 的结果很干净——**官方那 5976 字节的二进制与 `src/` 下的 demo 一字未改**，新增的是：
+
+| 新增 | 是什么 |
+|---|---|
+| `mncr/` | 约 3200 行 Python + C：多节点 C/R 的完整实现（agent / coordinator / imagestore / k8s controller / NCCL seam / verify） |
+| `docs/gds-rdma-transport-design.md` | 提案：给检查点数据面加 GDS/RDMA 直通（**需要改显示驱动，目前只是提案**） |
+| `src/gds-transport-benchmark.cu` | 对照 benchmark：今天的 host-staged 路径 vs `cuFileRead/Write` 直通 |
+| `src/Makefile` | 构建上面那个 benchmark |
+
+→ 所以它的价值**全在 `mncr/`**，那个 GDS 提案对我们近期无用（等驱动）。
+
+#### 2.7.2 它的核心论点，与我们的设计独立地收敛到了同一点
+
+> *"The premise is that everything the driver cannot checkpoint can be destroyed before the checkpoint
+> and rebuilt after it. That is what makes this buildable today — and it is also what you give up: transparency."*
+
+这正是我们 §4.5/§4.6 给 library 设计的 quiesce/rebind 模式。差别在**施加对象**：
+
+| | 对谁做 teardown/rebuild | 代价 |
+|---|---|---|
+| **mncr** | **应用**（要求训练脚本挂 `torchckpt.on_quiesce` 钩子里 `destroy_process_group()`） | **牺牲透明性**，应用必须"检查点感知" |
+| **GPU-CR** | **库自己**（LD_PRELOAD 跟踪并重建 IPC export/import/event/peer-access） | 要接管分配语义 |
+| **我们** | **只对 library 自己的状态**做 | 透明性保住；但应用自身的不可检查点资源要靠**准入拦截**而非重建 |
+
+→ 我们的定位是三者中最保守也最安全的一档：**不碰应用状态，靠能力位把不可迁移的工作负载挡在门外。**
+
+#### 2.7.3 commit point：一条我们文档里写错了的语义
+
+> *"There is a commit point, and it sits between `lock` and `checkpoint`.
+> Before it, a failure costs one drained step: unlock, resume, retry.
+> After it, the ranks have released their GPU resources and the driver offers no rollback."*
+
+它的混沌测试矩阵把这条钉死了（每条都实测 pass）：
+
+```
+CASE                 SIDE           RAISED     RESULT
+dirty-rank           before-commit  abortable  aborted
+lock-failure         before-commit  abortable  aborted
+rank-killed          before-commit  abortable  aborted
+agent-unreachable    before-commit  abortable  aborted
+checkpoint-failure   after-commit   terminal   failed     ← 注意
+dump-failure         after-commit   terminal   failed
+resume-failure       after-commit   terminal   failed
+unlock-failure       after-commit   terminal   failed
+```
+
+**我们 §4.1 M8 原来写的"任何一步失败 → 回滚到源卡 restore + unlock"是错的**，必须按提交点分开：
+
+- **`Lock` 失败 / `Lock` 成功但决定放弃** → 可回滚（`Unlock` 即可，代价是一次排空）；
+- **`Checkpoint` 调用本身失败** → **终态**。NVIDIA 明确"出错不保证进程仍可用"，实机也印证
+  （见 2.7.4 的 import 案例：checkpoint 成功、restore 拒绝、随后连 unlock 都返回
+  `"the operation cannot be performed in the present state"`，进程彻底丢失）；
+- **`Checkpoint` 全部成功后决定放弃** → 可以 `Restore`（不带 device map）+ `Unlock` 回到原卡。
+
+所以正确的说法是：**回滚窗口是"lock 之后、checkpoint 之前"，加上"checkpoint 全部成功之后"；
+checkpoint 自身失败没有回滚。**
+
+#### 2.7.4 实机能力矩阵（驱动 595.91.07，RTX PRO 6000 Blackwell）
+
+| 分配方式 | checkpoint | restore | 备注 |
+|---|---|---|---|
+| `cuMemAlloc` | ✅ | ✅ | 对照组，校验和验证过 |
+| `cuMemCreate` + `cuMemMap`（持有不共享） | **✅** | **✅** | **VMM 路径可检查点** |
+| ＋`cuMemExportToShareableHandle`（POSIX fd 持续打开） | ✅ | ✅ | **仅导出不算违规** |
+| **`cuMemImportFromShareableHandle` 导入方** | ✅ | **❌** | `invalid argument`，且**此后无法 unlock，进程彻底丢失** |
+| `cuMemAllocManaged`（UVM） | ❌ | — | `operation not supported` |
+| `cuIpcGetMemHandle` | ❌ | — | 610 才支持 |
+
+**三条对我们直接有用的推论：**
+
+1. **PyTorch 的 expandable segments 不必禁用**——它走 `cuMemCreate`/`cuMemMap`，实测可检查点。
+   官方文档那句"不支持 `cuMemExportToShareableHandle` 创建的 IPC 内存"实测**要一分为二**：
+   **导出方没事，导入方致命**。
+2. **导入方致命发生在提交点之后**——这是 2.7.3 那条不对称性在真实硬件上的实例。
+   → 对我们意味着：**任何使用 CUDA IPC 导入的容器都不可迁移**（多进程共享显存的推理框架、
+   NCCL rank 之间、以及**我们自己的跨 Pod NVLink / IMEX 通道**），必须在准入期拦死，
+   不能等到迁移时才发现。
+3. **⚠️ 与 GPU-CR 的结论冲突，且很可能是驱动版本差异。** GPU-CR（实测于 580.95.05）的
+   `ipc_hooks.h:155-160` 写明*"the driver cannot restore cuMem VMM allocations with IPC handle types"*
+   —— 即**只要 `requestedHandleTypes` 设了 IPC 类型、哪怕从未导出**就不能恢复，因此它在检查点前
+   把这类分配全部拆掉重建。而 mncr 在 595 上测出"导出并持有 fd 也没事"。
+   → **结论：不要把"什么可检查点"写成静态表，必须按驱动版本探测。**
+   mncr 的做法值得照搬：用一个 canary（`verify/vmm_probe.cu`）**跑一遍工作负载实际用的分配方式再试检查点**，
+   拿驱动自己的判决当准入依据。
+
+#### 2.7.5 跨节点实测结果与七个坑（**这一节是纯金**）
+
+双节点（各 1 张 Blackwell，62 GiB 内存，socket 互联），torch 2.13.0+cu130，NCCL 2.29.7，CRIU 4.2.1：
+
+```
+SCENARIO    RESULT   SECONDS
+continue    pass        6.22    检查点后继续跑；NCCL 拆掉重建
+restore     pass        7.19    检查点后停；两个 rank 都被杀；criu 拉回来
+migrate     pass       16.15    rank0 A→B、rank1 B→A；带非恒等 device map 恢复
+```
+
+**migrate 那一行是关键**：*"resumed on a GPU whose UUID the process had never seen"*——
+**跨节点 + 换卡的 GPU 热迁移，开源实现里跑通了。**
+
+| # | 坑 | 对我们的意义 |
+|---|---|---|
+| **1** | 请求文件在不同节点落到不同训练 step，而 NCCL 按**顺序**匹配集合通信 → 需要每个安全点做一次控制集合（`MAX` over `[epoch, lookahead]`）。另外：**终态失败后没人清请求文件**，被新起的 rank捡到 | 跨节点协调必须有屏障；**终态失败必须清理残留状态**（我们的 `VGPUMigration` status 要有终态清理） |
+| **2** | **libfabric 在插件初始化时打开 `/dev/gdrdrv` 就再也不放**（aws-ofi-nccl 找不到 EFA、退回 socket，fd 仍留着）。CRIU 无法 dump 它，`destroy_process_group()` 也关不掉 | **只能在启动时预防**：`FI_HMEM_CUDA_USE_GDRCOPY=0` 或 `NCCL_NET_PLUGIN=none`。→ 我们的 **webhook 应对可迁移 Pod 注入这类 env** |
+| **3** | **NCCL RAS 每进程留两个 LISTEN socket**（2.24 起默认开，per-process 不 per-communicator，永不关闭）。CRIU 能 dump，restore 时重新 bind → 同节点恢复撞 `Address already in use`，**发生在提交点之后** | `NCCL_RAS_ENABLE=0`（顺带把 communicator 初始化从 10.5s 降到 0.3s）。→ webhook 注入 + **进程扫描把任何 TCP socket 当作 before-lock 发现**，让它在可回滚侧便宜地中止 |
+| **4** | **NCCL 把"出生所在节点的地址"缓存在静态内存里**，迁移后仍试图 bind 旧地址 → `Cannot assign requested address`。无 API 可重置、无法从 torch 底下重载 libnccl | 解法是 `libmncr_netmap.so`：**LD_PRELOAD 拦 `bind()`**，对 `EADDRNOTAVAIL` 的单播 IPv4 用本机路由地址重试；NCCL 的 listener 是从 `getsockname()` 上报的，所以对端能学到新地址。→ **同样的问题会出现在 lupine-server 跨节点恢复上**（L3b）。注意其局限：**IB verbs 的地址是 GID 不是 socket，这个 shim 到不了** |
+| **5** | 清单（manifest）原来只写在本地目录，**没 dump 过该 rank 的节点读不到**（模拟器里所有"节点"共享一块盘所以没暴露） | 产物布局：**manifest 必须进共享存储**，且恢复方要被告知"这个 rank 是哪个节点 dump 的" |
+| **6** | **CRIU 校验每个被映射文件的 build-id**。同一 AMI 相隔几分钟启动的两台机器，一小时后无法互相迁移：`libcrypto.so.3 has bad build-ID`（unattended-upgrades 跑过了）。它**还校验文件 mode**（抓到了不同 umask 下构建的 shim） | **比我们 M8 写的"同 library 版本 + 同驱动"严格得多**：**每个被映射文件**都要 build-id 一致。容器镜像天然满足，但**我们的 `libvgpu-control.so` 是从宿主机 bind-mount 进去的**（`vnum_plugin.go:807-810`）→ **两节点的 vgpu-manager 版本必须完全一致**。宿主侧路径带版本号（`HostVGPUControlFilePath` 有 `.<version>` 后缀）这点帮了我们，但容器内路径是固定的，CRIU 看的是容器内路径 + build-id。还要注意挂载 mode 一致（我们是 `ReadOnly: true`，一致） |
+| **7** | **CRIU 的 CUDA 插件自己完成 CUDA 恢复，而且不带 device map**；插件不能绕过（CRIU 4.x 拒绝恢复一个 inventory 里点名了未加载插件的镜像），也无法告知迁移 | **解法：插件通过 `PATH` 解析 `cuda-checkpoint`，所以在 `PATH` 前面放一个 shim**，只对 `--action restore` 且尚未带 `--device-map` 的那一次调用追加 `--device-map "$MNCR_DEVICE_MAP"`，其余调用（`-h` 能力探测、`--get-restore-tid`、`--get-state`、lock、unlock）原样透传。**两个迁移的 rank 都是这么恢复成功的。** 实现见 `mncr/agent/criu.py:50-66`，一共 15 行 shell |
+
+#### 2.7.6 另外四条实机细节（每条都能省我们一次真机翻车）
+
+1. **CRIU 插件恢复完之后再调 `--action restore` 会失败**（`"the operation cannot be performed in the present state"`），
+   因为已经没东西可恢复了。→ **恢复侧必须先 `--get-state` 再决定，并把"已经做完"当成成功**
+   （`agent/driver.py:resume`）。这正好印证我们 §4.6.2.1 选的**被动纪元检测**是对路的：CRIU 路径下
+   GPU 早就恢复好了，我们只需要重绑 library，**不该自己去调 Restore**。
+2. **`criu dump` 默认会杀掉被 dump 的进程**，除非 `--leave-running`。他们的"检查点后继续跑"模式一度
+   在真 CRIU 上变成"恢复一个已经不存在的进程"。→ 我们的 L0"显存让渡"场景必须显式 `--leave-running`。
+3. **每个 CUDA 进程都持有 `/dev/nvidia-uvm` 的 fd 和映射**，哪怕只调过 `cudaMalloc`——runtime 无条件初始化 UVM。
+   把它当 before-lock 阻塞条件会**拒掉所有工作负载**。它只在 **dump 门**才有意义（检查点后驱动已关闭所有 GPU fd，
+   那时还在就说明检查点没生效）。→ **我们判断"是否用了 UVA 超卖"绝不能看 `/proc`**，
+   要看我们自己的 `.vmem_node` 账本（我们恰好有精确答案，这是 library 的优势）。
+4. **`lock` 16ms；`checkpoint` 一个 16 MiB 缓冲 286ms；但 `nvidia-smi` 要在调用返回后约 1 秒才不再列出该进程。**
+   → **我们基于 NVML 的记账会有约 1 秒滞后**，配额预留的释放必须等到轮询确认，不能在调用返回就放；
+   任何验收脚本都要带 deadline 轮询而不是查一次。
+
+#### 2.7.7 两条硬性容量约束（实机算术，不是猜测）
+
+- **主机内存 ≥ 在用显存**。驱动在 CRIU 介入之前就把显存拷进主机分配。他们那台 62 GiB 内存 / 97,887 MiB 显存的
+  机器上，preflight 直接判 blocker：`host has 55,956 MiB available but device memory totals 97,887 MiB`。
+  那台机器上的 vLLM 占了 93,494 MiB，**在任何驱动版本上都不可检查点——算术不允许**。
+  → 我们的准入要**同时**校验两件事：容器 memory limit（驱动的拷贝计进本进程的 cgroup）
+  **和**宿主机可用内存。
+- **GPU 迁移要求 NVML persistence mode 开启**（`agent/preflight.py:117`，与 r580 demo 注释一致）。
+  → 进节点能力位。
+
+#### 2.7.8 一条给我们 library 的体检结论（顺手验证，结果是好的）
+
+mncr 花了很大篇幅记录一个**它自己踩了的拦截陷阱**：
+
+> *"PyTorch and NCCL `dlsym` exactly one symbol from libcuda, `cuGetProcAddress`, and resolve every other
+> entry point through the pointer they get back. The hook redirected the entry points but handed back the
+> driver's own resolver, so every lookup made through it landed inside libcuda and the redirect table was
+> never consulted."*
+
+结果是它的审计器在真 PyTorch 下**什么都没记录到**（torch 明明用了 2060 MiB 的 expandable segments）。
+它给出的教训：**空的审计报告不能证明工作负载是干净的。**
+
+**我们的 library 没有这个 bug**，已核实：`vgpu_dlsym_dispatch()`（`src/loader.c:1983-2016`）对
+`symbol_is_cuda_api()` 为真的符号一律走 `resolve_local_hook()` 返回**我们自己的** hook，
+注释也写明*"Driver symbols never take this path: they must keep resolving to our hooks whatever the handle says"*。
+所以 `dlsym(handle, "cuGetProcAddress")` 拿到的是我们的 `cuGetProcAddress`，torch 之后经它解析的每个入口
+都会过我们的 `g_routes` 替换。**这条顺带解释了为什么我们的库在 PyTorch 下一直有效。**
 
 ## 3. 分层能力模型（本文骨架）
 
@@ -332,7 +532,31 @@ client 申请新资源并恢复上下文；支持同节点跨卡与跨节点（�
 - 容器若启用了**内存超卖（UVA/managed）**→ 标记为**不可迁移**（§2.1 驱动限制），准入期就拒绝；
 - 检查点元数据里记录 **library 版本 + 驱动版本 + GPU 型号 + CUDA 版本**，恢复前逐项校验，任一不符 → 拒绝恢复
   （对应 OrionX 的"仅支持同型号 GPU"与"环境检查"）；
-- 任何一步失败 → **回滚到源卡 restore + unlock**，回滚也失败才标记 Pod 不可恢复并上报事件。
+- 失败处理**按提交点分档**（§2.7.3，mncr 的混沌矩阵逐条实测）：
+  - `Lock` 失败，或 `Lock` 成功后决定放弃 → **可回滚**，`Unlock` 即可，代价是一次排空；
+  - **`Checkpoint` 调用自身失败 → 终态，没有回滚**。NVIDIA 明确"出错不保证进程仍可用"，
+    实机印证：导入方 checkpoint 成功、restore 报 `invalid argument`、此后连 `Unlock` 都返回
+    `"the operation cannot be performed in the present state"`，进程彻底丢失；
+  - `Checkpoint` **全部成功**后决定放弃 → 可以 `Restore`（不带 device map）+ `Unlock` 回原卡。
+  → 所以控制面必须区分 `abortable` 与 `terminal` 两种失败，终态失败要清理残留状态（§2.7.5 坑 1）
+  并把 Pod 标记为不可恢复、上报事件，而不是重试。
+- **准入必须拦死的四类（都来自 §2.7 的实机结论）**：
+  1. **CUDA IPC 导入方**——导入方 checkpoint 成功但 restore 必败且进程不可恢复（§2.7.4）。
+     包括多进程共享显存的推理框架、NCCL rank 之间，**以及我们自己的跨 Pod NVLink / IMEX 通道**；
+  2. **UVA/managed 超卖**——驱动不支持（判据要用我们自己的 `.vmem_node` 账本，
+     **绝不能看 `/dev/nvidia-uvm` 的 fd/映射**，那个每个 CUDA 进程都有，§2.7.6 第 3 条）；
+  3. **主机可用内存 < 在用显存**——驱动在 CRIU 介入前就把显存拷进主机分配，算术不允许（§2.7.7）。
+     要**同时**校验容器 memory limit 与宿主机可用内存；
+  4. **NVML persistence mode 未开启**——GPU 迁移要求它开着（§2.7.7）。
+- **能力位不能写成静态表，要探测**：GPU-CR（580）与 mncr（595）对"IPC handle type 的 VMM 分配能否恢复"
+  给出了相反结论（§2.7.4 第 3 条）。照搬 mncr 的 canary 思路：**用工作负载实际使用的分配方式跑一次
+  探针再试检查点，拿驱动自己的判决当准入依据**。
+- **跨节点还要加一条比"同型号 GPU"严格得多的**：**CRIU 校验每个被映射文件的 build-id 与 mode**（§2.7.5 坑 6）。
+  容器镜像天然满足，但 `libvgpu-control.so` 是从宿主机 bind-mount 的
+  （`pkg/deviceplugin/vgpu/vnum_plugin.go:807-810`）→ **两节点 vgpu-manager 版本必须完全一致**。
+  宿主侧路径带 `.<version>` 后缀有助于发现不一致；挂载 mode 保持 `ReadOnly: true` 一致。
+- **NVML 记账有约 1 秒滞后**（`nvidia-smi` 在 checkpoint 调用返回后约 1s 才不再列出该进程，§2.7.6 第 4 条）
+  → 配额预留的释放必须等轮询确认，不能在调用返回就放；验收脚本一律带 deadline 轮询。
 
 **M9 — 进程内静默栅栏（新增，见 §4.6.7）**
 - hook 入口 `enter()` / 出口 `leave()` 计数，`library_quiesce()` 关闸并等归零（带超时）；
@@ -1070,7 +1294,10 @@ status:
 | **S4** | CRIU dump/restore 一个带 library 的 GPU 容器（先同节点原地）：共享区 mmap 恢复、`flock` 状态、`/tmp/.sm_node` 行为 | 决定 L2 可行性 |
 | **S5** | lupine-server 连接子进程做 in-process 跨卡迁移（L3a 全流程） | 决定 L3a 可行性 |
 | **S6** | 典型负载的停顿时间实测：PyTorch 训练 / vLLM 推理，不同显存规模 | 决定是否需要 P5 数据面加速 |
-| **S7** | gap `CUevent` 是否需在 quiesce 里销毁（同卡 / 跨卡 `--device-map` 往返后是否仍可用） | 决定 §4.6.2.2 的"零 CUDA 调用"能否无例外成立 |
+| **S7** | gap `CUevent` 是否需在 quiesce 里销毁（同卡 / 跨卡 `--device-map` 往返后是否仍可用） | 决定 §4.6.2.2 的"零 CUDA 调用"能否无例外成立。**已有旁证**：GPU-CR 明确 `ipc_teardown_all_events()` 在检查点前拆掉 IPC event、并 `ipc_disable_all_peer_access()`（`src/ipc_hooks.h:167-185`），说明事件/P2P 状态确实有风险 |
+| **S9** | **能力探针**（照搬 mncr `verify/vmm_probe.cu`）：在目标驱动上逐一试 `cuMemAlloc` / VMM 持有 / VMM+导出 / VMM 导入 / managed / `cuIpcGetMemHandle` 的 C/R，产出**本节点的**能力矩阵 | 取代静态表；GPU-CR(580) 与 mncr(595) 结论相反（§2.7.4） |
+| **S10** | `--device-map` 的 **PATH shim** 在我们的部署形态下是否可用（criu 由 runc 拉起，PATH 由谁决定；我们的 agent 能否在那个 PATH 前插目录） | 决定 L2 跨卡恢复可行性（§2.7.5 坑 7） |
+| **S11** | 我们自己的 `libvgpu-control.so` 在两节点间的 **build-id/mode 一致性**：同版本 helm 部署出来的两台机器，CRIU 是否接受（含 `.<version>` 后缀路径与 ReadOnly 挂载） | 决定跨节点迁移的版本约束能否落地（§2.7.5 坑 6） |
 | ~~**S8**~~ | 目标驱动 `libcuda.so` 导出具名 `cuCheckpointProcess*` | **已实机确认（2026-09-23）**：具名符号存在，劫持方案成立。剩余的结构体布局核对转为 S8-b（§4.7.10） |
 
 ### P1 —— L0：GPU C/R 原语 + library 兼容（交付："被 vgpu-manager 管理的 GPU 容器可以被安全挂起与恢复"）
