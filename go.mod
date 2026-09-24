@@ -17,6 +17,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/grepplabs/cert-source v0.1.0
 	github.com/julienschmidt/httprouter v1.3.0
+	github.com/miekg/dns v1.1.73
 	github.com/opencontainers/cgroups v0.1.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/prometheus/client_golang v1.24.1

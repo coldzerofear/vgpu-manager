@@ -273,11 +273,6 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	}
 }
 
-func GetComputePolicy(obj metav1.Object) util.ComputePolicy {
-	policy, _ := util.HasAnnotation(obj, util.VGPUComputePolicyAnnotation)
-	return vgpu2.GetComputePolicy(policy)
-}
-
 func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult, device *AllocatableDevice) *cdiapi.ContainerEdits {
 	if result == nil || device == nil || device.Type() != VGpuDeviceType {
 		return nil
@@ -303,7 +298,7 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 		fmt.Sprintf("%s_%d=%s", util.ManagerVisibleDevice, idx, device.VGpu.UUID),
 	}
 
-	computePolicy := GetComputePolicy(claim)
+	computePolicy := vgpu2.GetDefaultComputePolicy(claim, nil)
 	if quantity, ok := result.ConsumedCapacity[CoresResourceName]; ok {
 		if hardVal, ok := quantity.AsInt64(); ok {
 			softVal := hardVal

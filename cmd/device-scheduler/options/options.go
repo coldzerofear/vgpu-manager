@@ -132,7 +132,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.BoolVar(&o.EnableTls, "enable-tls", false, "Open TLS encrypted communication for the server. (default: false)")
 	pflag.StringVar(&o.TlsKeyFile, "tls-key-file", "", "Specify tls key file path. (need --enable-tls)")
 	pflag.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need --enable-tls)")
-	pflag.DurationVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval duration.")
+	pflag.DurationVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval duration. (must be greater than or equal to 1s)")
 	pflag.DurationVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")

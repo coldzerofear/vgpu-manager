@@ -22,19 +22,17 @@ package remoteagent
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
-	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
@@ -45,31 +43,8 @@ import (
 
 const podUIDIndex = "pod-uid"
 
-// startPodInformers watches the pods whose GPUs are on this node -- the
-// scheduler labels them metrics-node=<node> -- and the node object the device
-// plugin publishes its device registry on. Blocks until both caches are synced.
-func (a *Agent) startPodInformers(ctx context.Context) error {
-	podFactory := informers.NewSharedInformerFactoryWithOptions(a.cfg.ClientSets.Core, 10*time.Hour,
-		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-			opts.LabelSelector = labels.Set{util.PodMetricsNodeLabel: a.cfg.NodeName}.String()
-		}))
-	a.podInformer = podFactory.Core().V1().Pods().Informer()
-	if err := a.podInformer.AddIndexers(podIndexers()); err != nil {
-		return err
-	}
-	if err := a.podInformer.SetTransform(crcache.TransformStripManagedFields()); err != nil {
-		return err
-	}
-	nodeFactory := informers.NewSharedInformerFactoryWithOptions(a.cfg.ClientSets.Core, 10*time.Hour,
-		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-			opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", a.cfg.NodeName).String()
-		}))
-	a.nodeInformer = nodeFactory.Core().V1().Nodes().Informer()
-	if err := a.nodeInformer.SetTransform(crcache.TransformStripManagedFields()); err != nil {
-		return err
-	}
-
-	podRegistration, err := a.podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+func (a *Agent) podResourceEventHandler() cache.ResourceEventHandler {
+	return &cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			if pod, ok := obj.(*corev1.Pod); ok {
 				a.sweepPod(pod)
@@ -88,14 +63,36 @@ func (a *Agent) startPodInformers(ctx context.Context) error {
 				a.store.Sweep(string(pod.UID), nil, math.MaxInt64)
 			}
 		},
-	})
+	}
+}
+
+func (a *Agent) nodeResourceEventHandler() cache.ResourceEventHandler {
+	return &cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj interface{}) { a.refreshNodeDevicesFromNode(obj) },
+		UpdateFunc: func(_, newObj interface{}) { a.refreshNodeDevicesFromNode(newObj) },
+	}
+}
+
+// startPodInformers watches the pods whose GPUs are on this node -- the
+// scheduler labels them metrics-node=<node> -- and the node object the device
+// plugin publishes its device registry on. Blocks until both caches are synced.
+func (a *Agent) startPodInformers(ctx context.Context) error {
+	nodeRegistration, err := a.nodeInformer.AddEventHandler(a.nodeResourceEventHandler())
 	if err != nil {
 		return err
 	}
-	nodeRegistration, err := a.nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj interface{}) { a.refreshNodeDevicesFromNode(obj) },
-		UpdateFunc: func(_, newObj interface{}) { a.refreshNodeDevicesFromNode(newObj) },
-	})
+	podFactory := informers.NewSharedInformerFactoryWithOptions(a.cfg.ClientSets.Core,
+		10*time.Hour, informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
+			opts.LabelSelector = labels.Set{util.PodMetricsNodeLabel: a.cfg.NodeName}.String()
+		}))
+	a.podInformer = podFactory.Core().V1().Pods().Informer()
+	if err = a.podInformer.AddIndexers(podIndexers()); err != nil {
+		return err
+	}
+	if err = a.podInformer.SetTransform(crcache.TransformStripManagedFields()); err != nil {
+		return err
+	}
+	podRegistration, err := a.podInformer.AddEventHandler(a.podResourceEventHandler())
 	if err != nil {
 		return err
 	}
@@ -116,14 +113,8 @@ func (a *Agent) startPodInformers(ctx context.Context) error {
 	a.wg.Go(func() { a.podInformer.RunWithContext(ctx) })
 	a.wg.Go(func() { a.nodeInformer.RunWithContext(ctx) })
 
-	syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer syncCancel()
-	if !cache.WaitForNamedCacheSyncWithContext(
-		syncCtx,
-		a.podInformer.HasSynced,
-		a.nodeInformer.HasSynced) {
-		return fmt.Errorf("informers cache synchronization timeout")
-	}
+	a.healthSynced = append(a.healthSynced, a.podInformer.HasSynced)
+
 	return nil
 }
 
@@ -225,7 +216,8 @@ func (a *Agent) ensurePodSession(ctx context.Context, req *remoteagent.EnsureSes
 	if err != nil {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
-	policy := kubeletplugin.GetComputePolicy(pod)
+	node, _ := a.nodeLister.Get(a.cfg.NodeName)
+	policy := vgpu.GetDefaultComputePolicy(pod, node)
 	if err = a.store.Materialize(req.Session, spec, nd, policy); err != nil {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}

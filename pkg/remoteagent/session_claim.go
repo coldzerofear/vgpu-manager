@@ -23,12 +23,13 @@ import (
 	"fmt"
 
 	"github.com/Masterminds/semver"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	vgpuconfig "github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
-	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/collector"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
@@ -102,7 +103,12 @@ func (s *SessionStore) MaterializeClaim(token string, claim *resourceapi.Resourc
 	if err != nil {
 		return err
 	}
-	return s.Materialize(token, spec, nd, kubeletplugin.GetComputePolicy(claim))
+	var node *corev1.Node
+	if s.GetNodeFn != nil {
+		node, _ = s.GetNodeFn()
+	}
+	policy := vgpu.GetDefaultComputePolicy(claim, node)
+	return s.Materialize(token, spec, nd, policy)
 }
 
 func (s *SessionStore) claimSessionSpec(token string, claim *resourceapi.ResourceClaim, nd *NodeDevices, requests []string) (SessionSpec, error) {

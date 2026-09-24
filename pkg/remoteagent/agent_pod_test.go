@@ -22,9 +22,9 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
-	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -175,7 +175,7 @@ func TestGCSessionsRemovesOtherOwnerKind(t *testing.T) {
 		Claims:      []device.DeviceClaim{{Id: 0, Uuid: testGPU0, Cores: 50, Memory: 4096}},
 		MemoryRatio: 1,
 	}
-	policy := kubeletplugin.GetComputePolicy(pod)
+	policy := vgpu.GetDefaultComputePolicy(pod, nil)
 	require.NoError(t, a.store.Materialize("claimtoken", claimSpec, a.podDevices.Load(), policy))
 	require.NoError(t, a.ensurePodSession(context.Background(), &remoteagent.EnsureSessionRequest{
 		Session: remotegpu.SessionToken(string(pod.UID), "app"), ClaimUid: string(pod.UID),

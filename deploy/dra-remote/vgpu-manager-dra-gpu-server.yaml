@@ -15,7 +15,7 @@ kind: ClusterRole
 metadata:
   name: vgpu-manager-dra-gpu-server:role
 rules:
-  # remote-agent: watch 本驱动 slice（节点设备快照）与 claim（会话生命周期）
+  # remote-agent: watch nodes/本驱动 slice（节点设备快照）/claim（会话生命周期）
   # device-monitor: dra 采集需要 nodes/pods/slices/claims
   - apiGroups:
       - resource.k8s.io

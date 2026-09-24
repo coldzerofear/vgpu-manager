@@ -90,7 +90,7 @@ type mutateHandle struct {
 // MutateCreate gives an opted-in pod the hostname of its node.
 func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) {
 	logger := log.FromContext(ctx)
-	if value, ok := pod.Labels[util.NodeHostnameLabel]; !ok || value != "true" {
+	if value, ok := util.HasLabel(pod, util.NodeHostnameLabel); !ok || value != "true" {
 		return
 	}
 	nodeName, field := targetNode(pod)

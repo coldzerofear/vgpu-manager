@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
@@ -29,6 +30,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
+	"github.com/miekg/dns"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
@@ -948,14 +950,13 @@ func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admi
 //   - None is left to the author: it carries its own dnsConfig, and whether
 //     those servers answer for the cluster zone is not ours to judge.
 func checkClusterDNS(pod *corev1.Pod) field.ErrorList {
-	path := field.NewPath("spec").Child("dnsPolicy")
 	switch pod.Spec.DNSPolicy {
 	case corev1.DNSDefault:
-		return field.ErrorList{field.Invalid(path, pod.Spec.DNSPolicy,
+		return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsPolicy"), pod.Spec.DNSPolicy,
 			"a remote vGPU pod resolves its GPU server through cluster DNS, which this policy does not use: use ClusterFirst, or ClusterFirstWithHostNet with spec.hostNetwork")}
 	case corev1.DNSClusterFirst:
 		if pod.Spec.HostNetwork {
-			return field.ErrorList{field.Invalid(path, pod.Spec.DNSPolicy,
+			return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsPolicy"), pod.Spec.DNSPolicy,
 				"a host-network pod needs ClusterFirstWithHostNet to use cluster DNS, which a remote vGPU pod resolves its GPU server through")}
 		}
 	case corev1.DNSNone:
@@ -963,6 +964,36 @@ func checkClusterDNS(pod *corev1.Pod) field.ErrorList {
 			return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsConfig"), pod.Spec.DNSConfig,
 				"dnsPolicy None needs nameservers of its own, and they must answer for the cluster zone: a remote vGPU pod resolves its GPU server through it")}
 		}
+		if servers := GetClusterDNSServers(); len(servers) > 0 {
+			var hasClusterDNS bool
+			for _, nameserver := range pod.Spec.DNSConfig.Nameservers {
+				if slices.Contains(servers, nameserver) {
+					hasClusterDNS = true
+					break
+				}
+			}
+			if !hasClusterDNS {
+				return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsConfig").Child("nameservers"), pod.Spec.DNSConfig.Nameservers,
+					"dnsPolicy None needs nameservers of its own, and they must include cluster DNS: a remote vGPU pod resolves its GPU server through it")}
+			}
+		}
 	}
 	return nil
+}
+
+var (
+	once       sync.Once
+	dnsServers []string
+)
+
+// GetClusterDNSServers Retrieve the cluster coreDNS address from the /etc/resolv.conf file in the container
+func GetClusterDNSServers() []string {
+	once.Do(func() {
+		config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+		if err != nil {
+			return
+		}
+		dnsServers = config.Servers
+	})
+	return dnsServers
 }

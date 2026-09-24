@@ -33,6 +33,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 )
@@ -202,10 +203,11 @@ type sessionRef struct {
 // keeps an in-memory index (token <-> owner) so owner events never need a
 // directory scan; the periodic sweep still walks the disk to catch orphans.
 type SessionStore struct {
-	cfg     Config
-	mu      sync.Mutex
-	refOf   map[string]sessionRef       // token -> owner
-	byOwner map[string]sets.Set[string] // owner UID -> tokens
+	cfg       Config
+	mu        sync.Mutex
+	refOf     map[string]sessionRef       // token -> owner
+	byOwner   map[string]sets.Set[string] // owner UID -> tokens
+	GetNodeFn func() (*corev1.Node, error)
 }
 
 func NewSessionStore(cfg Config) *SessionStore {
@@ -394,8 +396,7 @@ func (s *SessionStore) Materialize(token string, spec SessionSpec, nd *NodeDevic
 		vgpuconfig.WithComputePolicy(policy),
 		vgpuconfig.WithCompatibilityMode(util.SessionMode),
 		vgpuconfig.WithDriverVersion(nvidia.DriverVersion{
-			DriverVersion: driverVersion,
-			CudaDriverVersion: nvidia.NewCudaVersion(
+			DriverVersion: driverVersion, CudaDriverVersion: nvidia.NewCudaVersion(
 				nd.CudaVersion.Major(), nd.CudaVersion.Minor(),
 			),
 		}),

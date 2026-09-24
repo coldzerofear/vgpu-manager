@@ -98,9 +98,10 @@ func runApp(opt *options.Options) (exitCode int) {
 				"tlsKeyFile: %q, tlsCertFile: %q", opt.TlsKeyFile, opt.TlsCertFile)
 			return exitCode
 		}
-		if opt.CertRefreshInterval <= 0 {
-			klog.Warningf("Certificate refresh interval is less than or equal to 0, " +
-				"and the automatic certificate rotation function will be turned off")
+		if opt.CertRefreshInterval < time.Second {
+			klog.Warningf("Certificate refresh interval is less than 1 second, " +
+				"the automatic certificate rotation function will be turned off")
+			opt.CertRefreshInterval = 0
 		}
 
 		tlsConfig, err = tlsserverconfig.GetServerTLSConfig(slog.Default(), &tlsconfig.TLSServerConfig{
