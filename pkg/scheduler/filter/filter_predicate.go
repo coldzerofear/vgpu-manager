@@ -42,6 +42,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -347,7 +348,16 @@ func remoteConsumerNodes(nodes []corev1.Node, failed map[string]*reason.FilterRe
 // cache: a dry run (the Cluster Autoscaler simulating an upscale) asks about
 // nodes that do not exist yet, and those may be the servers.
 func (f *gpuFilter) remoteServerNodes(req *allocator.AllocationRequest, nodes []corev1.Node) ([]corev1.Node, error) {
-	list, err := f.nodeLister.List(labels.SelectorFromSet(labels.Set{util.NodeRemoteServerLabel: "true"}))
+	remoteSelector := labels.SelectorFromSet(labels.Set{util.NodeRemoteServerLabel: "true"})
+	if selVal, _ := util.HasAnnotation(req.Pod, util.NodeRemoteSelectorsAnnotation); selVal != "" {
+		path := field.NewPath("metadata", "annotations").Key(util.NodeRemoteSelectorsAnnotation)
+		if requirements, err := labels.ParseToRequirements(selVal, field.WithPath(path)); err != nil {
+			return nil, err
+		} else if len(requirements) > 0 {
+			remoteSelector.Add(requirements...)
+		}
+	}
+	list, err := f.nodeLister.List(remoteSelector)
 	if err != nil {
 		return nil, err
 	}

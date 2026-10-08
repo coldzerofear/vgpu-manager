@@ -36,6 +36,7 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -84,6 +85,15 @@ func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod, dr
 	if accessMode == util.AccessModeRemote {
 		if errs := checkClusterDNS(pod); len(errs) > 0 {
 			return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, errs)
+		}
+		// Validate remote node selector
+		if selVal, _ := util.HasAnnotation(pod, util.NodeRemoteSelectorsAnnotation); selVal != "" {
+			path := field.NewPath("metadata", "annotations").Key(util.NodeRemoteSelectorsAnnotation)
+			if _, err = labels.Parse(selVal, field.WithPath(path)); err != nil {
+				return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
+					field.Invalid(path, pod.Annotations[util.NodeRemoteSelectorsAnnotation], err.Error()),
+				})
+			}
 		}
 	}
 	if h.options.DRAAdmissionEnabled {
