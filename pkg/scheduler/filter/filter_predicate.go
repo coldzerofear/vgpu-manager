@@ -351,11 +351,12 @@ func (f *gpuFilter) remoteServerNodes(req *allocator.AllocationRequest, nodes []
 	remoteSelector := labels.SelectorFromSet(labels.Set{util.NodeRemoteServerLabel: "true"})
 	if selVal, _ := util.HasAnnotation(req.Pod, util.NodeRemoteSelectorsAnnotation); selVal != "" {
 		path := field.NewPath("metadata", "annotations").Key(util.NodeRemoteSelectorsAnnotation)
-		if requirements, err := labels.ParseToRequirements(selVal, field.WithPath(path)); err != nil {
+		requirements, err := labels.ParseToRequirements(selVal, field.WithPath(path))
+		if err != nil {
 			return nil, err
-		} else if len(requirements) > 0 {
-			remoteSelector.Add(requirements...)
 		}
+		// Add returns the combined selector, it does not mutate the receiver.
+		remoteSelector = remoteSelector.Add(requirements...)
 	}
 	list, err := f.nodeLister.List(remoteSelector)
 	if err != nil {
@@ -372,6 +373,11 @@ func (f *gpuFilter) remoteServerNodes(req *allocator.AllocationRequest, nodes []
 	for _, node := range nodes {
 		if nodeKeys.Has(node.Name) {
 			// Already taken from the cache, which is the fresher copy.
+			continue
+		}
+		// The candidates bypass the cache, so the pod's own selector is
+		// applied to them here instead of by the lister.
+		if !remoteSelector.Matches(labels.Set(node.Labels)) {
 			continue
 		}
 		if util.IsRemoteServerNode(&node) && serverInService(req.Pod, &node) {

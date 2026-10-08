@@ -217,8 +217,27 @@ func TestDecorateAndSelector(t *testing.T) {
 		}
 	})
 
+	// Numeric comparisons map to the node-affinity Gt/Lt operators, which the
+	// API server accepts only with a single integer value.
+	t.Run("numeric comparisons are supported", func(t *testing.T) {
+		reqs, err := ParseNodeSelector("gpu-count>2,rack<10")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]corev1.NodeSelectorRequirement{}
+		for _, r := range reqs {
+			got[r.Key] = r
+		}
+		if r := got["gpu-count"]; r.Operator != corev1.NodeSelectorOpGt || len(r.Values) != 1 || r.Values[0] != "2" {
+			t.Fatalf("gpu-count: %+v", r)
+		}
+		if r := got["rack"]; r.Operator != corev1.NodeSelectorOpLt || len(r.Values) != 1 || r.Values[0] != "10" {
+			t.Fatalf("rack: %+v", r)
+		}
+	})
+
 	t.Run("empty or invalid selector is rejected", func(t *testing.T) {
-		for _, bad := range []string{"", "   ", "=x", "a=b=c", "zone>1"} {
+		for _, bad := range []string{"", "   ", "=x", "a=b=c", "zone>abc"} {
 			if _, err := ParseNodeSelector(bad); err == nil {
 				t.Errorf("%q should be rejected", bad)
 			}

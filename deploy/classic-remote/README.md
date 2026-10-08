@@ -73,6 +73,7 @@ metadata:
   namespace: default
   annotations:
     nvidia.com/vgpu-access-mode: remote   # ← 唯一的远程开关（缺省 local）
+    #nvidia.com/remote-selectors: "zone=a,gpu-model in (a100,h100)"   # 可选：限定可用的服务器节点（标签选择器语法）
 spec:
   schedulerName: vgpu-scheduler
   terminationGracePeriodSeconds: 0
