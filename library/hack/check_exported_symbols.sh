@@ -125,7 +125,7 @@ FORBIDDEN_HELPERS=(
   device_vmem_unlock
   init_devices_mapping
   init_g_vgpu_config_by_env
-  init_real_dlsym
+  get_real_dlsym
   load_necessary_data
   load_controller_configuration
   load_cuda_libraries

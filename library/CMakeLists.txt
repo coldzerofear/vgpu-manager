@@ -267,7 +267,15 @@ if(BUILD_SM_NODE_TESTS)
     # Drives the provider ABI against a concurrent reader, so it needs the
     # provider too -- the rewrite it checks is the provider.s.
     add_executable(test_session_pids_concurrency
-        test/nogpu/test_session_pids_concurrency.c src/checkpoint_provider.c ${VGPU_NODRIVER_SRCS})
+        test/nogpu/test_session_pids_concurrency.c
+        src/cuda_originals.c
+        src/nvml_originals.c
+        src/cuda_hook.c
+        src/nvml_hook.c
+        src/loader.c
+        src/register.c
+        src/checkpoint_provider.c
+        ${VGPU_NODRIVER_SRCS})
     target_include_directories(test_session_pids_concurrency PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 

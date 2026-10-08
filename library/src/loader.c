@@ -1028,7 +1028,7 @@ extern int get_sm_watcher_enabled(int *i);
 extern char* _getenv(const char* name);
 /* This is the symbol search function */
 fp_dlsym real_dlsym = NULL;
-void *lib_control;
+void* lib_control = NULL;
 
 // virtual memory node lock
 extern int device_vmem_write_lock(int ordinal);
@@ -1116,11 +1116,16 @@ static void resolve_real_dlsym(void) {
   }
 }
 
-void init_real_dlsym() {
+static void init_real_dlsym() {
   resolve_real_dlsym();
   if (lib_control == NULL) {
     lib_control = dlopen(CONTROLLER_DRIVER_FILE_PATH, RTLD_LAZY);
   }
+}
+
+fp_dlsym get_real_dlsym() {
+  resolve_real_dlsym();
+  return real_dlsym;
 }
 
 static void load_nvml_libraries() {
@@ -1967,8 +1972,7 @@ FUNC_ATTR_HIDDEN void* vgpu_dlsym_target(void* handle, const char* symbol) {
   if (symbol_is_cuda_api(symbol) || symbol_is_nvml_api(symbol)) {
     return NULL;
   }
-  resolve_real_dlsym();
-  return (void*)real_dlsym;   /* NULL if unresolved -- dispatch reports it */
+  return (void *)get_real_dlsym();   /* NULL if unresolved -- dispatch reports it */
 }
 
 /* Everything the entry stub did not tail-jump: driver symbols (which resolve

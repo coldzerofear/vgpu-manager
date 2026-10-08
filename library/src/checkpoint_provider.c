@@ -86,6 +86,7 @@ limitations under the License.
   (offsetof(lupine_checkpoint_provider_v1, stop) + sizeof(void (*)(void)))
 
 extern int pid_exist(int pid);
+extern fp_dlsym get_real_dlsym();
 
 /* Session id is client-controlled and feeds a filesystem path: allow only a
  * safe charset and reject anything that could traverse (design §6.2.1). */
@@ -352,9 +353,9 @@ static void load_downstream_provider(void) {
     return;
   }
 
+  fp_dlsym real_dlsym = get_real_dlsym();
   lupine_checkpoint_provider_get_v1_fn get_provider =
-      (lupine_checkpoint_provider_get_v1_fn)dlsym(
-          handle, LUPINE_CHECKPOINT_PROVIDER_SYMBOL);
+      (lupine_checkpoint_provider_get_v1_fn)real_dlsym(handle, LUPINE_CHECKPOINT_PROVIDER_SYMBOL);
   const lupine_checkpoint_provider_v1 *api =
       get_provider != NULL ? get_provider() : NULL;
   if (api == NULL || api->struct_size < DOWNSTREAM_PROVIDER_REQUIRED_SIZE ||
@@ -378,8 +379,7 @@ static void load_downstream_provider(void) {
   g_downstream.handle = handle;
   g_downstream.api = api;
   /* Optional and independent of the ABI check above: absent is normal. */
-  g_downstream.cuda_symbol =
-      (void *(*)(const char *))dlsym(handle, "lupinecr_cuda_symbol_v1");
+  g_downstream.cuda_symbol = (void *(*)(const char *))real_dlsym(handle, "lupinecr_cuda_symbol_v1");
   LOGGER(INFO, "chained downstream checkpoint provider %s", path);
 }
 
