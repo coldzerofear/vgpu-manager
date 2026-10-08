@@ -231,6 +231,12 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod, dryRun
 		setDefaultNodeSchedulerPolicy(pod, h.options, logger)
 		setDefaultDeviceSchedulerPolicy(pod, h.options, logger)
 		setDefaultRuntimeClassName(pod, h.options, logger)
+		if mode, _ := util.PodVGPUAccessMode(pod); mode == util.AccessModeRemote {
+			if pod.Spec.NodeSelector == nil {
+				pod.Spec.NodeSelector = map[string]string{}
+			}
+			pod.Spec.NodeSelector[util.NodeRemoteConsumerLabel] = "true"
+		}
 	} else {
 		cleanupInvalidSchedulerAnnotation(pod)
 	}
