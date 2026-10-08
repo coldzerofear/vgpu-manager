@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 /*
- * LUPINE checkpoint provider embedded into library-remote (libvgpu-remote.so).
+ * LUPINE checkpoint provider, built into library/ (libvgpu-control.so).
  *
  * lupine-server dlopens the provider per connection child and calls:
  *   start()      - after fork, before the first CUDA call
@@ -23,7 +23,7 @@ limitations under the License.
  *   checkpoint() - after SIGTERM drain
  *   stop()       - on child shutdown (this is the child's exit-cleanup hook)
  *
- * The same libvgpu-remote.so is both the LD_PRELOAD'd hook library (C-1) and
+ * The same libvgpu-control.so is both the LD_PRELOAD'd hook library (C-1) and
  * this provider (C-2): lupine dlopen()s it (via LUPINE_CHECKPOINT_LIBRARY) and
  * dlsym()s lupinecr_get_lupine_provider_v1; the four callbacks are reached
  * through the returned struct, so they need not be exported themselves.
@@ -45,8 +45,19 @@ limitations under the License.
  *
  * The session directory layout itself lives in session.h -- this file only
  * decides which session the child belongs to and publishes it.
+ *
+ * Downstream chaining: lupine only has room for one LUPINE_CHECKPOINT_LIBRARY,
+ * and we already occupy that slot. VGPU_CHECKPOINT_LIBRARY lets an operator
+ * chain a second, independent provider underneath us -- e.g. a real GPU state
+ * checkpoint/restore tool -- without lupine ever knowing it exists:
+ * lupine -> us -> that provider. See load_downstream_provider() and the
+ * ordering note in checkpoint_restore(). lupinecr_cuda_symbol_v1() at the
+ * bottom of this file is a transparent passthrough of the same kind, for
+ * lupine's separate (non-struct) optional-override lookup -- we never
+ * override anything ourselves, we just forward the question down.
  */
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -64,6 +75,15 @@ limitations under the License.
 #define SESSION_ID_MAX 64
 #define SESSION_PIDS_MAX 256
 #define SESSION_PIDS_FILE_MAX (1024 * 1024) /* sanity cap for a rewrite */
+
+#define VGPU_CHECKPOINT_LIBRARY_ENV "VGPU_CHECKPOINT_LIBRARY"
+#define LUPINE_CHECKPOINT_LIBRARY_ENV "LUPINE_CHECKPOINT_LIBRARY"
+
+/* "stop" is the ABI's last required field (checkpoint_provider.h); anything
+ * shorter did not finish declaring all four callbacks. Mirrors the
+ * required_size check in lupine's own server_checkpoint.cpp load_provider(). */
+#define DOWNSTREAM_PROVIDER_REQUIRED_SIZE \
+  (offsetof(lupine_checkpoint_provider_v1, stop) + sizeof(void (*)(void)))
 
 extern int pid_exist(int pid);
 
@@ -274,14 +294,110 @@ DONE:
   return rc;
 }
 
+/* State for the optional second provider VGPU_CHECKPOINT_LIBRARY chains to.
+ * One child process, one connection, so no locking: every field is written
+ * only from load_downstream_provider()/checkpoint_stop(), both called on the
+ * child's single thread (same guarantee restore() itself relies on). */
+typedef struct {
+  void *handle;
+  const lupine_checkpoint_provider_v1 *api;
+  /* lupine's optional cuMemFree_v2-override hook (server_checkpoint.cpp):
+   * not part of lupine_checkpoint_provider_v1, looked up by lupine via a
+   * separate dlsym("lupinecr_cuda_symbol_v1") against this .so directly.
+   * NULL if the downstream provider does not export one -- this is the
+   * expected case, not an error. */
+  void *(*cuda_symbol)(const char *name);
+  int broken; /* VGPU_CHECKPOINT_LIBRARY was set but failed to load/start */
+} downstream_provider_t;
+
+static downstream_provider_t g_downstream;
+
+/* Loads the optional downstream provider. Validation mirrors lupine's own
+ * load_provider() in server_checkpoint.cpp: same symbol, same ABI check.
+ * Unset or "none" leaves g_downstream all-zero -- the default, and a no-op
+ * for every deployment that does not set this env var.
+ *
+ * A configured-but-broken path is recorded in g_downstream.broken rather than
+ * failing checkpoint_start() here: lupine treats a nonzero start() as "this
+ * whole provider is unusable" and discards it (server_checkpoint.cpp),
+ * which would silently disable ALL of our own hooks' enforcement for the
+ * connection instead of refusing it -- restore() is the callback lupine
+ * actually treats as fail-closed, so that is where we surface this instead
+ * (see the check at the top of checkpoint_restore()). */
+static void load_downstream_provider(void) {
+  const char *path = getenv(VGPU_CHECKPOINT_LIBRARY_ENV);
+  if (path == NULL || path[0] == '\0' || strcmp(path, "none") == 0) {
+    return;
+  }
+
+  /* Pointing this at ourselves (lupine's LUPINE_CHECKPOINT_LIBRARY, which is
+   * this very .so) would dlopen our own lupinecr_get_lupine_provider_v1,
+   * which would call our own start() again, which would load this "downstream"
+   * provider again, forever -- catch the one-hop case cheaply instead of
+   * recursing until the stack overflows. A longer cycle through an actual
+   * third-party library would be that library's own bug to avoid. */
+  const char *outer = getenv(LUPINE_CHECKPOINT_LIBRARY_ENV);
+  if (outer != NULL && strcmp(path, outer) == 0) {
+    LOGGER(ERROR, "%s must not name the same library as %s",
+           VGPU_CHECKPOINT_LIBRARY_ENV, LUPINE_CHECKPOINT_LIBRARY_ENV);
+    g_downstream.broken = 1;
+    return;
+  }
+
+  void *handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+  if (handle == NULL) {
+    LOGGER(ERROR, "%s=%s: dlopen failed: %s", VGPU_CHECKPOINT_LIBRARY_ENV, path,
+           dlerror());
+    g_downstream.broken = 1;
+    return;
+  }
+
+  lupine_checkpoint_provider_get_v1_fn get_provider =
+      (lupine_checkpoint_provider_get_v1_fn)dlsym(
+          handle, LUPINE_CHECKPOINT_PROVIDER_SYMBOL);
+  const lupine_checkpoint_provider_v1 *api =
+      get_provider != NULL ? get_provider() : NULL;
+  if (api == NULL || api->struct_size < DOWNSTREAM_PROVIDER_REQUIRED_SIZE ||
+      api->abi_version != LUPINE_CHECKPOINT_PROVIDER_ABI_VERSION ||
+      api->start == NULL || api->restore == NULL || api->checkpoint == NULL ||
+      api->stop == NULL) {
+    LOGGER(ERROR, "%s=%s: incompatible checkpoint provider",
+           VGPU_CHECKPOINT_LIBRARY_ENV, path);
+    dlclose(handle);
+    g_downstream.broken = 1;
+    return;
+  }
+  if (api->start() != 0) {
+    LOGGER(ERROR, "%s=%s: provider start() failed", VGPU_CHECKPOINT_LIBRARY_ENV,
+           path);
+    dlclose(handle);
+    g_downstream.broken = 1;
+    return;
+  }
+
+  g_downstream.handle = handle;
+  g_downstream.api = api;
+  /* Optional and independent of the ABI check above: absent is normal. */
+  g_downstream.cuda_symbol =
+      (void *(*)(const char *))dlsym(handle, "lupinecr_cuda_symbol_v1");
+  LOGGER(INFO, "chained downstream checkpoint provider %s", path);
+}
+
 static int checkpoint_start(void) {
   LOGGER(INFO, "provider start()");
+  load_downstream_provider();
   return 0;
 }
 
 static int checkpoint_restore(const char *connection_id) {
   LOGGER(INFO, "provider restore() connection_id=%s",
          connection_id == NULL ? "<null>" : connection_id);
+
+  if (g_downstream.broken) {
+    LOGGER(ERROR, "%s is set but failed to load; refusing connection",
+           VGPU_CHECKPOINT_LIBRARY_ENV);
+    return -1; /* lupine closes the connection (fail-closed) */
+  }
 
   if (!valid_session_id(connection_id)) {
     LOGGER(ERROR, "invalid or unsafe session id, refusing connection");
@@ -325,6 +441,27 @@ static int checkpoint_restore(const char *connection_id) {
     return -1;
   }
   LOGGER(INFO, "registered pid %ld into %s", (long)getpid(), session_path(SESSION_PIDS));
+
+  /* Our own masking (apply_visible_devices() above) is fully committed by
+   * this point; only now may the downstream provider touch the driver.
+   * CUDA_VISIBLE_DEVICES only has an effect up to this process's first
+   * cuInit (see the comment on apply_visible_devices()), so calling the
+   * downstream provider any earlier could let it initialize the driver
+   * before the mask is in place -- and once that happens it cannot be
+   * undone for the rest of this process's life.
+   *
+   * TODO(remote): once a real downstream provider exists, additionally
+   * verify by NVML that the device(s) it actually restored onto are still
+   * within config_allowed_devices(). CUDA_VISIBLE_DEVICES only constrains
+   * the CUDA Driver API's own enumeration -- a provider that selects a
+   * device through NVML or a raw ioctl underneath it is not bound by it,
+   * the same way our own NVML hooks exist because NVML itself is not. */
+  if (g_downstream.api != NULL && g_downstream.api->restore(connection_id) != 0) {
+    LOGGER(ERROR, "downstream checkpoint provider refused connection %s",
+           connection_id);
+    (void)session_pids_update(session_path(SESSION_PIDS), getpid(), 0);
+    return -1;
+  }
   return 0;
 }
 
@@ -332,11 +469,22 @@ static int checkpoint_checkpoint(const char *connection_id) {
   LOGGER(INFO, "provider checkpoint() connection_id=%s",
          connection_id == NULL ? "<null>" : connection_id);
   /* TODO(remote): no-op for now (we do not persist GPU state). */
-  return 0;
+  return g_downstream.api != NULL ? g_downstream.api->checkpoint(connection_id) : 0;
 }
 
 static void checkpoint_stop(void) {
   LOGGER(INFO, "provider stop()");
+  /* Reverse of load_downstream_provider()'s start() -- unwind it regardless
+   * of whether restore() ever ran, since start() (and this) run per child
+   * regardless of that. */
+  if (g_downstream.api != NULL) {
+    g_downstream.api->stop();
+  }
+  if (g_downstream.handle != NULL) {
+    dlclose(g_downstream.handle);
+  }
+  g_downstream = (downstream_provider_t){0};
+
   if (!session_enabled()) {
     return; /* restore() never ran: nothing was registered */
   }
@@ -351,4 +499,16 @@ static const lupine_checkpoint_provider_v1 checkpoint_provider = {
 
 const lupine_checkpoint_provider_v1 *lupinecr_get_lupine_provider_v1(void) {
   return &checkpoint_provider;
+}
+
+/* lupine dlsym()s this directly off this .so (independently of the provider
+ * struct above) to ask whether to use a provider-supplied replacement for a
+ * native CUDA call instead of the real driver -- currently only cuMemFree_v2,
+ * when releasing a VMM allocation restored from a checkpoint. We never
+ * answer this ourselves; we only forward to whatever the downstream
+ * provider exports under the same name, so chaining one underneath us costs
+ * it nothing. Returning NULL (no downstream provider, or one that does not
+ * export this) tells lupine to use the real driver call, same as today. */
+void *lupinecr_cuda_symbol_v1(const char *name) {
+  return g_downstream.cuda_symbol != NULL ? g_downstream.cuda_symbol(name) : NULL;
 }
