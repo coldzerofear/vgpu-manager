@@ -59,6 +59,9 @@ func (*fakeNVMLGPU) GetMaxMigDeviceCount() (int, nvml.Return) {
 }
 
 func (d *fakeNVMLGPU) GetMigDeviceHandleByIndex(int) (nvml.Device, nvml.Return) {
+	if d.migDevice == nil {
+		return nil, nvml.ERROR_NOT_FOUND
+	}
 	return d.migDevice, nvml.SUCCESS
 }
 
@@ -232,14 +235,18 @@ func TestDeviceLibGetMigDevices(t *testing.T) {
 //func TestDeviceLibCreateMigDevice(t *testing.T) {
 //	enableDynamicMIGForTest(t)
 //
-//	migDevice := &fakeNVMLMigDevice{uuid: "MIG-1"}
-//	ci := &fakeNVMLComputeInstance{info: nvml.ComputeInstanceInfo{Id: 4, ProfileId: 7, Device: migDevice}}
+//	migDevice := &fakeNVMLMigDevice{giID: 3, ciID: 4, uuid: "MIG-1"}
+//	ci := &fakeNVMLComputeInstance{info: nvml.ComputeInstanceInfo{Id: 4, ProfileId: 7}}
 //	gi := &fakeNVMLGpuInstance{
 //		info:      nvml.GpuInstanceInfo{Id: 3},
 //		ci:        ci,
 //		ciProfile: nvml.ComputeInstanceProfileInfo{Id: 7},
 //	}
-//	gpu := &fakeNVMLGPU{gi: gi, giProfile: nvml.GpuInstanceProfileInfo{Id: 19}}
+//	gpu := &fakeNVMLGPU{migDevice: migDevice, gi: gi, giProfile: nvml.GpuInstanceProfileInfo{Id: 19}}
+//	// As in real NVML, ComputeInstanceInfo.Device is the parent GPU handle,
+//	// not the MIG device handle. The MIG device UUID must be resolved via the
+//	// parent's MIG device handles, never from ComputeInstanceInfo.Device.
+//	ci.info.Device = gpu
 //	parent := &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{UUID: "GPU-1", Minor: 1}}
 //	l := deviceLib{
 //		DeviceLib:       nvidia.NewFakeDeviceLib(&fakeNVMLDeviceLib{device: fakeNVDevice{}}, nil, nil, nil),

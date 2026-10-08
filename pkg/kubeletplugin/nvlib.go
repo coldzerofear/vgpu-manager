@@ -809,10 +809,10 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 		return nil, fmt.Errorf("error creating GPU instance for '%s': %w", migspec.CanonicalName(), ret)
 	}
 
-	//giInfo, ret := gi.GetInfo()
-	//if ret != nvml.SUCCESS {
-	//	return nil, fmt.Errorf("error getting GPU instance info for '%s': %v", migspec.CanonicalName(), ret)
-	//}
+	giInfo, ret := gi.GetInfo()
+	if ret != nvml.SUCCESS {
+		return nil, fmt.Errorf("error getting GPU instance info for '%s': %v", migspec.CanonicalName(), ret)
+	}
 
 	ciProfileInfo, ret := gi.GetComputeInstanceProfileInfo(profileInfo.CIProfileID, profileInfo.CIEngProfileID)
 	if ret != nvml.SUCCESS {
@@ -830,20 +830,19 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 	}
 	klog.V(6).Infof("t_prep_create_mig_dev_cigi %.3f s", time.Since(tcgigi0).Seconds())
 
-	// Note(JP): for obtaining the UUID of the just-created MIG device, some
-	// algorithms walk through all MIG devices on the parent GPU to identify the
-	// one that matches the CIID and GIID of the MIG device that was just
-	// created. While that is correct, I measured that the time spent in NVML
-	// API calls for 'walking all MIG devices' under load under can easily be
-	// O(10 s). The UUID can also be obtained by first getting the MIG device
-	// handle from the CI and then calling GetUUID() on that handle. A MIG
-	// device handle maps 1:1 to a CI in NVML, so once the CI is known, the MIG
-	// device handle and its UUID can be retrieved directly without scanning
-	// through indices.
-	uuid, ret := ciInfo.Device.GetUUID()
-	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting UUID from CI info/device for CI %d: %w", ciInfo.Id, ret)
+	// Obtain the UUID of the just-created MIG device. Note that
+	// `ciInfo.Device` is the handle of the *parent* GPU (NVML documents
+	// `nvmlComputeInstanceInfo_t.device` as "Parent device"), so calling
+	// GetUUID() on it returns the parent GPU's UUID -- not the MIG device's.
+	// NVML has no direct CI -> MIG device handle lookup; walk the parent's MIG
+	// device handles (at most GetMaxMigDeviceCount(), e.g. 7) and match on
+	// GI/CI ID. Reuse the parent handle obtained above to keep this cheap.
+	tmuuid0 := time.Now()
+	uuid, err := getMigDeviceUUID(device, int(giInfo.Id), int(ciInfo.Id))
+	if err != nil {
+		return nil, fmt.Errorf("error getting MIG device UUID for GI %d / CI %d: %w", giInfo.Id, ciInfo.Id, err)
 	}
+	klog.V(7).Infof("t_prep_create_mig_dev_get_mig_uuid %.3f s", time.Since(tmuuid0).Seconds())
 
 	// Convenient access to all Mig device lists to find newly created Mig device information.
 	migMap, err := l.GetMigDeviceInfos(gpu)
@@ -860,6 +859,48 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 
 	klog.V(6).Infof("%s: MIG device created on %s: %+v", logpfx, gpu.String(), migDevInfo.LiveTuple())
 	return migDevInfo, nil
+}
+
+// getMigDeviceUUID returns the UUID of the MIG device that corresponds to the
+// GPU instance `giID` and compute instance `ciID` on the `parent` GPU. It walks
+// the parent's MIG device handles and matches on GI/CI ID.
+func getMigDeviceUUID(parent nvml.Device, giID, ciID int) (string, error) {
+	count, ret := parent.GetMaxMigDeviceCount()
+	if ret != nvml.SUCCESS {
+		return "", fmt.Errorf("error getting max MIG device count: %w", ret)
+	}
+	for i := range count {
+		migHandle, ret := parent.GetMigDeviceHandleByIndex(i)
+		if ret != nvml.SUCCESS {
+			if ret != nvml.ERROR_NOT_FOUND {
+				klog.Warningf("getMigDeviceUUID: GetMigDeviceHandleByIndex(%d) failed: %v", i, ret)
+			}
+			// Slot empty or invalid.
+			continue
+		}
+		gi, ret := migHandle.GetGpuInstanceId()
+		if ret != nvml.SUCCESS {
+			klog.Warningf("getMigDeviceUUID: GetGpuInstanceId() at MIG index %d failed: %v", i, ret)
+			continue
+		}
+		if gi != giID {
+			continue
+		}
+		ci, ret := migHandle.GetComputeInstanceId()
+		if ret != nvml.SUCCESS {
+			klog.Warningf("getMigDeviceUUID: GetComputeInstanceId() at MIG index %d (GI %d) failed: %v", i, gi, ret)
+			continue
+		}
+		if ci != ciID {
+			continue
+		}
+		uuid, ret := migHandle.GetUUID()
+		if ret != nvml.SUCCESS {
+			return "", fmt.Errorf("error getting UUID of MIG device at index %d (GI %d, CI %d): %w", i, giID, ciID, ret)
+		}
+		return uuid, nil
+	}
+	return "", fmt.Errorf("no MIG device found for GI %d / CI %d", giID, ciID)
 }
 
 // Assume long-lived NVML session.
