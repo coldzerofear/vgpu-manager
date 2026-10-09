@@ -132,8 +132,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	devRoot := containerDriverRoot.GetDevRoot()
 	klog.Infof("Using devRoot=%v", devRoot)
 
-	hostRoot := nvidia.RootPath(config.Flags.HostRoot)
-	nvdevlib, err := newDeviceLib(containerDriverRoot, hostRoot)
+	nvdevlib, err := newDeviceLib(containerDriverRoot, config.Flags.HostRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
 	}
@@ -163,9 +162,8 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		WithCDIRoot(config.Flags.CdiRoot),
 		WithLogger(cdilogger),
 	}
-	var vfioCDIHandler *vfioCDIHandler
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		vfioCDIHandler, err = NewVfioCDIHandler(nvdevlib)
+	if featuregates.Enabled(featuregates.PassthroughSupport) && nvdevlib.IsVfioEnabled() {
+		vfioCDIHandler, err := NewVfioCDIHandler(nvdevlib)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create vfio CDI handler: %w", err)
 		}
@@ -202,11 +200,8 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	//	mpsManager = NewMpsManager(config, nvdevlib, hostDriverRoot, MpsControlDaemonTemplatePath)
 	//}
 
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		vfioPciManager, err = NewVfioPciManager(string(containerDriverRoot), string(hostDriverRoot), nvdevlib, true /* nvidiaEnabled */)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create vfio pci manager: %w", err)
-		}
+	if featuregates.Enabled(featuregates.PassthroughSupport) && nvdevlib.IsVfioEnabled() {
+		vfioPciManager = NewVfioPciManager(string(containerDriverRoot), hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
 	}
 
 	fmManager, err := newFabricManager(nvdevlib, containerDriverRoot)
@@ -387,10 +382,11 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	preparedDevices, err := s.prepareDevices(ctx, claim, checkpoint)
 	klog.V(6).Infof("t_prep_core %.3f s (claim %s)", time.Since(tprep0).Seconds(), ResourceClaimToString(claim))
 	if err != nil {
-		return nil, fmt.Errorf("prepare devices failed: %w", err)
+		return nil, fmt.Errorf("failed to prepare devices: %w", err)
 	}
 
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	// TODO: Remove this once partitionable device support is introduced for vfio devices.
+	if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 		for _, device := range preparedDevices.GetDevices() {
 			allocatableDevice := s.perGPUAllocatable.GetAllocatableDevice(device.DeviceName)
 			if allocatableDevice == nil {
@@ -555,7 +551,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 	}
 
 	// TODO: Remove this once partitionable device support is introduced for vfio devices.
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 		for _, device := range pc.PreparedDevices.GetDevices() {
 			allocatableDevice := s.perGPUAllocatable.GetAllocatableDevice(device.DeviceName)
 			if allocatableDevice == nil {
@@ -665,8 +661,8 @@ func (s *DeviceState) unpreparePartiallyPreparedClaim(ctx context.Context, cuid 
 		}
 	}
 
-	// Attempt rollback of VFIO devices if PassthroughSupport is enabled.
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	// Attempt rollback of VFIO devices if passthrough is available on this node.
+	if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 		vfioDevices := allocDevsForClaim.GetVfioDevices()
 		if len(vfioDevices) > 0 {
 			klog.V(2).Infof("unprepare: VFIO rollback for partially prepared claim %s (devices: %d)", PreparedClaimToString(&pc, cuid), len(vfioDevices))
@@ -764,6 +760,9 @@ func (s *DeviceState) rollbackPartiallyPreparedMIGDevices(ctx context.Context, c
 	}
 
 	for _, r := range pc.Status.Allocation.Devices.Results {
+		if r.Driver != util.DRADriverName {
+			continue
+		}
 		devname := r.Device
 		ms, err := NewMigSpecTupleFromCanonicalName(devname)
 		if err != nil {
@@ -1032,7 +1031,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		return nil, err
 	}
 
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 		vfioGroups := 0
 		for c := range configResultsMap {
 			if _, ok := c.(*configapi.VfioDeviceConfig); ok {
@@ -1309,7 +1308,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplug
 	var vGpuDevices PreparedDeviceList
 	for _, group := range devices {
 		// Unconfigure the vfio-pci devices.
-		if featuregates.Enabled(featuregates.PassthroughSupport) {
+		if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 			err := s.unprepareVfioDevices(ctx, group.Devices.VfioDevices())
 			if err != nil {
 				return false, err
@@ -1427,7 +1426,7 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) error {
 	switch device.Type() {
 	case GpuDeviceType:
-		if !device.Gpu.vfioEnabled {
+		if !featuregates.Enabled(featuregates.PassthroughSupport) || !s.nvdevlib.IsVfioEnabled() || !device.Gpu.vfioEnabled {
 			return nil
 		}
 		vfioAllocatable, err := s.nvdevlib.discoverVfioDevice(device.Gpu)
@@ -1475,6 +1474,9 @@ func (s *DeviceState) applyConfig(ctx context.Context, config configapi.Interfac
 		return s.applySharingConfig(ctx, castConfig.Sharing, claim, results, cp)
 	case *configapi.VfioDeviceConfig:
 		klog.V(7).Infof("applySharingConfig() for VfioDeviceConfig")
+		if !featuregates.Enabled(featuregates.PassthroughSupport) || !s.nvdevlib.IsVfioEnabled() {
+			return nil, errors.New("VFIO is unavailable on this node")
+		}
 		return s.applyVfioDeviceConfig(ctx, castConfig, claim, results)
 	default:
 		return nil, fmt.Errorf("unknown config type: %T", castConfig)
@@ -1631,7 +1633,7 @@ func (s *DeviceState) gpuInfosFromPreparedClaim(results []resourceapi.DeviceRequ
 		case VfioDeviceType:
 			gpus = append(gpus, device.Vfio.parent)
 		default:
-			klog.V(6).Infof("device %q has unsupported type %q; skipping for fabric partition", r.Device, device.Type())
+			klog.Warningf("device %q has unsupported type %q; skipping for fabric partition", r.Device, device.Type())
 		}
 	}
 	return gpus

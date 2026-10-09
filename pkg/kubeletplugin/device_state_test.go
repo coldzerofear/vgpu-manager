@@ -18,8 +18,10 @@ limitations under the License.
 package kubeletplugin
 
 import (
+	"context"
 	"testing"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/fabricmanager"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
@@ -852,4 +854,90 @@ func TestNormalizeAndValidateConfig(t *testing.T) {
 
 	_, err = normalizeAndValidateConfig(&resourceapi.ResourceClaim{})
 	require.Error(t, err)
+}
+
+// Prepare() checkpoints the claim status whole, so a mixed-driver claim leaves
+// results here that this driver did not place.
+func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
+	enableDynamicMIGForTest(t)
+
+	const ownedMIG = "gpu-0-mig-1g10gb-19-0"
+	parent := &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{UUID: "GPU-0", Minor: 0, PciBusID: "0000:01:00.0"}}
+
+	// The parent lookup is the first NVML call MIG teardown makes, so its count
+	// tells which results got that far. The parent holds one MIG device, on a
+	// placement no case names.
+	newState := func() (*DeviceState, *mockNVMLLibrary) {
+		gpu := &fakeNVMLGPU{
+			migDevice: &fakeNVMLMigDevice{giID: 3},
+			gi:        &fakeNVMLGpuInstance{info: nvml.GpuInstanceInfo{Id: 3, ProfileId: 9, Placement: nvml.GpuInstancePlacement{Start: 4, Size: 3}}},
+		}
+		nvmllib := &mockNVMLLibrary{
+			deviceGetHandleByUUIDFunc: func(string) (nvml.Device, nvml.Return) { return gpu, nvml.SUCCESS },
+		}
+		state := &DeviceState{nvdevlib: &deviceLib{
+			DeviceLib:         nvidia.NewFakeDeviceLib(nil, nil, nvmllib, nil),
+			gpuInfosByUUID:    map[string]*GpuDeviceInfo{parent.UUID: parent},
+			gpuUUIDbyPCIBusID: map[PCIBusID]string{parent.PciBusID: parent.UUID},
+			devhandleByUUID:   map[string]nvml.Device{},
+		}}
+		return state, nvmllib
+	}
+
+	claimWith := func(results ...resourceapi.DeviceRequestAllocationResult) PreparedClaim {
+		return PreparedClaim{Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{Results: results},
+			},
+		}}
+	}
+
+	completedWith := func(results ...resourceapi.DeviceRequestAllocationResult) *Checkpoint {
+		completed := claimWith(results...)
+		completed.CheckpointState = ClaimCheckpointStatePrepareCompleted
+		return &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{"completed": completed}}}
+	}
+
+	// The foreign name is on another GPU and placement, so a guard comparing
+	// placements instead of names could not hold it back on ownedMIG's behalf.
+	t.Run("another driver's MIG-shaped name", func(t *testing.T) {
+		state, nvmllib := newState()
+
+		pc := claimWith(
+			resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: "gpu-1-mig-foreign-14-4"},
+			resourceapi.DeviceRequestAllocationResult{Driver: util.DRADriverName, Device: ownedMIG},
+		)
+
+		err := state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
+			completedWith(resourceapi.DeviceRequestAllocationResult{Driver: util.DRADriverName, Device: ownedMIG}))
+
+		require.NoError(t, err)
+		require.Zero(t, nvmllib.deviceGetHandleByUUIDCalls, "another driver's result must not reach MIG teardown")
+	})
+
+	// Without this the case above would also pass if the loop skipped everything.
+	t.Run("our own MIG name", func(t *testing.T) {
+		state, nvmllib := newState()
+
+		pc := claimWith(resourceapi.DeviceRequestAllocationResult{Driver: util.DRADriverName, Device: ownedMIG})
+
+		err := state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
+			&Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
+
+		require.NoError(t, err)
+		require.Equal(t, 1, nvmllib.deviceGetHandleByUUIDCalls, "our own result must still reach MIG teardown")
+	})
+
+	// The completed claim is what keeps ownedMIG out of the first case.
+	t.Run("our own MIG name held by a completed claim", func(t *testing.T) {
+		state, nvmllib := newState()
+
+		pc := claimWith(resourceapi.DeviceRequestAllocationResult{Driver: util.DRADriverName, Device: ownedMIG})
+
+		err := state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
+			completedWith(resourceapi.DeviceRequestAllocationResult{Driver: util.DRADriverName, Device: ownedMIG}))
+
+		require.NoError(t, err)
+		require.Zero(t, nvmllib.deviceGetHandleByUUIDCalls, "a device held by a completed claim must not reach MIG teardown")
+	})
 }

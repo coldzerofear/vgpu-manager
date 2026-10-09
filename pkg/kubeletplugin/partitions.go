@@ -64,10 +64,6 @@ func (d *GpuDeviceInfo) GetSharedCounterSetName() string {
 	return toRFC1123Compliant(fmt.Sprintf("%s-counter-set", d.CanonicalName()))
 }
 
-//func (d *VGpuDeviceInfo) GetSharedCounterSetName() string {
-//	return toRFC1123Compliant(fmt.Sprintf("%s-counter-set", d.CanonicalName()))
-//}
-
 // KEP 4815 device announcement: for now, define exactly one CounterSet per full
 // GPU device. Individual partitions consume from that. In that CounterSet,
 // define one counter per device capacity dimension, and add one counter
@@ -87,13 +83,6 @@ func (d *GpuDeviceInfo) PartSharedCounterSets() []resourceapi.CounterSet {
 	}}
 }
 
-//func (d *VGpuDeviceInfo) PartSharedCounterSets() []resourceapi.CounterSet {
-//	return []resourceapi.CounterSet{{
-//		Name:     d.GetSharedCounterSetName(),
-//		Counters: addCountersForMemSlices(capacitiesToCounters(d.maxCapacities), 0, d.memSliceCount),
-//	}}
-//}
-
 // KEP 4815 device announcement: define what this full GPU consumes when allocated.
 // Let the full device consume everything. Goals: 1) when the full device is
 // allocated, all available counters drop to zero. 2) when the smallest
@@ -109,13 +98,6 @@ func (d *GpuDeviceInfo) PartConsumesCounters() []resourceapi.DeviceCounterConsum
 		Counters:   addCountersForMemSlices(capacitiesToCounters(d.maxCapacities), 0, d.memSliceCount),
 	}}
 }
-
-//func (d *VGpuDeviceInfo) PartConsumesCounters() []resourceapi.DeviceCounterConsumption {
-//	return []resourceapi.DeviceCounterConsumption{{
-//		CounterSet: d.GetSharedCounterSetName(),
-//		Counters:   addCountersForMemSlices(capacitiesToCounters(d.maxCapacities), 0, d.memSliceCount),
-//	}}
-//}
 
 // KEP 4815 device announcement: return the 'full' device description.
 func (d *GpuDeviceInfo) PartGetDevice() resourceapi.Device {
@@ -196,7 +178,9 @@ func (i MigSpec) Capacities() PartCapacityMap {
 }
 
 func (i MigSpec) Attributes() map[resourceapi.QualifiedName]resourceapi.DeviceAttribute {
-	return CommonAttributesMig(i.Parent.GpuInfo, i.Profile.String())
+	// All profiles are expected to have the same profile name.
+	// So pick the first one.
+	return CommonAttributesMig(i.Parent.GpuInfo, i.CandidateProfiles[0].String())
 }
 
 func capacitiesToCounters(m PartCapacityMap) map[string]resourceapi.Counter {

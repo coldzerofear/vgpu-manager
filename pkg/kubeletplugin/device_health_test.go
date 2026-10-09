@@ -45,11 +45,18 @@ type mockNVMLLibrary struct {
 	nvml.Interface
 	deviceGetHandleByPciBusIdFunc  func(string) (nvml.Device, nvml.Return)
 	deviceGetHandleByPciBusIdCalls int
+	deviceGetHandleByUUIDFunc      func(string) (nvml.Device, nvml.Return)
+	deviceGetHandleByUUIDCalls     int
 }
 
 func (m *mockNVMLLibrary) DeviceGetHandleByPciBusId(busID string) (nvml.Device, nvml.Return) {
 	m.deviceGetHandleByPciBusIdCalls++
 	return m.deviceGetHandleByPciBusIdFunc(busID)
+}
+
+func (m *mockNVMLLibrary) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.Return) {
+	m.deviceGetHandleByUUIDCalls++
+	return m.deviceGetHandleByUUIDFunc(uuid)
 }
 
 // mockHealthMonitor implements deviceHealthMonitor for testing healthEventToTaint.
@@ -203,10 +210,10 @@ func TestPartGetDeviceIncludesHealthTaints(t *testing.T) {
 		},
 	}
 	dev := &AllocatableDevice{MigDynamic: &MigSpec{
-		Parent:        parent,
-		Profile:       &nvdev.MigProfileInfo{G: 1, GB: 5, GIProfileID: 19},
-		GIProfileInfo: nvml.GpuInstanceProfileInfo{Id: 19},
-		Placement:     nvml.GpuInstancePlacement{Start: 0, Size: 1},
+		Parent:            parent,
+		CandidateProfiles: []nvdev.MigProfile{&nvdev.MigProfileInfo{G: 1, GB: 5, GIProfileID: 19}},
+		GIProfileInfo:     nvml.GpuInstanceProfileInfo{Id: 19},
+		Placement:         nvml.GpuInstancePlacement{Start: 0, Size: 1},
 	}}
 	taint := &resourceapi.DeviceTaint{
 		Key:    TaintKeyXID,
