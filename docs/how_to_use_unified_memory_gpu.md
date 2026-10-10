@@ -21,12 +21,17 @@ Set the device memory size in MiB. It applies **only** to devices that cannot
 report a size; a device that reports its own always wins, so the setting is safe
 to leave in place on a mixed cluster.
 
-The device plugin and the device monitor must agree, so set it on both - either
-through the node configuration (one place for both, see
-[how_to_use_deviceplugin_nodeconfig.md](how_to_use_deviceplugin_nodeconfig.md))
-or through the flag on each container.
+Every component that looks at a device must agree about its size, so the value
+goes on each of them: the device plugin and the device monitor on the classic
+path, the kubelet plugin and the device monitor on the DRA path.
 
-Node configuration (classic path):
+On the classic path the node configuration covers both containers at once (they
+read the same file, see
+[how_to_use_deviceplugin_nodeconfig.md](how_to_use_deviceplugin_nodeconfig.md)).
+The DRA kubelet plugin does not read the node configuration, so there the flag
+(or the chart value, which renders onto both containers) is the only route.
+
+Node configuration (classic path only):
 
 ```yaml
 version: v1
