@@ -20,12 +20,13 @@ import (
 	"testing"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	"github.com/docker/go-units"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestResolveDeviceMemory(t *testing.T) {
-	const gib = 1024 * MiB
+	const gib = 1024 * units.MiB
 
 	tests := map[string]struct {
 		ret         nvml.Return
@@ -90,4 +91,18 @@ func TestResolveDeviceMemory(t *testing.T) {
 			logDeviceMemory(0, total, unified, tc.overrideMB)
 		})
 	}
+}
+
+// A negative override reaches the library through the monitor's flag, which is
+// not validated the way the node config is, and must not wrap around.
+func TestWithMemoryOverrideMBRejectsNonPositive(t *testing.T) {
+	for _, mb := range []int{-1, 0} {
+		lib := &DeviceLib{}
+		WithMemoryOverrideMB(mb)(lib)
+		assert.Zero(t, lib.memoryOverrideMB, "override %d", mb)
+	}
+
+	lib := &DeviceLib{}
+	WithMemoryOverrideMB(65536)(lib)
+	assert.Equal(t, uint64(65536), lib.memoryOverrideMB)
 }

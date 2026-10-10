@@ -196,10 +196,16 @@ func NewFakeDeviceLib(
 type Option func(*DeviceLib)
 
 // WithMemoryOverrideMB supplies the memory size (MiB) to use for devices
-// NVML cannot report one for. 0 leaves them at 0.
-func WithMemoryOverrideMB(mb uint64) Option {
+// NVML cannot report one for. Anything at or below 0 leaves them at 0: the
+// node config validates the value, but the monitor takes the same flag
+// without validating it, and a negative one must not wrap around here.
+func WithMemoryOverrideMB(mb int) Option {
 	return func(l *DeviceLib) {
-		l.memoryOverrideMB = mb
+		if mb <= 0 {
+			l.memoryOverrideMB = 0
+			return
+		}
+		l.memoryOverrideMB = uint64(mb)
 	}
 }
 

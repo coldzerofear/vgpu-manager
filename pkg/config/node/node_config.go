@@ -371,6 +371,9 @@ func loadConfigSpec(nodeConfig *NodeConfigSpec) error {
 		if config.DeviceMemoryScaling != nil {
 			nodeConfig.DeviceMemoryScaling = config.DeviceMemoryScaling
 		}
+		if config.DeviceMemoryOverride != nil {
+			nodeConfig.DeviceMemoryOverride = config.DeviceMemoryOverride
+		}
 		if config.ExcludeDevices != nil {
 			nodeConfig.ExcludeDevices = config.ExcludeDevices
 		}
