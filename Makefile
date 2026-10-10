@@ -83,6 +83,33 @@ generate: ## API code generation.
 	protoc --go_out=. --go-grpc_out=. pkg/api/registry/api.proto
 	protoc --go_out=. --go-grpc_out=. pkg/api/remoteagent/api.proto
 
+# Tool versions used by the verify targets. Kept equal to the versions
+# .github/workflows/ci.yaml pins, so `make verify` fails where CI fails.
+GOLANGCI_LINT_VERSION ?= v2.6.2
+ACTIONLINT_VERSION    ?= v1.7.12
+
+.PHONY: lint
+lint: ## Run golangci-lint (installs it into GOBIN if missing).
+	@command -v golangci-lint >/dev/null 2>&1 || \
+	    go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	golangci-lint run --timeout 15m ./...
+
+.PHONY: lint-actions
+lint-actions: ## Lint the GitHub Actions workflows.
+	@command -v actionlint >/dev/null 2>&1 || \
+	    go install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+	actionlint
+
+.PHONY: verify
+verify: ## Run every non-GPU check CI runs (Go and C).
+	hack/verify-license.sh
+	$(MAKE) lint
+	$(MAKE) lint-actions
+	$(MAKE) test
+	$(MAKE) -C library check
+	$(MAKE) -C library test-nogpu WITH_CUDA_TOOLS=OFF
+	$(MAKE) -C library test-sanitize WITH_CUDA_TOOLS=OFF
+
 ##@ Build
 
 .PHONY: build

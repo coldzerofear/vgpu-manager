@@ -1,0 +1,63 @@
+# Publishes the Helm charts as a chart repository served from GitHub Pages.
+#
+# One-time setup, outside this file:
+#   1. create an empty `gh-pages` branch (git switch --orphan gh-pages;
+#      git commit --allow-empty -m init; git push -u origin gh-pages)
+#   2. Settings > Pages > Source: "Deploy from a branch", branch gh-pages, / (root)
+#
+# chart-releaser packages every chart under charts/, attaches each package to a
+# GitHub release named <chart>-<version>, and rewrites index.yaml on gh-pages.
+# It skips a chart whose version already has a release, so the version field in
+# Chart.yaml is what decides whether anything is published - bump it in the
+# same commit as a chart change.
+#
+# Consumers then use:
+#   helm repo add vgpu-manager https://coldzerofear.github.io/vgpu-manager
+name: Chart release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'charts/**'
+      - '.github/workflows/chart-release.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two runs rewriting index.yaml at once is how a chart repository loses a
+  # chart.
+  group: ${{ github.workflow }}
+
+jobs:
+  release:
+    name: Package and publish
+    runs-on: ubuntu-24.04
+    permissions:
+      # Writes the packages to releases and index.yaml to gh-pages.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # chart-releaser compares against the full tag history to decide what
+          # is already published.
+          fetch-depth: 0
+      - name: Configure git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+        with:
+          version: v3.19.0
+      - name: Run chart-releaser
+        uses: helm/chart-releaser-action@cae68fefc6b5f367a0275617c9f83181ba54714f # v1.7.0
+        with:
+          charts_dir: charts
+          # Not a secret to configure: the built-in token, with contents: write
+          # above, is what pushes the release and the gh-pages commit.
+          skip_existing: true
+        env:
+          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}

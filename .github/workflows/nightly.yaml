@@ -1,0 +1,50 @@
+# The checks that need a real CUDA toolkit, which pull a multi-gigabyte image
+# and so are not worth a pull request's wait.
+#
+# Chiefly check_struct_layout.py: it compares the CUDA struct copies in
+# library/include/cuda-subset.h against the real <cuda.h>, which is how silent
+# ABI drift gets caught when NVIDIA extends a struct in a new CUDA release.
+# Without a toolkit that check SKIPs, so in CI it is reported as passing while
+# testing nothing - here it actually runs.
+name: Nightly CUDA checks
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cuda-checks:
+    name: Library checks against a CUDA toolkit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      # Same image the base build uses, so the headers match what we ship
+      # against. Kept in step with CUDA_BASE_IMAGE in versions.mk by hand -
+      # dependabot cannot see an image referenced from a makefile.
+      image: nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
+    steps:
+      - name: Install build dependencies
+        # The CUDA images carry a compiler but not cmake, python3 or git.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            make cmake python3 git ca-certificates binutils
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+      - name: Static checks, struct layout included
+        run: make -C library check
+      - name: Full build, CUDA-linked tools included
+        run: make -C library build-tests
+      - name: GPU-less tests
+        # They need no GPU, but running them here too proves the CUDA build of
+        # the same sources behaves.
+        run: make -C library test-nogpu
+      - name: Exported symbol surface
+        run: make -C library check-exports

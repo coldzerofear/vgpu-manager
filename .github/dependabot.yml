@@ -1,0 +1,36 @@
+# Dependency updates.
+#
+# Not covered here: the CUDA base image and the Go toolchain version. Both are
+# referenced from versions.mk / go.mod rather than a Dockerfile FROM line, and
+# dependabot only reads the ecosystems' own manifests - those two have to be
+# bumped by hand.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One pull request for the Kubernetes libraries: they are released
+      # together and only ever upgrade cleanly together.
+      kubernetes:
+        patterns:
+          - 'k8s.io/*'
+          - 'sigs.k8s.io/*'
+      otel:
+        patterns:
+          - 'go.opentelemetry.io/*'
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # The CodeQL actions share a version and must move as a set.
+      codeql:
+        patterns:
+          - 'github/codeql-action/*'
+      actions:
+        patterns:
+          - '*'

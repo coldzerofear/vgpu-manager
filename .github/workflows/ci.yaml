@@ -1,0 +1,219 @@
+# Pull-request and branch CI: everything that can be checked without a GPU.
+#
+# Action versions are pinned to commit SHAs rather than tags, because a tag can
+# be moved to point at different code; dependabot keeps them current.
+name: CI
+
+on:
+  pull_request:
+  push:
+    # Dependabot opens a pull request for every branch it pushes, and the PR
+    # event already runs this workflow.
+    branches-ignore:
+      - 'dependabot/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Go lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: License headers
+        run: hack/verify-license.sh
+      - name: go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.6.2
+          # The findings that predate CI are debt, not a wall: a pull request is
+          # blocked by what it introduces. See the comment in .golangci.yaml.
+          only-new-issues: true
+
+  test:
+    name: Go test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Unit tests with coverage
+        run: make test
+      - name: Unit tests under the race detector
+        # Separate run: the coverage profile above is what Codecov consumes, and
+        # -race changes the binary enough that one run cannot serve both well.
+        run: |
+          CGO_ENABLED=1 go test -race -count=1 ./...
+      - name: Upload coverage
+        if: ${{ github.repository == 'coldzerofear/vgpu-manager' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7
+        with:
+          files: ./cover.out
+          flags: unittests
+          fail_ci_if_error: false
+
+  build:
+    name: Go build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Build every binary
+        run: make build
+
+  library:
+    name: C library checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Static checks
+        # check_struct_layout.py compares our CUDA struct copies against the
+        # real <cuda.h> and SKIPs without a toolkit, so that one check only
+        # means something in the cuda-checks job (scheduled, not per-PR).
+        run: make -C library check
+      - name: GPU-less tests
+        run: make -C library test-nogpu WITH_CUDA_TOOLS=OFF
+      - name: Exported symbol surface
+        run: make -C library check-exports WITH_CUDA_TOOLS=OFF
+      - name: GPU-less tests under ASan + UBSan
+        # This library's correctness lives in mmap'd shared regions, locks and
+        # atomics, where a wrong offset is a silent memory error rather than a
+        # failed assertion.
+        run: make -C library test-sanitize WITH_CUDA_TOOLS=OFF
+
+  workflows:
+    name: Workflow lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: actionlint
+        # Validates these workflows themselves: expression syntax, runner
+        # labels, action inputs, and shellcheck over every run block.
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          actionlint
+
+  cppcheck:
+    name: C static analysis
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cppcheck
+      - name: cppcheck
+        # The tree is clean at zero findings, so this gates. False positives
+        # from the *_INTERNAL_CHECK macros are suppressed inline, next to the
+        # reason. System headers are not ours to analyse, and <cuda.h> is
+        # absent here on purpose (see WITH_CUDA_TOOLS).
+        run: |
+          cppcheck --enable=warning,performance,portability \
+            --std=c11 --inline-suppr --error-exitcode=1 \
+            --suppress=missingInclude --suppress=missingIncludeSystem \
+            -I library/include -I library \
+            library/src library/tools
+
+  chart:
+    name: Helm charts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+        with:
+          version: v3.19.0
+      - name: Lint and render both charts
+        # Rendering with the defaults and with the switches the charts exist
+        # for: a template that only parses under one value set is the usual way
+        # a chart breaks.
+        run: |
+          set -euo pipefail
+          for chart in charts/*; do
+            echo "::group::helm lint ${chart}"
+            helm lint "${chart}"
+            echo "::endgroup::"
+            echo "::group::helm template ${chart} (defaults)"
+            helm template ci-render "${chart}" >/dev/null
+            echo "::endgroup::"
+          done
+          echo "::group::helm template vgpu-manager (unified memory + cdi)"
+          helm template ci-render charts/vgpu-manager \
+            --set devicePlugin.deviceMemoryOverride=65536 \
+            --set devicePlugin.devicePlugin.commands.deviceListStrategy=cdi-cri >/dev/null
+          echo "::endgroup::"
+          echo "::group::helm template vgpu-manager-dra-driver (unified memory)"
+          helm template ci-render charts/vgpu-manager-dra-driver \
+            --set kubeletPlugin.deviceMemoryOverride=65536 >/dev/null
+          echo "::endgroup::"
+
+  image:
+    name: Image build (amd64, no push)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free disk space
+        # The CUDA devel base image alone is several gigabytes, and the runner
+        # starts with ~14 GB free. Without this the build dies late, in a layer
+        # that says nothing about the cause.
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/share/boost "${AGENT_TOOLSDIRECTORY}"
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve the toolkit image
+        # versions.mk derives this from go.mod through a script that reports
+        # failure on stdout, so a broken resolution would otherwise surface as
+        # an unexplained COPY --from error much later.
+        run: |
+          image="$(make print-TOOLKIT_CONTAINER_IMAGE)"
+          echo "toolkit image: ${image}"
+          case "${image}" in
+            *nvcr.io/* | *ghcr.io/*) ;;
+            *) echo "could not resolve the toolkit container image" >&2; exit 1 ;;
+          esac
+      - name: Build base, classic and DRA images
+        # Mirrors: the Makefile defaults are Chinese mirrors, which are slow
+        # from GitHub's runners. Nothing is pushed here - a pull request proves
+        # the images build, and the release workflow publishes them.
+        run: |
+          make docker-build-all \
+            GOPROXY=https://proxy.golang.org,direct \
+            APT_MIRROR= \
+            TAG=ci-${{ github.run_id }}
+      - name: Image sizes
+        run: docker images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}' | grep vgpu-manager
