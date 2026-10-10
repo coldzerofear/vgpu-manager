@@ -201,9 +201,10 @@ func smWatcherBatchWithContext(
 func smWatcherSingleDevice(
 	utilAdapter watcher.DeviceUtilInterface, mmapUtil *watcher.MmapDeviceUtil, info *GPUDevice, d device.Device,
 ) error {
-	if !info.Healthy || info.MigEnabled {
+	if !info.Healthy {
 		return nil
 	}
+	// Skip utilization monitoring based on the actual MIG activation status of the current device.
 	if migEnabled, _ := d.IsMigEnabled(); migEnabled {
 		return nil
 	}
