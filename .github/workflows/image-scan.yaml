@@ -17,7 +17,7 @@ on:
       tag:
         description: 'Image tag to scan'
         required: false
-        default: main
+        default: latest
         type: string
 
 permissions:
@@ -54,7 +54,7 @@ jobs:
       - name: Scan ${{ matrix.image }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ inputs.tag || 'main' }}
+          image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ inputs.tag || 'latest' }}
           format: sarif
           output: trivy-${{ matrix.image }}.sarif
           severity: 'CRITICAL,HIGH'
@@ -71,14 +71,14 @@ jobs:
         # opening the Security tab.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ inputs.tag || 'main' }}
+          image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ inputs.tag || 'latest' }}
           format: table
           severity: 'CRITICAL,HIGH'
           output: trivy-${{ matrix.image }}.txt
       - name: Write the summary
         run: |
           {
-            echo "### ${{ matrix.image }}:${{ inputs.tag || 'main' }}"
+            echo "### ${{ matrix.image }}:${{ inputs.tag || 'latest' }}"
             echo
             echo '```'
             cat "trivy-${{ matrix.image }}.txt"

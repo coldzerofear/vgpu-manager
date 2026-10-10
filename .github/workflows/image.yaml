@@ -14,6 +14,14 @@
 # pushed, because a manifest can only be assembled from images a registry
 # already holds; they are kept rather than deleted so a bad merge can be
 # unpicked.
+#
+# Tags:
+#   push to main   latest, latest-{amd64,arm64}
+#   push of a v*   v1.2.3, v1.2.3-{amd64,arm64}. Deliberately not latest -
+#                  see the comment in the meta job.
+#
+# Every tag here moves. To pin a particular build, use the manifest digest,
+# which the signing step records in the run summary.
 name: Image
 
 on:
@@ -41,35 +49,33 @@ env:
 
 jobs:
   meta:
-    name: Resolve tags
+    name: Resolve the tag
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.tags.outputs.version }}
-      extra: ${{ steps.tags.outputs.extra }}
+    # No checkout: the tag comes from the ref and the dispatch input, so this
+    # job needs nothing from the tree.
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Compute the tags
+      - name: Compute the tag
         id: tags
-        # version: the primary tag, and what the per-architecture tags are
-        #          derived from.
-        # extra:   additional tags the final manifest also gets.
+        # One tag drives everything: the two per-architecture images are
+        # <version>-amd64 and <version>-arm64, and the manifest that joins
+        # them is <version>.
         run: |
           set -euo pipefail
           if [[ -n "${{ inputs.tag }}" ]]; then
             version="${{ inputs.tag }}"
-            extra=""
           elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # Semantic version only. latest belongs to main, so a release does
+            # not take it: otherwise the next push to main would move latest
+            # back off the release, and the tag would mean whichever of the two
+            # happened to run last.
             version="${GITHUB_REF#refs/tags/}"
-            extra="latest"
           else
-            version="main"
-            extra="sha-$(git rev-parse --short HEAD)"
+            version="latest"
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "extra=${extra}" >> "$GITHUB_OUTPUT"
-          echo "primary tag: ${version}, extra: ${extra:-none}"
+          echo "tag: ${version}"
 
   build:
     name: Build ${{ matrix.arch }}
@@ -166,15 +172,10 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ needs.meta.outputs.version }}"
-          extra="${{ needs.meta.outputs.extra }}"
           for repo in vgpu-manager vgpu-manager-dra-driver; do
             image="${{ env.REGISTRY }}/${repo}"
-            tags=("-t" "${image}:${version}")
-            if [[ -n "${extra}" ]]; then
-              tags+=("-t" "${image}:${extra}")
-            fi
             echo "::group::${image}:${version}"
-            docker buildx imagetools create "${tags[@]}" \
+            docker buildx imagetools create -t "${image}:${version}" \
               "${image}:${version}-amd64" \
               "${image}:${version}-arm64"
             docker buildx imagetools inspect "${image}:${version}"
