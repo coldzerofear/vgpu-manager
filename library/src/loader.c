@@ -2207,6 +2207,8 @@ int get_host_device_index_by_nvml_device(nvmlDevice_t device) {
   if (unlikely(ret)) {
     return -1;
   }
+  /* cppcheck-suppress uninitvar ; nvml_index is the out-param of the
+   * nvmlDeviceGetIndex call above, which NVML_INTERNAL_CHECK hides. */
   if (unlikely(!is_valid_device_index(nvml_index, "nvml"))) {
     return -1;
   }
@@ -2848,6 +2850,9 @@ void init_nvml_to_host_device_index() {
   }
 
   nvmlDevice_t device;
+  /* cppcheck-suppress legacyUninitvar ; device_count is written by whichever
+   * nvmlDeviceGetCount variant was found, and the else branch sets rt, on
+   * which LOGGER(FATAL) exits the process before this loop. */
   for (int device_index = 0; device_index < device_count; device_index++) {
     rt = _nvmlDeviceGetHandleByIndex(device_index, &device);
     if (unlikely(rt)) {

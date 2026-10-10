@@ -113,7 +113,7 @@ extern "C" {
 
 #define HOST_PROC_PATH (VGPU_MANAGER_PATH "/.host_proc")
 
-#define HOST_PROC_CGROUP_PID_PATH (VGPU_MANAGER_PATH "/.host_proc/%d/cgroup")
+#define HOST_PROC_CGROUP_PID_PATH (VGPU_MANAGER_PATH "/.host_proc/%u/cgroup")
 
 #define TMP_DIR "/tmp"
 

@@ -2143,7 +2143,7 @@ int split_str(char *line, char *key, char *value, char d) {
 
   if (index == strlen(line)){
     key[0] = '\0';
-    value = '\0';
+    value[0] = '\0';
     return 1;
   }
 
@@ -4178,6 +4178,9 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
       CUdevice device;
       ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
       if (likely(ret == CUDA_SUCCESS)) {
+        /* cppcheck-suppress uninitvar ; device is the out-param of the
+         * cuCtxGetDevice call above, which CUDA_INTERNAL_CHECK hides from
+         * cppcheck, and it is only read when that call returned SUCCESS. */
         int host_index = get_host_device_index_by_cuda_device(device);
         rate_limiter(p->gridDimX * p->gridDimY * p->gridDimZ,
                      p->blockDimX * p->blockDimY * p->blockDimZ, host_index);

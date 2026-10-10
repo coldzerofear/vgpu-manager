@@ -77,7 +77,7 @@ int main(int argc, char **argv) {
       printf("nvmlDeviceGetComputeRunningProcesses failed\n");
       return -1;
     }
-    printf("---------------ComputeProcesses size %d---------------\n", size_on_device);
+    printf("---------------ComputeProcesses size %u---------------\n", size_on_device);
     int i;
     for (i = 0; i < size_on_device; i++) {
       printf("ComputeProcesses pid[%d] use memory: %lldMB\n", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory>>20);
@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
       printf("nvmlDeviceGetGraphicsRunningProcesses failed\n");
       return -1;
     }
-    printf("---------------GraphicProcesses size %d---------------\n", size_on_device);
+    printf("---------------GraphicProcesses size %u---------------\n", size_on_device);
     for (i = 0; i < size_on_device; i++) {
       printf("GraphicProcesses pid[%d] use memory: %lldMB\n", pids_on_device1[i].pid, pids_on_device1[i].usedGpuMemory>>20);
     }
@@ -104,7 +104,7 @@ int main(int argc, char **argv) {
        printf("nvmlDeviceGetProcessUtilization failed\n");
        return -1;
     }
-    printf("--------------ProcessUtilization size %d--------------\n", processes_num);
+    printf("--------------ProcessUtilization size %u--------------\n", processes_num);
     for (i = 0; i < processes_num; i++) {
       printf("ProcessUtilization pid[%d] sm_util: %d, mem_util: %d\n", processes_sample[i].pid, processes_sample[i].smUtil, processes_sample[i].memUtil);
     }

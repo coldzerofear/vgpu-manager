@@ -227,7 +227,7 @@ int get_compatibility_mode(int *mode) {
 
 int get_mem_ratio(uint32_t index, double *ratio) {
   char env[32] = {0};
-  snprintf(env, sizeof(env), "%s_%d", CUDA_MEMORY_RATIO_ENV, index);
+  snprintf(env, sizeof(env), "%s_%u", CUDA_MEMORY_RATIO_ENV, index);
   char *str = _getenv(env);
   if (!str) {
     str = _getenv(CUDA_MEMORY_RATIO_ENV);
@@ -244,7 +244,7 @@ int get_mem_ratio(uint32_t index, double *ratio) {
 
 int get_mem_limit(uint32_t index, size_t *limit) {
   char env[32] = {0};
-  snprintf(env, sizeof(env), "%s_%d", CUDA_MEMORY_LIMIT_ENV, index);
+  snprintf(env, sizeof(env), "%s_%u", CUDA_MEMORY_LIMIT_ENV, index);
   char *str = _getenv(env);
   if (!str) {
     str = _getenv(CUDA_MEMORY_LIMIT_ENV);
@@ -261,7 +261,7 @@ int get_mem_limit(uint32_t index, size_t *limit) {
 
 int get_core_limit(uint32_t index, int *limit) {
   char env[32] = {0};
-  snprintf(env, sizeof(env), "%s_%d", CUDA_CORE_LIMIT_ENV, index);
+  snprintf(env, sizeof(env), "%s_%u", CUDA_CORE_LIMIT_ENV, index);
   char *str = _getenv(env);
   if (!str) {
     str = _getenv(CUDA_CORE_LIMIT_ENV);
@@ -278,7 +278,7 @@ int get_core_limit(uint32_t index, int *limit) {
 
 int get_core_soft_limit(uint32_t index, int *limit) {
   char env[32] = {0};
-  snprintf(env, sizeof(env), "%s_%d", CUDA_CORE_SOFT_LIMIT_ENV, index);
+  snprintf(env, sizeof(env), "%s_%u", CUDA_CORE_SOFT_LIMIT_ENV, index);
   char *str = _getenv(env);
   if (!str) {
     str = _getenv(CUDA_CORE_SOFT_LIMIT_ENV);
@@ -295,7 +295,7 @@ int get_core_soft_limit(uint32_t index, int *limit) {
 
 int get_manager_device_uuid(uint32_t index, char *uuid, size_t uuid_size) {
   char env[32] = {0};
-  snprintf(env, sizeof(env), "%s_%d", MANAGER_VISIBLE_DEVICE_ENV, index);
+  snprintf(env, sizeof(env), "%s_%u", MANAGER_VISIBLE_DEVICE_ENV, index);
   char *str = _getenv(env);
   if (!str || str[0] == '\0') {
     return -1;
@@ -382,7 +382,7 @@ int get_vmem_node_enabled(int *i) {
 
 int get_mem_oversold(uint32_t index, int *i) {
   char env[32] = {0};
-  snprintf(env, sizeof(env), "%s_%d", CUDA_MEM_OVERSOLD_ENV, index);
+  snprintf(env, sizeof(env), "%s_%u", CUDA_MEM_OVERSOLD_ENV, index);
   char *str = _getenv(env);
   if (!str) {
     str = _getenv(CUDA_MEM_OVERSOLD_ENV);
@@ -738,7 +738,7 @@ char *GetNthMapsToken(char *line, int n) {
 int library_exists_in_process_maps(char const *libName, unsigned int pid) {
   int ret = -1;
   char fileName[512];
-  snprintf(fileName, sizeof(fileName), "/proc/%d/maps", pid);
+  snprintf(fileName, sizeof(fileName), "/proc/%u/maps", pid);
 
   FILE *fMaps = fopen(fileName, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
   if (NULL == fMaps) {
@@ -771,7 +771,7 @@ int device_pid_in_same_container(unsigned int pid) {
   for (int i = 0; ns_types[i] != NULL; i++) {
     char device_path[128];
     struct stat device_st;
-    snprintf(device_path, sizeof(device_path), "/proc/%d/ns/%s", pid, ns_types[i]);
+    snprintf(device_path, sizeof(device_path), "/proc/%u/ns/%s", pid, ns_types[i]);
     if (stat(device_path, &device_st) != 0) {
       return -1;
     }
@@ -811,7 +811,9 @@ int is_zombie_proc(int pid) {
   int unused_pid;
   char comm[1024];
   char state;
-  int ret = fscanf(fp, "%d %s %c", &unused_pid, comm, &state);
+  /* Field width bounds comm to the buffer: /proc/<pid>/stat is kernel-written,
+   * but an unbounded %s is one driver change away from a stack overflow. */
+  int ret = fscanf(fp, "%d %1023s %c", &unused_pid, comm, &state);
   fclose(fp);
 
   if (ret != 3 || ret == EOF) {
