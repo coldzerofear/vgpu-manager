@@ -264,6 +264,14 @@ func (nc NodeConfigSpec) checkNodeConfig() (errs []error) {
 	if nc.GetDeviceMemoryOverride() < 0 {
 		errs = append(errs, fmt.Errorf("deviceMemoryOverride must be any number greater than or equal to 0"))
 	}
+	if nc.GetDeviceMemoryOverride() > 0 && nc.GetDeviceMemoryScaling() > 1 {
+		// The override is only ever used for a GPU that shares one physical pool
+		// with the CPU, where the override is a bookkeeping ceiling and not a
+		// physical one: overselling it hands out memory the host also needs and
+		// takes the node down instead of failing an allocation.
+		errs = append(errs, fmt.Errorf("deviceMemoryScaling must be 1 when deviceMemoryOverride is set: "+
+			"a unified-memory device shares its memory with the host and cannot be oversold"))
+	}
 	if nc.GetDeviceMemoryFactor() <= 0 {
 		errs = append(errs, fmt.Errorf("deviceMemoryFactor must be a positive integer greater than 0"))
 	}

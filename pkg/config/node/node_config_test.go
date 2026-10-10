@@ -418,3 +418,40 @@ func Test_DeviceMemoryOverride(t *testing.T) {
 		assert.Contains(t, errs[0].Error(), "deviceMemoryOverride")
 	}
 }
+
+// The override is only used for a GPU that shares its memory with the host, so
+// there is nothing to oversell: the configuration is refused outright rather
+// than handing out memory the host also needs.
+func Test_DeviceMemoryOverrideRefusesOversold(t *testing.T) {
+	tests := map[string]struct {
+		override int
+		scaling  float64
+		wantErr  bool
+	}{
+		"override without oversold":    {override: 65536, scaling: 1},
+		"oversold without an override": {override: 0, scaling: 2},
+		"override with oversold":       {override: 65536, scaling: 2, wantErr: true},
+		"override with a hair over 1":  {override: 65536, scaling: 1.01, wantErr: true},
+		// Undersold is a real configuration (hand out less than the card has),
+		// and it does not overcommit anything.
+		"override with undersold": {override: 65536, scaling: 0.5},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			spec := baseValidNodeConfig()
+			WithDeviceMemoryOverrideOption(tc.override)(&spec)
+			WithDeviceMemoryScalingOption(tc.scaling)(&spec)
+
+			errs := spec.checkNodeConfig()
+
+			if !tc.wantErr {
+				assert.Empty(t, errs)
+				return
+			}
+			if assert.Len(t, errs, 1) {
+				assert.Contains(t, errs[0].Error(), "deviceMemoryScaling must be 1")
+			}
+		})
+	}
+}

@@ -394,6 +394,14 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 		if flags.DeviceMemoryRatio <= 0 {
 			return fmt.Errorf("invalid --device-memory-ratio %d: must be greater than or equal to 0", flags.DeviceCoresRatio)
 		}
+		if flags.DeviceMemoryOverride > 0 && flags.DeviceMemoryRatio > util.HundredCore {
+			// The override is only ever used for a GPU that shares one physical pool
+			// with the CPU, where it is a bookkeeping ceiling and not a physical one:
+			// overselling it hands out memory the host also needs and takes the node
+			// down instead of failing an allocation.
+			return fmt.Errorf("--device-memory-ratio must be %d when --device-memory-override is set: "+
+				"a unified-memory device shares its memory with the host and cannot be oversold", util.HundredCore)
+		}
 	}
 
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
