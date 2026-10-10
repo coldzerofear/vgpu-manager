@@ -57,6 +57,9 @@ func applyConsumableShares(dev *resourceapi.Device, config *Config) {
 	// be exact multiples of Step. We use 1Mi for fine-grained allocation granularity
 	// and round down max memory to the nearest multiple of Step to ensure ResourceSlice
 	// objects pass API server validation if raw device memory is not step-aligned.
+	// staticcheck reads the three new(expr) calls below as not using these:
+	// new(expr) is Go 1.26 and its analyser does not model it yet.
+	//nolint:staticcheck // SA4006 false positive on Go 1.26 new(expr)
 	zero := resource.MustParse("0")
 	step := resource.MustParse("1Mi")
 	stepBytes := step.Value()
@@ -101,6 +104,7 @@ func applyConsumableShares(dev *resourceapi.Device, config *Config) {
 			dev.Capacity["memory"] = memCap
 
 			sharesVal := *resource.NewQuantity(int64(val), resource.DecimalSI)
+			//nolint:staticcheck // SA4006 false positive on Go 1.26 new(expr)
 			oneVal := *resource.NewQuantity(1, resource.DecimalSI)
 			dev.Capacity["shares"] = resourceapi.DeviceCapacity{
 				Value: sharesVal,

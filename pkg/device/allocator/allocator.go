@@ -189,7 +189,10 @@ func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.F
 			// Attempt 1: reuse the pod's already-used GPUs (densest). Skipped
 			// when there are none (e.g. an init-only pod).
 			if len(preferred) > 0 {
-				claim, rsn, err = alloc.allocateOne(req, need, preferred)
+				// The reason is deliberately dropped: allocateOne returns a claim
+				// or a reason, never both, so a rejection here always falls through
+				// to attempt 2, whose reason is the one worth reporting.
+				claim, _, err = alloc.allocateOne(req, need, preferred)
 				if err != nil {
 					klog.V(3).ErrorS(err, "init container reuse allocation internal error",
 						"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)

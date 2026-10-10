@@ -53,9 +53,9 @@ formatters:
   enable:
     - gofmt
     - goimports
-  settings:
-    goimports:
-      local-prefixes:
-        - github.com/coldzerofear/vgpu-manager
+  # No local-prefixes: that convention (project imports in their own last
+  # group) would rewrite the imports of 180 files, which is a style change
+  # this repository never made. Without it goimports still enforces the
+  # standard grouping and sorting.
   exclusions:
     generated: lax

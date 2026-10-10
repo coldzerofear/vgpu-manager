@@ -61,11 +61,14 @@ jobs:
             echo "gh-pages already exists"
             exit 0
           fi
+          # Built and pushed as a bare object: switching branches in the
+          # checkout would leave the worktree somewhere chart-releaser does not
+          # expect, and `git switch -` has no previous branch to return to in a
+          # fresh clone ("fatal: invalid reference: @{-1}").
           echo "creating an empty gh-pages branch"
-          git switch --orphan gh-pages
-          git commit --allow-empty -m "Initialise the chart repository"
-          git push origin gh-pages
-          git switch -
+          empty_tree="$(git hash-object -t tree /dev/null)"
+          commit="$(git commit-tree "${empty_tree}" -m "Initialise the chart repository")"
+          git push origin "${commit}:refs/heads/gh-pages"
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with:
           version: v3.19.0

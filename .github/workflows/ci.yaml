@@ -23,12 +23,19 @@ jobs:
   lint:
     name: Go lint
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # only-new-issues asks the API for the diff to measure against - the pull
+      # request's own diff on a pull_request event, the before..after compare on
+      # a push. Without this the request for a pull request's diff is refused
+      # and the gate cannot tell a new finding from the existing debt.
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # only-new-issues diffs against the base commit, which a shallow
-          # clone does not contain: golangci-lint then exits 3 (a usage
-          # error) rather than reporting anything.
+          # Not needed for the two events above, which use the API diff, but a
+          # merge_group event makes only-new-issues fall back to --new-from-rev
+          # and read real git history.
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7

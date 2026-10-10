@@ -151,13 +151,14 @@ func (h *validateHandle) buildPodRequestIndex(ctx context.Context, requests []re
 				}
 			}
 
+			// The initial value carries the "none of them are vGPU" case, so the
+			// switch only names the two that change it. len(FirstAvailable) is at
+			// least 1 here, so a zero count can never equal it.
 			class := common.MainRequestNonVGPU
 			switch {
-			case vgpuCount == 0:
-				class = common.MainRequestNonVGPU
 			case vgpuCount == len(req.FirstAvailable):
 				class = common.MainRequestDefVGPU
-			default:
+			case vgpuCount > 0:
 				class = common.MainRequestMixedMaybe
 			}
 

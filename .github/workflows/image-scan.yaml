@@ -32,6 +32,10 @@ jobs:
       # Uploading SARIF to the Security tab.
       security-events: write
       actions: read
+      # Pulling the images being scanned. They are published by this
+      # repository, so the built-in token can read them whether or not the
+      # packages have been made public.
+      packages: read
     strategy:
       fail-fast: false
       matrix:
@@ -39,6 +43,14 @@ jobs:
           - vgpu-manager
           - vgpu-manager-dra-driver
     steps:
+      - name: Log in to ghcr.io
+        # Trivy pulls through the docker credential store; without this the
+        # pull is anonymous and fails on a package that is not public.
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Scan ${{ matrix.image }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
