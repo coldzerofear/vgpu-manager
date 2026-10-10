@@ -12,7 +12,7 @@ require (
 	github.com/containerd/nri v0.12.3
 	github.com/docker/go-units v0.5.0
 	github.com/evanphx/json-patch v0.5.2
-	github.com/fsnotify/fsnotify v1.10.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-logr/logr v1.4.4
 	github.com/google/uuid v1.6.0
 	github.com/grepplabs/cert-source v0.1.0
