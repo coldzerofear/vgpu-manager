@@ -1,5 +1,13 @@
 # CodeQL for both languages in this repository.
 #
+# Requires CodeQL default setup to be OFF for this repository:
+# Settings > Code security > Code scanning > CodeQL analysis > Advanced
+# (or the "..." menu > Switch to advanced). GitHub refuses uploads from a
+# workflow while default setup is enabled -
+# "CodeQL analyses from advanced configurations cannot be processed when the
+# default setup is enabled" - and default setup covers neither the C library
+# nor a build this project controls, which is the reason for this file.
+#
 # Not part of CI: a CodeQL run takes much longer than the checks a pull request
 # waits on, and its findings are advisory. It runs on merges to main, weekly,
 # and on demand, and reports into the repository's Security tab.

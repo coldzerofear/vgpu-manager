@@ -1,9 +1,8 @@
 # Publishes the Helm charts as a chart repository served from GitHub Pages.
 #
-# One-time setup, outside this file:
-#   1. create an empty `gh-pages` branch (git switch --orphan gh-pages;
-#      git commit --allow-empty -m init; git push -u origin gh-pages)
-#   2. Settings > Pages > Source: "Deploy from a branch", branch gh-pages, / (root)
+# One-time setup, outside this file: Settings > Pages > Source "Deploy from a
+# branch", branch gh-pages, / (root). The branch itself is created by the first
+# run of this workflow.
 #
 # chart-releaser packages every chart under charts/, attaches each package to a
 # GitHub release named <chart>-<version>, and rewrites index.yaml on gh-pages.
@@ -49,6 +48,24 @@ jobs:
         run: |
           git config user.name "$GITHUB_ACTOR"
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+      - name: Ensure the gh-pages branch exists
+        # chart-releaser pushes index.yaml to this branch and fails outright if
+        # it is missing, which is how this workflow failed on its first run.
+        # Creating it here keeps the setup to one manual step (enabling Pages)
+        # instead of two.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            echo "gh-pages already exists"
+            exit 0
+          fi
+          echo "creating an empty gh-pages branch"
+          git switch --orphan gh-pages
+          git commit --allow-empty -m "Initialise the chart repository"
+          git push origin gh-pages
+          git switch -
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
         with:
           version: v3.19.0

@@ -134,19 +134,35 @@ docker-build-base: ## Build base docker image.
       --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
       --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
       --build-arg BUILD_NVVERSION="${NVVERSION}" --build-arg GOLANG_VERSION="${GOLANG_VERSION}" \
-      --build-arg APT_MIRROR="${APT_MIRROR}" --build-arg GOPROXY="${GOPROXY}" -t "${BASE_IMG}" -f Dockerfile.base .
+      --build-arg APT_MIRROR="${APT_MIRROR}" --build-arg GOPROXY="${GOPROXY}" \
+      --build-arg TARGETOS="${TARGETOS}" --build-arg TARGETARCH="${TARGETARCH}" -t "${BASE_IMG}" -f Dockerfile.base .
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
+# The toolkit image is derived from go.mod by a script that reports failure on
+# stdout, because versions.mk evaluates it for every target and most targets
+# do not need it. The two image builds do: without this guard the unresolved
+# marker reaches docker as a stage name and the error talks about lowercase
+# repository names instead of the missing version.
+.PHONY: check-toolkit-image
+check-toolkit-image:
+	@case "$(TOOLKIT_CONTAINER_IMAGE)" in \
+	  "" | *VERSION_NOT_SET* | *PARSE_FAILED*) \
+	    echo "error: could not resolve the NVIDIA container toolkit image" >&2; \
+	    echo "  scripts/toolkit-container-image.sh returned: $(TOOLKIT_CONTAINER_IMAGE)" >&2; \
+	    exit 1 ;; \
+	esac
+	@echo "toolkit image: $(TOOLKIT_CONTAINER_IMAGE)"
+
 .PHONY: docker-build
-docker-build: ## Build docker image.
+docker-build: check-toolkit-image ## Build docker image.
 	$(CONTAINER_TOOL) build --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" \
 	  --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
 	  --build-arg TOOLKIT_CONTAINER_IMAGE="${TOOLKIT_CONTAINER_IMAGE}" -t "${IMG}" -f Dockerfile .
 
 .PHONY: docker-build-dra
-docker-build-dra: ## Build dra driver docker image.
+docker-build-dra: check-toolkit-image ## Build dra driver docker image.
 	$(CONTAINER_TOOL) build --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" \
 	  --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
 	  --build-arg TOOLKIT_CONTAINER_IMAGE="${TOOLKIT_CONTAINER_IMAGE}" -t "${DRA_IMG}" -f Dockerfile.dra .

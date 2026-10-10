@@ -26,6 +26,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          # only-new-issues diffs against the base commit, which a shallow
+          # clone does not contain: golangci-lint then exits 3 (a usage
+          # error) rather than reporting anything.
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -40,6 +44,12 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           version: v2.6.2
+          # Built from source with the toolchain setup-go just installed: the
+          # published binaries are compiled with an older Go than this module
+          # targets, and golangci-lint refuses to load a config in that case
+          # ("the Go language version used to build golangci-lint is lower
+          # than the targeted Go version").
+          install-mode: goinstall
           # The findings that predate CI are debt, not a wall: a pull request is
           # blocked by what it introduces. See the comment in .golangci.yaml.
           only-new-issues: true

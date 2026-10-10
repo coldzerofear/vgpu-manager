@@ -109,16 +109,34 @@ jobs:
           # The built-in token is enough with packages: write above; no secret
           # has to be configured for this repository.
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push ${{ matrix.arch }}
-        # Plain docker build on a native runner: no buildx, no QEMU, no
-        # cross-compilation. The base image is built here, consumed by the two
-        # product builds from the local daemon, and discarded with the runner.
+      - name: Build the base image
+        # One step per stage, so a failure names the stage it happened in.
+        # The base image is an input to the two product images and is never
+        # pushed: it is discarded with the runner.
         run: |
-          make docker-build-all docker-push-all \
+          make docker-build-base \
             REGISTRY=${{ env.REGISTRY }} \
             TAG=${{ needs.meta.outputs.version }}-${{ matrix.arch }} \
             GOPROXY=https://proxy.golang.org,direct \
             APT_MIRROR=
+          df -h /
+      - name: Build the classic image
+        run: |
+          make docker-build \
+            REGISTRY=${{ env.REGISTRY }} \
+            TAG=${{ needs.meta.outputs.version }}-${{ matrix.arch }}
+          df -h /
+      - name: Build the DRA image
+        run: |
+          make docker-build-dra \
+            REGISTRY=${{ env.REGISTRY }} \
+            TAG=${{ needs.meta.outputs.version }}-${{ matrix.arch }}
+          df -h /
+      - name: Push both product images
+        run: |
+          make docker-push-all \
+            REGISTRY=${{ env.REGISTRY }} \
+            TAG=${{ needs.meta.outputs.version }}-${{ matrix.arch }}
       - name: Published images
         run: |
           docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep vgpu-manager

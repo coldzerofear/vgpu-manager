@@ -20,6 +20,14 @@ DRA_IMG = $(REGISTRY)/vgpu-manager-dra-driver:$(TAG)
 BASE_IMG = $(REGISTRY)/vgpu-manager-base:$(TAG)
 VERSION ?= $(shell cat VERSION)
 
+# The architecture the images are built for. Dockerfile.base downloads a Go
+# toolchain and sets GOARCH from these, and a plain `docker build` does not
+# reliably inject the automatic platform args into a stage that declares them
+# with a default -- so they are passed explicitly. Native builds on an arm64
+# machine (a runner, a workstation) would otherwise fetch an amd64 toolchain.
+TARGETOS   ?= $(GOOS)
+TARGETARCH ?= $(shell go env GOARCH 2>/dev/null || dpkg --print-architecture 2>/dev/null || echo amd64)
+
 CUDA_BASE_IMAGE ?= nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
 
 # Git info
