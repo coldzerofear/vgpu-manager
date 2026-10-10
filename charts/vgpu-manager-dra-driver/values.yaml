@@ -93,6 +93,12 @@ kubeletPlugin:
   nriRoot: "/var/run/nri"
   # Cgroup driver for the container environment. Empty lets the plugin auto-detect. (supported values: systemd | cgroupfs)
   cgroupDriver: "auto"
+  # Memory size (MiB) to use for GPUs that cannot report one: a unified-memory
+  # part such as GB10 / DGX Spark, where NVML has no device memory to query and
+  # nvidia-smi shows "Memory-Usage: Not Supported". Applies only to those
+  # devices, and deviceMemoryRatio must stay 100 when it is set (a pool shared
+  # with the host cannot be oversold). 0 disables it.
+  deviceMemoryOverride: 0
   # After enabling the ConsumableShares feature, configure consumable shares support. ("disabled", "memory", "unlimited", or a positive integer)
   consumableShares: ""
   # Conditionally mask /proc/driver/nvidia/params to prevent the plugin from recreating
@@ -215,23 +221,22 @@ kubeletPlugin:
 #          cpu: 1000m
 #          memory: 2Gi
 
-# DeviceClass objects published by the DRA driver. The driver advertises devices under the
-# `driverName` driver; each DeviceClass selects a device `type` via a CEL expression.
+# DeviceClass objects published by the DRA driver (driver name is fixed:
+# manager.nvidia.com); each DeviceClass selects a device `type` via a CEL expression.
 deviceClasses:
   # Should the DeviceClass objects be created? (default: true)
   enabled: true
-  # Driver name the DRA kubelet-plugin registers as (must match the kubelet-plugin binary).
-  driverName: manager.nvidia.com
-  # Whole-GPU device class. `extendedResourceName` is only rendered when the served
-  # resource.k8s.io version is v1 (the field does not exist in v1beta*).
-  gpu:
-    enabled: false
-    name: gpu-manager
-    extendedResourceName: nvidia.com/gpu
   # vGPU (shared) device class.
   vgpu:
     enabled: true
     name: vgpu-manager
+  # Whole-GPU device class.
+  gpu:
+    enabled: false
+    name: gpu-manager
+    # `extendedResourceName` is only rendered when the served
+    # resource.k8s.io version is v1 (the field does not exist in v1beta*).
+    extendedResourceName: nvidia.com/gpu
   # MIG device class.
   mig:
     enabled: false

@@ -79,11 +79,22 @@ type MmapDeviceVMemory struct {
 	mutex    sync.RWMutex
 	vMemory  *DeviceVMemoryT
 	mmapFile *util.MmapFile
+	// closed guards against use-after-munmap, as in vgpu.MmapResourceData: the
+	// metrics lister Close()s an entry (a file or directory that went away)
+	// while a scrape may still hold this *MmapDeviceVMemory. The read lock
+	// alone is not enough -- it is free again once the mapping is gone, so a
+	// reader arriving after Close would dereference unmapped memory. RLock
+	// therefore refuses a closed mapping, and accessors run under it.
+	closed bool
 }
 
 func (m *MmapDeviceVMemory) Close() error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+	if m.closed {
+		return nil
+	}
+	m.closed = true
 	return m.mmapFile.Close()
 }
 
@@ -95,6 +106,10 @@ func (m *MmapDeviceVMemory) RLock(deviceIndex int) (unlock func() error, err err
 	// (which take the exclusive lock) from unmapping m.vMemory while a reader is
 	// dereferencing it. It does NOT stand in for the fcntl lock.
 	m.mutex.RLock()
+	if m.closed {
+		m.mutex.RUnlock()
+		return util.NilUnlock, fmt.Errorf("vMemory mapping of %q is closed", m.mmapFile.Path)
+	}
 
 	// Open a dedicated fd per reader for the cross-process fcntl lock. fcntl
 	// record locks are not refcounted per open-file-description, so a shared fd
@@ -127,6 +142,9 @@ func (m *MmapDeviceVMemory) RLock(deviceIndex int) (unlock func() error, err err
 	}, nil
 }
 
+// GetDeviceMemory returns one device's slot of the ledger. It must be called
+// while the RLock of that device is held: that is what keeps the mapping alive
+// (and refuses a closed one) for as long as the returned pointer is read.
 func (m *MmapDeviceVMemory) GetDeviceMemory(deviceIndex int) (*DeviceVMemUsedT, error) {
 	if deviceIndex >= util.MaxDeviceCount || deviceIndex < 0 {
 		return nil, fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
@@ -137,12 +155,18 @@ func (m *MmapDeviceVMemory) GetDeviceMemory(deviceIndex int) (*DeviceVMemUsedT, 
 func (m *MmapDeviceVMemory) NeedsReload() (reload bool, err error) {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
+	if m.closed {
+		return false, os.ErrClosed
+	}
 	return m.mmapFile.NeedsReload()
 }
 
 func (m *MmapDeviceVMemory) Reload() error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+	if m.closed {
+		return os.ErrClosed
+	}
 
 	data, err := NewMmapDeviceVMemory(m.mmapFile.Path)
 	if err != nil {

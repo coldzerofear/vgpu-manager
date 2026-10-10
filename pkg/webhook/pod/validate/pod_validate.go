@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
@@ -29,11 +30,13 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
+	"github.com/miekg/dns"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -72,6 +75,27 @@ type validateHandle struct {
 }
 
 func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod, dryRun bool) error {
+	accessMode, err := util.PodVGPUAccessMode(pod)
+	if err != nil {
+		return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
+			field.Invalid(field.NewPath("metadata").Child("annotations").Key(util.VGPUAccessModeAnnotation),
+				pod.Annotations[util.VGPUAccessModeAnnotation], err.Error()),
+		})
+	}
+	if accessMode == util.AccessModeRemote {
+		if errs := checkClusterDNS(pod); len(errs) > 0 {
+			return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, errs)
+		}
+		// Validate remote node selector
+		if selVal, _ := util.HasAnnotation(pod, util.NodeRemoteSelectorsAnnotation); selVal != "" {
+			path := field.NewPath("metadata", "annotations").Key(util.NodeRemoteSelectorsAnnotation)
+			if _, err = labels.Parse(selVal, field.WithPath(path)); err != nil {
+				return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
+					field.Invalid(path, pod.Annotations[util.NodeRemoteSelectorsAnnotation], err.Error()),
+				})
+			}
+		}
+	}
 	if h.options.DRAAdmissionEnabled {
 		if err := h.checkResourceClaimRequests(ctx, pod); err != nil {
 			return &apierrors.StatusError{
@@ -920,3 +944,72 @@ func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admi
 	// Return allowed if everything succeeded.
 	return admission.Allowed("").WithWarnings(warnings...)
 }
+
+// checkClusterDNS refuses a remote vGPU pod that cannot resolve names in the
+// cluster. The GPU server it is given is addressed by whatever its node
+// publishes, and where hostNetwork is not allowed on the server side that is
+// an in-cluster DNS name of a headless service (see pkg/webhook/pod/hostname);
+// a pod that resolves through the node's resolver instead would fail to
+// connect at runtime, with nothing in its own spec to explain why.
+//
+//   - Default resolves through the node's resolv.conf, which does not serve
+//     cluster names;
+//   - ClusterFirst together with hostNetwork behaves as Default -- Kubernetes
+//     requires ClusterFirstWithHostNet for a host-network pod to use cluster
+//     DNS;
+//   - None is left to the author: it carries its own dnsConfig, and whether
+//     those servers answer for the cluster zone is not ours to judge.
+func checkClusterDNS(pod *corev1.Pod) field.ErrorList {
+	switch pod.Spec.DNSPolicy {
+	case corev1.DNSDefault:
+		return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsPolicy"), pod.Spec.DNSPolicy,
+			"a remote vGPU pod resolves its GPU server through cluster DNS, which this policy does not use: use ClusterFirst, or ClusterFirstWithHostNet with spec.hostNetwork")}
+	case corev1.DNSClusterFirst:
+		if pod.Spec.HostNetwork {
+			return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsPolicy"), pod.Spec.DNSPolicy,
+				"a host-network pod needs ClusterFirstWithHostNet to use cluster DNS, which a remote vGPU pod resolves its GPU server through")}
+		}
+	case corev1.DNSNone:
+		if pod.Spec.DNSConfig == nil || len(pod.Spec.DNSConfig.Nameservers) == 0 {
+			return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsConfig"), pod.Spec.DNSConfig,
+				"dnsPolicy None needs nameservers of its own, and they must answer for the cluster zone: a remote vGPU pod resolves its GPU server through it")}
+		}
+		if servers := clusterDNSServers(); len(servers) > 0 {
+			var hasClusterDNS bool
+			for _, nameserver := range pod.Spec.DNSConfig.Nameservers {
+				if slices.Contains(servers, nameserver) {
+					hasClusterDNS = true
+					break
+				}
+			}
+			if !hasClusterDNS {
+				return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsConfig").Child("nameservers"), pod.Spec.DNSConfig.Nameservers,
+					"dnsPolicy None needs nameservers of its own, and they must include cluster DNS: a remote vGPU pod resolves its GPU server through it")}
+			}
+		}
+	}
+	return nil
+}
+
+var (
+	once       sync.Once
+	dnsServers []string
+)
+
+// GetClusterDNSServers Retrieve the cluster coreDNS address from the /etc/resolv.conf file in the container
+func GetClusterDNSServers() []string {
+	once.Do(func() {
+		config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+		if err != nil {
+			return
+		}
+		dnsServers = config.Servers
+	})
+	return dnsServers
+}
+
+// clusterDNSServers is the resolver set of the webhook pod itself, which is the
+// cluster DNS as long as the webhook runs with ClusterFirst. Indirected so a
+// test pins what the cluster answers with instead of reading the machine it
+// happens to run on.
+var clusterDNSServers = GetClusterDNSServers

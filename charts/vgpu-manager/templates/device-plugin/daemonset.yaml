@@ -55,6 +55,29 @@ spec:
       hostNetwork: {{ .Values.devicePlugin.hostNetwork }}
       restartPolicy: Always
       initContainers:
+        {{- if .Values.devicePlugin.gpuToolkitReady.enabled }}
+        - name: toolkit-ready
+          image: {{ include "vgpu-manager.fullimage" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+          {{- with .Values.devicePlugin.gpuToolkitReady.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "Waiting for NVIDIA Toolkit to be ready..."
+              until [ -f {{ .Values.devicePlugin.gpuToolkitReady.hostPath }}/toolkit-ready ]; do 
+                echo "Waiting for {{ .Values.devicePlugin.gpuToolkitReady.hostPath }}/toolkit-ready..."
+                sleep 5
+              done
+              echo "NVIDIA Toolkit is ready!"
+          volumeMounts:
+            - name: nvidia-validations
+              mountPath: {{ .Values.devicePlugin.gpuToolkitReady.hostPath | quote }}
+              mountPropagation: HostToContainer
+              readOnly: true
+        {{- end }}
         - name: install
           command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
           image: {{ include "vgpu-manager.fullimage" . }}
@@ -86,6 +109,7 @@ spec:
             - --device-cores-scaling={{ .Values.devicePlugin.devicePlugin.commands.deviceCoresScaling | default 1.0 }}
             - --device-memory-scaling={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryScaling | default 1.0 }}
             - --device-memory-factor={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor | default 1 }}
+            - --device-memory-override={{ .Values.devicePlugin.deviceMemoryOverride | default 0 }}
             - --pprof-bind-port={{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
             - --cgroup-driver={{ .Values.devicePlugin.cgroupDriver }}
             - --feature-gates={{ include "vgpu-manager.featureGates" .Values.devicePlugin.devicePlugin.commands.featureGates }}
@@ -118,6 +142,8 @@ spec:
               value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
+            - name: CDI_ROOT
+              value: {{ $cdiRoot | quote }}
           {{- if .Values.devicePlugin.devicePlugin.env }}
             {{- toYaml .Values.devicePlugin.devicePlugin.env | nindent 12 }}
           {{- end }}
@@ -150,7 +176,7 @@ spec:
             {{- end }}
             {{- if $cdiEnabled }}
             - name: cdi-root
-              mountPath: /var/run/cdi
+              mountPath: {{ $cdiRoot | quote }}
             {{- end }}
             # Host driver root mounted in so the CDI spec can be generated from it.
             - name: driver-root
@@ -167,6 +193,7 @@ spec:
             - --server-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
             - --pprof-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
             - --cgroup-driver={{ .Values.devicePlugin.cgroupDriver }}
+            - --device-memory-override={{ .Values.devicePlugin.deviceMemoryOverride | default 0 }}
             - --feature-gates={{ include "vgpu-manager.featureGates" .Values.devicePlugin.deviceMonitor.commands.featureGates }}
             {{- if $nc.yaml }}
             - --node-config-path=/config/nodeConfig.yaml
@@ -301,5 +328,11 @@ spec:
         - name: cert-dir
           secret:
             secretName: {{ include "vgpu-manager.device-plugin" . }}-secret
+        {{- end }}
+        {{- if .Values.devicePlugin.gpuToolkitReady.enabled }}
+        - name: nvidia-validations
+          hostPath:
+            path: {{ .Values.devicePlugin.gpuToolkitReady.hostPath }}
+            type: DirectoryOrCreate
         {{- end }}
 {{- end }}

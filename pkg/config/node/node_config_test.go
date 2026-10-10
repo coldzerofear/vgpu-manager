@@ -19,11 +19,13 @@ package node
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/utils/ptr"
 )
 
@@ -376,5 +378,128 @@ configs:
 			result := test.configFunc().String()
 			assert.Equal(t, test.want, result)
 		})
+	}
+}
+
+// baseValidNodeConfig is a spec every other field of which passes validation,
+// so a test can assert on exactly the field it sets.
+func baseValidNodeConfig() NodeConfigSpec {
+	spec := NodeConfigSpec{}
+	for _, opt := range []Option{
+		WithDeviceListStrategyOption([]string{string(util.DeviceListStrategyEnvvar)}),
+		WithDeviceSplitCountOption(10),
+		WithDeviceMemoryScalingOption(1),
+		WithDeviceMemoryFactorOption(1),
+		WithDeviceCoresScalingOption(1),
+		WithDevicePluginPathOption("/var/lib/kubelet/device-plugins"),
+		WithMigStrategyOption(util.MigStrategyNone),
+	} {
+		opt(&spec)
+	}
+	return spec
+}
+
+// The memory override describes hardware NVML cannot describe (a GPU with no
+// framebuffer of its own, e.g. GB10). It is a size in MiB, unset by default.
+func Test_DeviceMemoryOverride(t *testing.T) {
+	var unset NodeConfigSpec
+	assert.Equal(t, 0, unset.GetDeviceMemoryOverride(), "unset must read as disabled")
+
+	spec := NodeConfigSpec{}
+	WithDeviceMemoryOverrideOption(65536)(&spec)
+	assert.Equal(t, 65536, spec.GetDeviceMemoryOverride())
+
+	valid := baseValidNodeConfig()
+	WithDeviceMemoryOverrideOption(65536)(&valid)
+	assert.Empty(t, valid.checkNodeConfig())
+
+	negative := baseValidNodeConfig()
+	WithDeviceMemoryOverrideOption(-1)(&negative)
+	errs := negative.checkNodeConfig()
+	if assert.Len(t, errs, 1) {
+		assert.Contains(t, errs[0].Error(), "deviceMemoryOverride")
+	}
+}
+
+// The override is only used for a GPU that shares its memory with the host, so
+// there is nothing to oversell: the configuration is refused outright rather
+// than handing out memory the host also needs.
+func Test_DeviceMemoryOverrideRefusesOversold(t *testing.T) {
+	tests := map[string]struct {
+		override int
+		scaling  float64
+		wantErr  bool
+	}{
+		"override without oversold":    {override: 65536, scaling: 1},
+		"oversold without an override": {override: 0, scaling: 2},
+		"override with oversold":       {override: 65536, scaling: 2, wantErr: true},
+		"override with a hair over 1":  {override: 65536, scaling: 1.01, wantErr: true},
+		// Undersold is a real configuration (hand out less than the card has),
+		// and it does not overcommit anything.
+		"override with undersold": {override: 65536, scaling: 0.5},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			spec := baseValidNodeConfig()
+			WithDeviceMemoryOverrideOption(tc.override)(&spec)
+			WithDeviceMemoryScalingOption(tc.scaling)(&spec)
+
+			errs := spec.checkNodeConfig()
+
+			if !tc.wantErr {
+				assert.Empty(t, errs)
+				return
+			}
+			if assert.Len(t, errs, 1) {
+				assert.Contains(t, errs[0].Error(), "deviceMemoryScaling must be 1")
+			}
+		})
+	}
+}
+
+// loadConfigSpec copies the matched file entry field by field, so a field added
+// to ConfigSpec is silently ignored until someone remembers to copy it too -
+// which is how gdrcopyEnabled and deviceMemoryOverride were both lost. This
+// pins every field: the file below sets all of them, so a new field makes the
+// test fail until it is added here and to loadConfigSpec.
+func Test_loadConfigSpecCopiesEveryField(t *testing.T) {
+	const everyField = `
+version: v1
+configs:
+  - nodeName: demo
+    cgroupDriver: systemd
+    deviceListStrategy: envvar
+    deviceSplitCount: 5
+    deviceMemoryScaling: 1
+    deviceMemoryFactor: 1
+    deviceCoresScaling: 1
+    deviceMemoryOverride: 65536
+    excludeDevices: "0"
+    gdsEnabled: true
+    mofedEnabled: true
+    gdrcopyEnabled: true
+    migStrategy: none
+    openKernelModules: true
+    imex:
+      channelIDs: [0]
+      required: true
+`
+	path := fmt.Sprintf("%s/nodeConfig.yaml", t.TempDir())
+	require.NoError(t, os.WriteFile(path, []byte(everyField), 0o600))
+
+	spec := NodeConfigSpec{ConfigSpec: ConfigSpec{NodeName: "demo"}, nodeConfigPath: path}
+	require.NoError(t, loadConfigSpec(&spec))
+
+	value := reflect.ValueOf(spec.ConfigSpec)
+	for i := range value.NumField() {
+		field := value.Type().Field(i)
+		if field.Type.Kind() != reflect.Ptr {
+			// nodeName is the matcher, not a copied setting.
+			continue
+		}
+		assert.False(t, value.Field(i).IsNil(),
+			"ConfigSpec.%s was not copied out of the config file: set it in this test's "+
+				"config and copy it in loadConfigSpec", field.Name)
 	}
 }

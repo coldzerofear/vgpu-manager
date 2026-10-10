@@ -61,9 +61,11 @@ const (
 	NodeBadVGPURegister    Code = "NodeBadVGPURegister"
 	NodeBadVGPUConfig      Code = "NodeBadVGPUConfig"
 	NodeBadMemoryFactor    Code = "NodeBadMemoryFactor"
+	NodeBadRemoteEndpoint  Code = "NodeBadRemoteEndpoint"
 	NodeMemoryTypeMismatch Code = "NodeMemoryTypeMismatch"
 	NodeCacheMiss          Code = "NodeCacheMiss"
 	NodeInfoBuildFailed    Code = "NodeInfoBuildFailed"
+	NodeDeleting           Code = "NodeDeleting"
 )
 
 // Device-level codes — filterDevices walks the node's devices and
@@ -96,6 +98,21 @@ const (
 	AllocatorInternalError Code = "AllocatorInternalError"
 )
 
+// Remote vGPU codes — placing a pod that asks for remote vGPU, or a local pod
+// meeting a node whose GPUs serve remote pods.
+const (
+	// NodeIsRemoteServer: the node's GPUs serve remote pods, so local pods may not use them.
+	NodeIsRemoteServer Code = "NodeIsRemoteServer"
+	// NodeRemoteServerUnreachable: the server node reports its lupine-server is not reachable.
+	NodeRemoteServerUnreachable Code = "NodeRemoteServerUnreachable"
+	// NodeNotRemoteConsumer: the node is not labeled to run remote vGPU pods.
+	NodeNotRemoteConsumer Code = "NodeNotRemoteConsumer"
+	// NoRemoteServer: no GPU server is available to remote pods.
+	NoRemoteServer Code = "NoRemoteServer"
+	// RemoteServerUnfit: remote servers exist but none can host the pod.
+	RemoteServerUnfit Code = "RemoteServerUnfit"
+)
+
 // phrase is the short, k8s-style noun phrase rendered into Event
 // messages and FailedNodesMap entries. Style rules: leading capital, no
 // trailing punctuation, no embedded node name (the caller appends it).
@@ -110,9 +127,11 @@ var phrase = map[Code]string{
 	NodeBadVGPUConfig:      "node vGPU configuration invalid",
 	NodeBadVGPURegister:    "node vGPU registry invalid",
 	NodeBadMemoryFactor:    "node memory factor invalid",
+	NodeBadRemoteEndpoint:  "node remote endpoint invalid",
 	NodeMemoryTypeMismatch: "node memory type mismatch",
 	NodeCacheMiss:          "node missing from cache",
 	NodeInfoBuildFailed:    "node info build failed",
+	NodeDeleting:           "node is being deleted",
 
 	DeviceUnhealthy:        "GPU unhealthy",
 	DeviceMIGEnabled:       "GPU has MIG enabled",
@@ -128,6 +147,12 @@ var phrase = map[Code]string{
 	NUMATopologyUnsatisfied:   "NUMA topology unsatisfied",
 	AlreadyScheduledElsewhere: "pod already scheduled to another node",
 	AllocatorInternalError:    "allocator internal error",
+
+	NodeIsRemoteServer:          "node GPUs serve remote pods",
+	NodeRemoteServerUnreachable: "remote GPU server unreachable",
+	NodeNotRemoteConsumer:       "node not a remote vGPU consumer",
+	NoRemoteServer:              "No remote vGPU server available",
+	RemoteServerUnfit:           "No remote vGPU server fits",
 }
 
 // Phrase returns the human-readable short form for a Code. Unknown

@@ -42,6 +42,17 @@
  *                nvml_library_entry / nvml_hook_nums.
  *   - dlsym      the LD_PRELOAD dlsym(3) interceptor in loader.c. Required
  *                for the LD_PRELOAD CUDA-hook mechanism to work at all.
+ *   - lupinecr_get_lupine_provider_v1
+ *                the LUPINE checkpoint provider entry point (checkpoint_provider.c).
+ *                lupine-server dlopens this same .so (via LUPINE_CHECKPOINT_LIBRARY)
+ *                and dlsym()s this symbol to obtain the provider ABI; its restore()
+ *                injects VGPU_CONFIG_SESSION_PATH before the first CUDA RPC (design §4.3.3.1).
+ *                Inert unless lupine loads it; a local deployment never calls it.
+ *   - lupinecr_cuda_symbol_v1
+ *                lupine's separate, optional cuMemFree_v2-override lookup (not part of
+ *                the provider struct above; lupine dlsym()s this name directly off this
+ *                .so). We only forward it to an optional downstream provider chained via
+ *                VGPU_CHECKPOINT_LIBRARY (checkpoint_provider.c); same inertness as above.
  *   - vkNegotiateLoaderLayerInterfaceVersion is the only Vulkan symbol
  *                that ever appears in our .dynsym. We deliberately do NOT
  *                expose v1-fallback names (vkGetInstanceProcAddr,
@@ -60,6 +71,8 @@
     cudbg*;
     nvml[A-Z]*;
     dlsym;
+    lupinecr_get_lupine_provider_v1;
+    lupinecr_cuda_symbol_v1;
     vkNegotiateLoaderLayerInterfaceVersion;
 
   local:

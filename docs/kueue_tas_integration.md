@@ -10,7 +10,7 @@
 |---|---|---|
 | **Kueue 不替换调度器** | Kueue 文档:TAS "finds a fixed assignment of pods to nodes and **injects a NodeSelector**",不接管调度 | 注入 NodeSelector 后仍由 kube-scheduler 调度 → **vgpu-manager extender 原样被调用**,不冲突 |
 | **Kueue 按 `.status.allocatable` 统计扩展资源** | Kueue 文档:容量基于 "Node allocatable capacity (`.status.allocatable`)",GPU 示例用 `nvidia.com/gpu` 作 `coveredResources` | 只要资源在节点 allocatable 里,Kueue 就能按拓扑域统计 |
-| **`nvidia.com/vgpu-number` 是真实扩展资源** | device plugin 经 ListAndWatch 注册进 kubelet;[`deploy/vgpu-manager-scheduler.yaml:164`](../deploy/vgpu-manager-scheduler.yaml#L164) `ignoredByScheduler: false` | **Kueue 能按 rack/block 统计 vgpu-number 容量**,正确选域 ✓ 这是集成命门 |
+| **`nvidia.com/vgpu-number` 是真实扩展资源** | device plugin 经 ListAndWatch 注册进 kubelet;[`deploy/classic-local/vgpu-manager-scheduler.yaml:164`](../deploy/classic-local/vgpu-manager-scheduler.yaml#L164) `ignoredByScheduler: false` | **Kueue 能按 rack/block 统计 vgpu-number 容量**,正确选域 ✓ 这是集成命门 |
 
 > 注:`nvidia.com/vgpu-cores` / `nvidia.com/vgpu-memory` 在 extender 里是 `ignoredByScheduler: true`,kube-scheduler 与 Kueue 的容量计算都不看它们(仅 extender 精算)。因此 **TAS 场景下建议以 `vgpu-number` 为绑定维度(整卡申请)**,见 §6 与 §7 的注意事项。
 

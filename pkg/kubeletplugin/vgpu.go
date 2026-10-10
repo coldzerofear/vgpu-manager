@@ -29,6 +29,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/docker/go-units"
@@ -57,13 +58,52 @@ func (d *VGpuDeviceInfo) CanonicalName() string {
 	return fmt.Sprintf("vgpu-%d", d.Minor)
 }
 
+// memoryCapacityBytes is the memory capacity published for a vGPU: the
+// device size after the oversold ratio, floored to a whole MiB. Requests are
+// MiB-granular, and the API server wants max to be a whole number of steps
+// from min, so a capacity that is not itself a MiB multiple (any ratio that
+// does not divide the device size) would make the published policy invalid.
+func memoryCapacityBytes(total uint64, ratio uint) int64 {
+	scaled := float64(total) * (float64(ratio) / float64(util.HundredCore))
+	if scaled <= 0 {
+		return 0
+	}
+	return int64(scaled) / int64(units.MiB) * int64(units.MiB)
+}
+
+// memoryRequestPolicy is the consumption policy published with the memory
+// capacity. A device with no capacity at all is the unified-memory case:
+// NVML cannot report a size (GB10 and other integrated parts) and no
+// --device-memory-override was configured. The policy still has to be
+// internally consistent or the API server rejects the whole ResourceSlice:
+// min may not exceed the capacity, and neither may min+step -- so a
+// capacity with no room for a MiB step publishes neither a step nor a
+// non-zero minimum.
+func memoryRequestPolicy(totalBytes int64) *resourceapi.CapacityRequestPolicy {
+	if totalBytes < 0 {
+		totalBytes = 0
+	}
+	policy := &resourceapi.CapacityRequestPolicy{
+		Default: resource.NewQuantity(totalBytes, resource.BinarySI),
+		ValidRange: &resourceapi.CapacityRequestPolicyRange{
+			Min: resource.NewQuantity(0, resource.BinarySI),
+			Max: resource.NewQuantity(totalBytes, resource.BinarySI),
+		},
+	}
+	if totalBytes >= 2*int64(units.MiB) {
+		policy.ValidRange.Min = resource.NewQuantity(int64(units.MiB), resource.BinarySI)
+		policy.ValidRange.Step = resource.NewQuantity(int64(units.MiB), resource.BinarySI)
+	}
+	return policy
+}
+
 func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 	attributes := d.GpuDeviceInfo.Attributes()
 	attributes["type"] = resourceapi.DeviceAttribute{
 		StringValue: ptr.To(VGpuDeviceType),
 	}
 
-	totalMemory := float64(d.Memory.Total) * (float64(d.deviceMemoryRatio) / float64(util.HundredCore))
+	totalMemory := memoryCapacityBytes(d.Memory.Total, d.deviceMemoryRatio)
 
 	attributes["coreRatio"] = resourceapi.DeviceAttribute{
 		IntValue: ptr.To[int64](int64(d.deviceCoresRatio)),
@@ -89,15 +129,8 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 				},
 			},
 			MemoryResourceName: {
-				Value: *resource.NewQuantity(int64(totalMemory), resource.BinarySI),
-				RequestPolicy: &resourceapi.CapacityRequestPolicy{
-					Default: resource.NewQuantity(int64(totalMemory), resource.BinarySI),
-					ValidRange: &resourceapi.CapacityRequestPolicyRange{
-						Min:  resource.NewQuantity(int64(units.MiB), resource.BinarySI),
-						Max:  resource.NewQuantity(int64(totalMemory), resource.BinarySI),
-						Step: resource.NewQuantity(int64(units.MiB), resource.BinarySI),
-					},
-				},
+				Value:         *resource.NewQuantity(totalMemory, resource.BinarySI),
+				RequestPolicy: memoryRequestPolicy(totalMemory),
 			},
 		},
 		AllowMultipleAllocations: pointer.Bool(true),
@@ -118,7 +151,7 @@ type VGPUManager struct {
 func NewVGPUManager(deviceLib *deviceLib, config *Config) *VGPUManager {
 	return &VGPUManager{
 		nvdevlib:          deviceLib,
-		contManagerPath:   util.ManagerRootPath,
+		contManagerPath:   config.Flags.ContainerManagerDir,
 		hostManagerPath:   config.Flags.HostManagerDir,
 		clientSets:        config.ClientSets,
 		deviceCoresRatio:  config.DeviceCoresRatio,
@@ -130,17 +163,6 @@ var (
 	CoresResourceName  = resourceapi.QualifiedName("cores")
 	MemoryResourceName = resourceapi.QualifiedName("memory")
 )
-
-func (m *VGPUManager) getComputePolicy(claim *resourceapi.ResourceClaim) util.ComputePolicy {
-	computePolicy := util.FixedComputePolicy
-	for key, val := range claim.GetAnnotations() {
-		if strings.HasSuffix(key, "/vgpu-compute-policy") && val != "" {
-			computePolicy = vgpu2.GetComputePolicy(val)
-			break
-		}
-	}
-	return computePolicy
-}
 
 func (m *VGPUManager) ensureClaimDirectories(claimUID string) (string, string) {
 	baseContPath := filepath.Join(m.contManagerPath, util.Claims, claimUID)
@@ -159,8 +181,7 @@ func (m *VGPUManager) ensurePartitionDirectories(claimUID, partitionKey string) 
 	baseHostPath := filepath.Join(m.hostManagerPath, util.Claims, claimUID, partitionKey)
 	configContPath := filepath.Join(baseContPath, util.Config)
 	preparedDirs := []string{
-		baseContPath,
-		configContPath,
+		baseContPath, configContPath,
 		filepath.Join(baseContPath, vgpu.VGPULockDirName),
 		filepath.Join(baseContPath, util.VMemNode),
 		filepath.Join(baseContPath, util.SMNode),
@@ -195,7 +216,7 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 		compMode |= util.CGroupv1Mode
 	}
 	compMode |= util.OpenKernelMode
-	containerDriverFile := filepath.Join(m.contManagerPath, "driver", vgpu.VGPUControlFileName)
+	containerDriverFile := filepath.Join(m.contManagerPath, util.Driver, vgpu.VGPUControlFileName)
 
 	oversold := "FALSE"
 	ratio := float64(m.deviceMemoryRatio) / float64(util.HundredCore)
@@ -221,12 +242,26 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	// by the NRI plugin at CreateContainer, not here. Carry the claim UID via CDI
 	// env so the NRI hook can correlate the container to its claim (validated
 	// against node prepared state; see §12.12.1 in dra_nri_integration_design.md).
+	//
+	// TODO(nri#282): this spec is also where we will declare the NRI plugin as
+	// required for the container, closing the one gap strict enforcement cannot
+	// reach on its own — a runtime restart between Prepare and CreateContainer
+	// skips the hook while these CDI edits still apply, so the container starts
+	// with the library but without its partition. The declaration would be a
+	// containerEdits.annotations entry naming util.DRADriverName under
+	// required-plugins.noderesource.dev, after which the runtime's default
+	// validator aborts container creation with a CreateContainerError naming the
+	// missing plugin. It cannot be written yet: CDI has no
+	// ContainerEdits.Annotations field (specs-go v1.1.0), and the NRI default
+	// validator reads required-plugins only from PodSandbox annotations as of
+	// v0.12.3. See the package comment in pkg/kubeletplugin/nri for the details
+	// and for what changes when the upstream work lands.
 	if featuregates.Enabled(featuregates.NRISupport) {
-		envs = append(envs, fmt.Sprintf("%s=%s", util.ManagerVGpuClaimUid, string(claim.UID)))
+		envs = append(envs, nri.NRIClaimEnv(claim))
 	} else {
-		envs = append(envs, fmt.Sprintf("%s=", util.ManagerVGpuClaimUid))
+		envs = append(envs, nri.NRIClaimEnv(nil))
 	}
-	hostLibraryPath := filepath.Join(m.hostManagerPath, vgpu.VGPUControlFileName)
+	hostLibraryPath := filepath.Join(m.hostManagerPath, util.Driver, vgpu.VGPUControlFileName)
 	hostLibraryPath = fmt.Sprintf("%s.%s", hostLibraryPath, version.Get().Version)
 	mounts := []*cdispec.Mount{
 		{
@@ -274,15 +309,12 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 	if result == nil || device == nil || device.Type() != VGpuDeviceType {
 		return nil
 	}
-
-	computePolicy := m.getComputePolicy(claim)
 	idx := device.VGpu.Index
-
 	deviceMemoryRatio := device.VGpu.deviceMemoryRatio
 	if deviceMemoryRatio == 0 {
 		deviceMemoryRatio = m.deviceMemoryRatio
 	}
-	totalMemory := float64(device.VGpu.Memory.Total) * (float64(deviceMemoryRatio) / float64(util.HundredCore))
+	totalMemory := memoryCapacityBytes(device.VGpu.Memory.Total, deviceMemoryRatio)
 	totalMemoryMB := uint64(totalMemory) / units.MiB
 
 	oversold := "FALSE"
@@ -298,6 +330,7 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 		fmt.Sprintf("%s_%d=%s", util.ManagerVisibleDevice, idx, device.VGpu.UUID),
 	}
 
+	computePolicy := vgpu2.GetDefaultComputePolicy(claim, nil)
 	if quantity, ok := result.ConsumedCapacity[CoresResourceName]; ok {
 		if hardVal, ok := quantity.AsInt64(); ok {
 			softVal := hardVal
@@ -320,11 +353,14 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 	if quantity, ok := result.ConsumedCapacity[MemoryResourceName]; ok {
 		if val, ok := quantity.AsInt64(); ok {
 			requestMB := uint64(val / units.MiB)
-			if requestMB < totalMemoryMB {
-				envs = append(envs, fmt.Sprintf("%s_%d=%vm", util.CudaMemoryLimitEnv, idx, requestMB))
-			} else {
+			// 0 would reach the library as CUDA_MEM_LIMIT=0m, which it reads as a
+			// zero-byte quota (every allocation fails), not as "no quota". A
+			// zero-capacity device is exactly the request that lands here.
+			if requestMB == 0 || requestMB >= totalMemoryMB {
 				// unlimited
 				envs = append(envs, fmt.Sprintf("%s_%d=", util.CudaMemoryLimitEnv, idx))
+			} else {
+				envs = append(envs, fmt.Sprintf("%s_%d=%vm", util.CudaMemoryLimitEnv, idx, requestMB))
 			}
 		}
 	}
@@ -434,8 +470,11 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 // Prepare-time GetPartitionMountContainerEdits, this mints no register UUID and
 // patches no claim annotation: in NRI mode the library registers via the pod-uid
 // path using the VGPU_POD_UID / VGPU_CONTAINER_NAME env injected here.
-func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
-	partitionKey := fmt.Sprintf("%s_%s", podUID, containerName)
+// The ctx carries the NRI request budget; it is accepted for signature
+// symmetry with the other hook callbacks and for future blocking work here.
+// Today this only touches the local filesystem.
+func (m *VGPUManager) GetNRIPartitionInjection(_ context.Context, claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
+	partitionKey := remote.NRIPartitionKey(podUID, containerName)
 	contBase, hostBase, err := m.ensurePartitionDirectories(claimUID, partitionKey)
 	if err != nil {
 		return nil, err
@@ -497,6 +536,10 @@ func (m *VGPUManager) Unprepare(claimRef kubeletplugin.NamespacedObject, _ Prepa
 	}
 	// claim marked for deletion, fast return
 	if !claim.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	if claim.UID != claimRef.UID {
+		klog.V(4).Infof("Cleaning vGPU registry failed, claim UID mismatch (%s != %s)", claimRef.UID, claim.UID)
 		return nil
 	}
 	metadata := client.PatchMetadata{Annotations: map[string]*string{}}

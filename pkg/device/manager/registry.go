@@ -94,7 +94,7 @@ func (m *DeviceManager) registryDevices() {
 			return
 		case <-m.reRegister:
 			klog.V(3).Infoln("Trigger immediate re registration of node devices")
-			ticker.Reset(0)
+			ticker.Reset(20 * time.Millisecond)
 		case <-ticker.C:
 			m.mut.Lock()
 			funcs := maps.Clone(m.registryFuncs)

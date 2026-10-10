@@ -1,0 +1,474 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vgpu-manager-dra-driver
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vgpu-manager-dra-driver:role
+rules:
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceclaimtemplates
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceslices
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - delete
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceclaims
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceclaims/status
+    verbs:
+      - update
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceclaims/driver
+    verbs:
+      - associated-node:update
+      - associated-node:patch
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vgpu-manager-dra-driver-as-role
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vgpu-manager-dra-driver:role
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-dra-driver
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vgpu-manager-dra-driver
+  namespace: kube-system
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: vgpu-manager-dra-driver
+  template:
+    metadata:
+      labels:
+        app: vgpu-manager-dra-driver
+        vgpu-manager.io/ignore-webhook: "true"
+    spec:
+#      affinity:
+#        nodeAffinity:
+#          requiredDuringSchedulingIgnoredDuringExecution:
+#            nodeSelectorTerms:
+#              - matchExpressions:
+#                  # NFD: On discrete-GPU based systems NFD adds the following label where 10de is the NVIDIA PCI vendor ID
+#                  - key: feature.node.kubernetes.io/pci-10de.present
+#                    operator: In
+#                    values:
+#                      - "true"
+#              - matchExpressions:
+#                  # NFD: NVIDIA PCI 3D controller (class 0302) present
+#                  - key: feature.node.kubernetes.io/pci-0302_10de.present
+#                    operator: In
+#                    values:
+#                      - "true"
+#              - matchExpressions:
+#                  # NFD: NVIDIA PCI VGA compatible controller (class 0300) present
+#                  - key: feature.node.kubernetes.io/pci-0300_10de.present
+#                    operator: In
+#                    values:
+#                      - "true"
+#              - matchExpressions:
+#                  # NFD: On some Tegra-based systems NFD detects the CPU vendor ID as NVIDIA
+#                  - key: feature.node.kubernetes.io/cpu-model.vendor_id
+#                    operator: In
+#                    values:
+#                      - "NVIDIA"
+#              - matchExpressions:
+#                  # GPU Operator: Label added by NVIDIA GPU Operator when it detects a GPU
+#                  - key: "nvidia.com/gpu.present"
+#                    operator: In
+#                    values:
+#                      - "true"
+      tolerations:
+        # This toleration is deprecated. Kept here for backward compatibility
+        # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+        - effect: NoSchedule
+          operator: Exists
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      hostPID: true
+      initContainers:
+        - name: init-container
+          image: coldzerofear/vgpu-manager-dra:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command: [bash, /usr/bin/kubelet-plugin-prestart.sh]
+          env:
+            - name: NVIDIA_DRIVER_ROOT
+              value: /
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+            - name: KUBELET_REGISTRAR_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins_registry
+            - name: KUBELET_PLUGINS_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins
+          volumeMounts:
+            - name: driver-root-parent
+              mountPath: /driver-root-parent
+              readOnly: true
+        - name: init-install
+          image: coldzerofear/vgpu-manager-dra:latest
+          imagePullPolicy: IfNotPresent
+          command: [bash, -c, /usr/bin/install_files.sh]
+          env:
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
+          resources:
+            requests:
+              cpu: 10m
+              memory: 15Mi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: manager-root
+              mountPath: /etc/vgpu-manager
+              mountPropagation: Bidirectional
+      containers:
+        - name: kubelet-plugin
+          image: coldzerofear/vgpu-manager-dra:latest
+          imagePullPolicy: IfNotPresent
+          command: [bash, -c]
+          args:
+            - |-
+              # Conditionally mask the params file to prevent this container from
+              # recreating any missing GPU device nodes. This is necessary, for
+              # example, when running under nvkind to limit the set GPUs governed
+              # by the plugin even though it has cgroup access to all of them.
+              if [ "${MASK_NVIDIA_DRIVER_PARAMS}" = "true" ]; then
+                cp /proc/driver/nvidia/params root/gpu-params
+                sed -i 's/^ModifyDeviceFiles: 1$/ModifyDeviceFiles: 0/' root/gpu-params
+                mount --bind root/gpu-params /proc/driver/nvidia/params
+              fi
+              exec kubelet-plugin "$@"
+            - --domain=nvidia.com
+            - --kube-api-qps=20
+            - --kube-api-burst=30
+            - --device-cores-ratio=100
+            - --device-memory-ratio=100
+            # Unified-memory GPUs (GB10 / DGX Spark) cannot report their memory size;
+            # supply it in MiB here, and on the device-monitor container below.
+            # Oversold memory is refused together with it.
+            # See docs/how_to_use_unified_memory_gpu.md
+#            - --device-memory-override=65536
+            - -v=6
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: FEATURE_GATES
+              value: NVMLDeviceHealthCheck=true,SharedSMUtilizationWatcher=true,DevicePluginClientMode=false,NRISupport=false
+            - name: MASK_NVIDIA_DRIVER_PARAMS
+              value: ""
+            - name: NVIDIA_DRIVER_ROOT
+              value: /
+            - name: CDI_ROOT
+              value: /var/run/cdi
+            - name: NRI_ROOT
+              value: /var/run/nri
+            - name: NRI_PLUGIN_INDEX
+              value: "00"
+            - name: HOST_ROOT
+              value: /host-root
+            - name: HEALTHCHECK_PORT
+              value: "4567"
+            - name: HTTP_ENDPOINT
+              value: ":8080"
+            - name: METRICS_PATH
+              value: "/metrics"
+            # void: 阻止 nvidia runtime 向插件容器注入驱动库/设备节点，
+            # 驱动发现走 prestart + /driver-root
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+            - name: NVIDIA_MIG_CONFIG_DEVICES
+              value: all
+            - name: DRIVER_ROOT_CTR_PATH
+              value: /driver-root
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
+            - name: KUBELET_REGISTRAR_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins_registry
+            - name: KUBELET_PLUGINS_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins
+          securityContext:
+            privileged: true
+          ports:
+            - name: health
+              containerPort: 4567
+            - name: metrics
+              containerPort: 8080
+          startupProbe:
+            grpc:
+              port: 4567
+              service: liveness
+            failureThreshold: 60
+            periodSeconds: 10
+            timeoutSeconds: 10
+          livenessProbe:
+            grpc:
+              port: 4567
+              service: liveness
+            failureThreshold: 3
+            periodSeconds: 30
+            timeoutSeconds: 10
+          volumeMounts:
+            - mountPath: /var/lib/kubelet/plugins_registry
+              name: plugins-registry
+            - mountPath: /var/lib/kubelet/plugins
+              mountPropagation: Bidirectional
+              name: kubelet-plugins
+            - mountPath: /var/run/cdi
+              name: cdi-root
+            - mountPath: /driver-root
+              mountPropagation: HostToContainer
+              name: driver-root
+              readOnly: true
+            - mountPath: /etc/vgpu-manager
+              name: manager-root
+            - name: cgroup-root
+              mountPath: /sys/fs/cgroup
+            - mountPath: /var/lib/kubelet
+              name: kubelet-root
+            # PassthroughSupport
+            - name: host-root
+              mountPath: /host-root
+              mountPropagation: HostToContainer
+              readOnly: true
+            - name: lib-modules
+              mountPath: /lib/modules/
+              mountPropagation: HostToContainer
+              readOnly: true
+            - name: sysfs
+              mountPath: /sys/
+              mountPropagation: Bidirectional
+            - name: procfs
+              mountPath: /proc/
+              mountPropagation: Bidirectional
+#            # When NRISupport is enabled, it is necessary to mount the nri root directory to the container
+            - name: nri-root
+              mountPath: /var/run/nri
+              mountPropagation: HostToContainer
+              readOnly: true
+        - name: device-monitor
+          image: coldzerofear/vgpu-manager-dra:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - device-monitor
+            - --domain=nvidia.com
+            - --kube-api-qps=20
+            - --kube-api-burst=30
+            - --enable-dra-monitor
+            - --server-bind-port=3456
+            - --container-driver-root=/driver-root
+            # Must match the kubelet plugin. See docs/how_to_use_unified_memory_gpu.md
+#            - --device-memory-override=65536
+            - --min-scrape-interval=1s
+            - --feature-gates=SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
+            - --v=4
+          ports:
+            - name: http
+              containerPort: 3456
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CGROUP_DRIVER
+              value: auto
+            - name: KUBE_FEATURE_WatchListClient
+              value: "true"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_MIG_MONITOR_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+          securityContext:
+            privileged: true
+          resources: {}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: kubelet-root
+              mountPath: /var/lib/kubelet
+              readOnly: true
+            - name: pod-resources
+              mountPath: /var/lib/kubelet/pod-resources
+              readOnly: true
+            - name: manager-root
+              mountPath: /etc/vgpu-manager
+            - name: cgroup-root
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: driver-root
+              mountPath: /driver-root
+              readOnly: true
+      dnsPolicy: ClusterFirst
+      # Mark this pod as a critical add-on; when enabled, the critical add-on
+      # scheduler reserves resources for critical add-on pods so that they can
+      # be rescheduled after a failure.
+      # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
+      priorityClassName: system-node-critical
+      nodeSelector:
+        vgpu-manager: dra-driver
+      serviceAccountName: vgpu-manager-dra-driver
+      securityContext: {}
+      volumes:
+        - hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: ""
+          name: plugins-registry
+        - hostPath:
+            path: /var/lib/kubelet/plugins
+            type: ""
+          name: kubelet-plugins
+        - hostPath:
+            path: /var/run/cdi
+            type: ""
+          name: cdi-root
+        - hostPath:
+            path: /
+            type: DirectoryOrCreate
+          name: driver-root-parent
+        - hostPath:
+            path: /
+            type: DirectoryOrCreate
+          name: driver-root
+        - hostPath:
+            path: /etc/vgpu-manager
+            type: DirectoryOrCreate
+          name: manager-root
+        - name: cgroup-root
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: kubelet-root
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        # PassthroughSupport
+        # system commands against the host FS. For example, to test and load the vfio-pci
+        # module variant for a GPU.
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        # This is needed by `https://github.com/NVIDIA/go-nvlib/pkg/nvpassthrough` pkg
+        # to detect the vfio-pci driver variant to use with a GPU.
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules/
+            type: Directory
+        - name: sysfs
+          hostPath:
+            path: /sys/
+            type: Directory
+        - name: procfs
+          hostPath:
+            path: /proc/
+            type: Directory
+        - name: pod-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+            type: Directory
+#        # When NRISupport is enabled, it is necessary to mount the nri root directory to the container
+        - name: nri-root
+          hostPath:
+            path: /var/run/nri
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vgpu-manager-dra-driver
+  namespace: kube-system
+spec:
+  ports:
+    - name: http
+      port: 3456
+      protocol: TCP
+      targetPort: http
+    - name: metrics
+      port: 8080
+      protocol: TCP
+      targetPort: metrics
+  selector:
+    app: vgpu-manager-dra-driver
+  type: ClusterIP

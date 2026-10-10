@@ -81,6 +81,7 @@ test: fmt vet ## Run tests.
 .PHONY: generate
 generate: ## API code generation.
 	protoc --go_out=. --go-grpc_out=. pkg/api/registry/api.proto
+	protoc --go_out=. --go-grpc_out=. pkg/api/remoteagent/api.proto
 
 ##@ Build
 
@@ -97,6 +98,8 @@ build: fmt vet ## Build binary.
 	CGO_ENABLED=0 GOOS=$(GOOS) go build -ldflags="$(GO_BUILD_LDFLAGS)" -o bin/device-client cmd/device-client/*.go
 	CGO_ENABLED=1 GOOS=$(GOOS) CGO_LDFLAGS_ALLOW="$(CGO_LDFLAGS_ALLOW)" \
         go build -ldflags="$(GO_BUILD_LDFLAGS)" -o bin/kubelet-plugin cmd/kubelet-plugin/*.go
+	CGO_ENABLED=1 GOOS=$(GOOS) CGO_LDFLAGS_ALLOW="$(CGO_LDFLAGS_ALLOW)" \
+        go build -ldflags="$(GO_BUILD_LDFLAGS)" -o bin/remote-agent cmd/remote-agent/*.go
 
 .PHONY: docker-build-base
 docker-build-base: ## Build base docker image.

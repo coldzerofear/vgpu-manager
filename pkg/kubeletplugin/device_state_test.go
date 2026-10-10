@@ -18,15 +18,19 @@ limitations under the License.
 package kubeletplugin
 
 import (
+	"context"
 	"testing"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/fabricmanager"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
+	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 )
 
 func TestValidateNoOverlappingPreparedDevices(t *testing.T) {
@@ -673,4 +677,267 @@ func TestIsAdminAccessIgnoresOtherDrivers(t *testing.T) {
 	})
 
 	require.True(t, isAdminAccess(results))
+}
+
+func TestRequestedNonAdminDevices(t *testing.T) {
+	state := &DeviceState{}
+
+	claim := &resourceapi.ResourceClaim{
+		Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{
+					Results: []resourceapi.DeviceRequestAllocationResult{
+						{Driver: util.DRADriverName, Device: "gpu-0"},
+						{Driver: util.DRADriverName, Device: "gpu-admin", AdminAccess: ptr.To(true)},
+						{Driver: util.DRADriverName, Device: "gpu-explicit-nonadmin", AdminAccess: ptr.To(false)},
+						{Driver: "other.driver.com", Device: "gpu-other"},
+					},
+				},
+			},
+		},
+	}
+
+	got := state.requestedNonAdminDevices(claim)
+
+	require.Equal(t, map[string]struct{}{
+		"gpu-0":                 {},
+		"gpu-explicit-nonadmin": {},
+	}, got)
+}
+
+func TestGetPreparedMigDevice(t *testing.T) {
+	migDev := &PreparedMigDevice{
+		Concrete: &MigLiveTuple{MigUUID: "MIG-2222"},
+		Device:   &CheckpointedDevice{DeviceName: "mig-0"},
+	}
+	checkpoint := &Checkpoint{
+		V2: &CheckpointV2{
+			PreparedClaims: PreparedClaimsByUID{
+				"claim-completed": {
+					CheckpointState: ClaimCheckpointStatePrepareCompleted,
+					PreparedDevices: PreparedDevices{
+						{Devices: PreparedDeviceList{{Mig: migDev}}},
+					},
+				},
+				"claim-pending": {
+					CheckpointState: "Prepared", // not PrepareCompleted -> skipped
+					PreparedDevices: PreparedDevices{
+						{Devices: PreparedDeviceList{{Mig: &PreparedMigDevice{
+							Concrete: &MigLiveTuple{MigUUID: "MIG-PENDING"},
+							Device:   &CheckpointedDevice{DeviceName: "mig-pending"},
+						}}}},
+					},
+				},
+			},
+		},
+	}
+
+	state := &DeviceState{}
+
+	require.Same(t, migDev, state.getPreparedMigDevice(checkpoint, "mig-0"))
+	require.Nil(t, state.getPreparedMigDevice(checkpoint, "mig-unknown"))
+	// Device belongs to a non-completed claim, so it must not be returned.
+	require.Nil(t, state.getPreparedMigDevice(checkpoint, "mig-pending"))
+	require.Nil(t, state.getPreparedMigDevice(nil, "mig-0"))
+	require.Nil(t, state.getPreparedMigDevice(&Checkpoint{}, "mig-0"))
+}
+
+func TestPreparedClaimDeviceHasAdminAccess(t *testing.T) {
+	claim := &PreparedClaim{
+		Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{
+					Results: []resourceapi.DeviceRequestAllocationResult{
+						{Driver: util.DRADriverName, Device: "gpu-admin", AdminAccess: ptr.To(true)},
+						{Driver: util.DRADriverName, Device: "gpu-plain"},
+						{Driver: "other.driver.com", Device: "gpu-other", AdminAccess: ptr.To(true)},
+					},
+				},
+			},
+		},
+	}
+
+	require.True(t, preparedClaimDeviceHasAdminAccess(claim, "gpu-admin"))
+	require.False(t, preparedClaimDeviceHasAdminAccess(claim, "gpu-plain"))
+	// Admin access on another driver's result must not count for this driver.
+	require.False(t, preparedClaimDeviceHasAdminAccess(claim, "gpu-other"))
+	require.False(t, preparedClaimDeviceHasAdminAccess(claim, "gpu-missing"))
+	require.False(t, preparedClaimDeviceHasAdminAccess(nil, "gpu-admin"))
+	require.False(t, preparedClaimDeviceHasAdminAccess(&PreparedClaim{}, "gpu-admin"))
+}
+
+func TestGpuInfosFromPreparedClaim(t *testing.T) {
+	gpuInfo := &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{UUID: "GPU-A"}}
+	vfioParent := &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{UUID: "GPU-B"}}
+
+	state := &DeviceState{
+		perGPUAllocatable: &PerGPUAllocatableDevices{
+			allocatablesMap: map[PCIBusID]AllocatableDevices{
+				"0000:00:00.0": {
+					"gpu-0":  &AllocatableDevice{Gpu: gpuInfo},
+					"vfio-0": &AllocatableDevice{Vfio: &VfioDeviceInfo{parent: vfioParent}},
+					"mig-0":  &AllocatableDevice{MigStatic: &MigDeviceInfo{}},
+				},
+			},
+		},
+	}
+
+	results := []resourceapi.DeviceRequestAllocationResult{
+		{Driver: util.DRADriverName, Device: "gpu-0"},
+		{Driver: util.DRADriverName, Device: "vfio-0"},
+		{Driver: util.DRADriverName, Device: "mig-0"}, // MIG -> unsupported for fabric partition, skipped
+		{Driver: util.DRADriverName, Device: "ghost"}, // not allocatable, skipped
+		{Driver: "other.driver.com", Device: "gpu-0"}, // other driver, skipped
+	}
+
+	got := state.gpuInfosFromPreparedClaim(results)
+
+	require.Equal(t, []*GpuDeviceInfo{gpuInfo, vfioParent}, got)
+}
+
+func TestMatchesDeviceType(t *testing.T) {
+	gpu := &AllocatableDevice{Gpu: &GpuDeviceInfo{}}
+	mig := &AllocatableDevice{MigStatic: &MigDeviceInfo{}}
+	vfio := &AllocatableDevice{Vfio: &VfioDeviceInfo{}}
+
+	require.True(t, matchesDeviceType(&configapi.GpuConfig{}, gpu))
+	require.False(t, matchesDeviceType(&configapi.GpuConfig{}, mig))
+
+	require.True(t, matchesDeviceType(&configapi.MigDeviceConfig{}, mig))
+	require.False(t, matchesDeviceType(&configapi.MigDeviceConfig{}, gpu))
+
+	require.True(t, matchesDeviceType(&configapi.VfioDeviceConfig{}, vfio))
+	require.False(t, matchesDeviceType(&configapi.VfioDeviceConfig{}, gpu))
+
+	// Unrecognized config type never matches.
+	require.False(t, matchesDeviceType(&resourceapi.ResourceClaim{}, gpu))
+}
+
+func TestValidateDeviceConfigType(t *testing.T) {
+	gpu := &AllocatableDevice{Gpu: &GpuDeviceInfo{}}
+	mig := &AllocatableDevice{MigStatic: &MigDeviceInfo{}}
+	vfio := &AllocatableDevice{Vfio: &VfioDeviceInfo{}}
+	result := &resourceapi.DeviceRequestAllocationResult{}
+
+	tests := []struct {
+		name    string
+		config  runtime.Object
+		dev     *AllocatableDevice
+		wantErr bool
+	}{
+		{name: "gpu config on gpu", config: &configapi.GpuConfig{}, dev: gpu},
+		{name: "gpu config on mig", config: &configapi.GpuConfig{}, dev: mig, wantErr: true},
+		{name: "mig config on mig", config: &configapi.MigDeviceConfig{}, dev: mig},
+		{name: "mig config on gpu", config: &configapi.MigDeviceConfig{}, dev: gpu, wantErr: true},
+		{name: "vfio config on vfio", config: &configapi.VfioDeviceConfig{}, dev: vfio},
+		{name: "vfio config on gpu", config: &configapi.VfioDeviceConfig{}, dev: gpu, wantErr: true},
+		// Unknown config types are not type-checked here.
+		{name: "unknown config type", config: &resourceapi.ResourceClaim{}, dev: gpu},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateDeviceConfigType(tc.config, tc.dev, result)
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestNormalizeAndValidateConfig(t *testing.T) {
+	cfg, err := normalizeAndValidateConfig(configapi.DefaultGpuConfig())
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	_, err = normalizeAndValidateConfig(&resourceapi.ResourceClaim{})
+	require.Error(t, err)
+}
+
+// Prepare() checkpoints the claim status whole, so a mixed-driver claim leaves
+// results here that this driver did not place.
+func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
+	enableDynamicMIGForTest(t)
+
+	const ownedMIG = "gpu-0-mig-1g10gb-19-0"
+	parent := &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{UUID: "GPU-0", Minor: 0, PciBusID: "0000:01:00.0"}}
+
+	// The parent lookup is the first NVML call MIG teardown makes, so its count
+	// tells which results got that far. The parent holds one MIG device, on a
+	// placement no case names.
+	newState := func() (*DeviceState, *mockNVMLLibrary) {
+		gpu := &fakeNVMLGPU{
+			migDevice: &fakeNVMLMigDevice{giID: 3},
+			gi:        &fakeNVMLGpuInstance{info: nvml.GpuInstanceInfo{Id: 3, ProfileId: 9, Placement: nvml.GpuInstancePlacement{Start: 4, Size: 3}}},
+		}
+		nvmllib := &mockNVMLLibrary{
+			deviceGetHandleByUUIDFunc: func(string) (nvml.Device, nvml.Return) { return gpu, nvml.SUCCESS },
+		}
+		state := &DeviceState{nvdevlib: &deviceLib{
+			DeviceLib:         nvidia.NewFakeDeviceLib(nil, nil, nvmllib, nil),
+			gpuInfosByUUID:    map[string]*GpuDeviceInfo{parent.UUID: parent},
+			gpuUUIDbyPCIBusID: map[PCIBusID]string{parent.PciBusID: parent.UUID},
+			devhandleByUUID:   map[string]nvml.Device{},
+		}}
+		return state, nvmllib
+	}
+
+	claimWith := func(results ...resourceapi.DeviceRequestAllocationResult) PreparedClaim {
+		return PreparedClaim{Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{Results: results},
+			},
+		}}
+	}
+
+	completedWith := func(results ...resourceapi.DeviceRequestAllocationResult) *Checkpoint {
+		completed := claimWith(results...)
+		completed.CheckpointState = ClaimCheckpointStatePrepareCompleted
+		return &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{"completed": completed}}}
+	}
+
+	// The foreign name is on another GPU and placement, so a guard comparing
+	// placements instead of names could not hold it back on ownedMIG's behalf.
+	t.Run("another driver's MIG-shaped name", func(t *testing.T) {
+		state, nvmllib := newState()
+
+		pc := claimWith(
+			resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: "gpu-1-mig-foreign-14-4"},
+			resourceapi.DeviceRequestAllocationResult{Driver: util.DRADriverName, Device: ownedMIG},
+		)
+
+		err := state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
+			completedWith(resourceapi.DeviceRequestAllocationResult{Driver: util.DRADriverName, Device: ownedMIG}))
+
+		require.NoError(t, err)
+		require.Zero(t, nvmllib.deviceGetHandleByUUIDCalls, "another driver's result must not reach MIG teardown")
+	})
+
+	// Without this the case above would also pass if the loop skipped everything.
+	t.Run("our own MIG name", func(t *testing.T) {
+		state, nvmllib := newState()
+
+		pc := claimWith(resourceapi.DeviceRequestAllocationResult{Driver: util.DRADriverName, Device: ownedMIG})
+
+		err := state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
+			&Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
+
+		require.NoError(t, err)
+		require.Equal(t, 1, nvmllib.deviceGetHandleByUUIDCalls, "our own result must still reach MIG teardown")
+	})
+
+	// The completed claim is what keeps ownedMIG out of the first case.
+	t.Run("our own MIG name held by a completed claim", func(t *testing.T) {
+		state, nvmllib := newState()
+
+		pc := claimWith(resourceapi.DeviceRequestAllocationResult{Driver: util.DRADriverName, Device: ownedMIG})
+
+		err := state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
+			completedWith(resourceapi.DeviceRequestAllocationResult{Driver: util.DRADriverName, Device: ownedMIG}))
+
+		require.NoError(t, err)
+		require.Zero(t, nvmllib.deviceGetHandleByUUIDCalls, "a device held by a completed claim must not reach MIG teardown")
+	})
 }

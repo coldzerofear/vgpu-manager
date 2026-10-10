@@ -1,0 +1,105 @@
+# 【可选】远程 GPU 服务端的网络策略。两个前提，缺一个就不用部署它：
+#
+#   1. 服务端是 hostNetwork: false（按域名寻址那一套）。hostNetwork 的 Pod 不走 Pod 网络，
+#      NetworkPolicy 对它不生效；
+#   2. 命名空间里有默认拒绝策略（default-deny）。没有任何策略选中服务端 Pod 时，本来就是全通的
+#      —— 这时部署本文件是**收紧**而不是放行，请先确认下面的入站集合对你的集群是完整的。
+#
+# 另外：策略由 CNI 执行。Flannel 这类不带策略插件的 CNI 会直接忽略它（部署了也没有任何效果，
+# 更不要因此以为流量被限制住了）。
+#
+# 只声明 Ingress：出站要放行的是 API server（agent 与 monitor 的 informer）与 DNS，地址随集群而变，
+# 猜错会让 agent 静默失去 Pod/Node 事件。需要限制出站时用文件末尾注释里的模板，自己填 ipBlock。
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vgpu-manager-remote-gpu-server
+  namespace: kube-system
+spec:
+  podSelector:
+    matchLabels:
+      app: vgpu-manager-remote-gpu-server
+  policyTypes:
+    - Ingress
+  ingress:
+    # 数据面：远程 Pod 里的 client shim 连 lupine-server。远程 Pod 是任意命名空间里的业务负载，
+    # 所以这里必须放开到全集群；只在固定几个命名空间跑远程负载时，把 namespaceSelector 换成
+    # matchLabels/matchExpressions 收紧。
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 14833      # http（lupine-server 数据面，同端口也答 HTTP/1.x）
+    # 控制面：消费节点的设备插件调 EnsureSession / ReleaseSessions / FetchClientBundle。
+    # 第二条是给"服务者插件用 grpc:// 而不是 unix:// 连本机 agent"的部署方式留的；默认用
+    # unix 套接字时它不产生网络流量，留着无害。
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app: vgpu-manager-remote-consumer-plugin
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app: vgpu-manager-remote-server-plugin
+      ports:
+        - protocol: TCP
+          port: 14834      # grpc（remote-agent）
+    # 指标：把命名空间/标签换成你的监控组件所在处。
+#    - from:
+#        - namespaceSelector:
+#            matchLabels:
+#              kubernetes.io/metadata.name: monitoring
+#      ports:
+#        - protocol: TCP
+#          port: 3456
+    # kubelet 的存活/就绪探针来自**节点**而不是 Pod，NetworkPolicy 里只能用 ipBlock 表达。
+    # Calico / Cilium 默认放行 host → 本机 Pod，所以通常不需要这一条；探针在部署后开始失败
+    # 就把节点网段填进来。同理，如果消费侧的设备插件被改成 hostNetwork 部署，它的源地址也是
+    # 节点 IP，需要在这里放行 14834。
+#    - from:
+#        - ipBlock:
+#            cidr: 10.0.0.0/16     # ← 节点网段
+#      ports:
+#        - protocol: TCP
+#          port: 14833
+#        - protocol: TCP
+#          port: 14834
+#        - protocol: TCP
+#          port: 3456
+#---
+# 【出站模板】命名空间开了 default-deny-egress 时再加上，并把 ipBlock 换成你的 API server 地址。
+# agent 与 monitor 只需要 API server；lupine-server 不主动外连（会话都是客户端连进来的）。
+#apiVersion: networking.k8s.io/v1
+#kind: NetworkPolicy
+#metadata:
+#  name: vgpu-manager-remote-gpu-server-egress
+#  namespace: kube-system
+#spec:
+#  podSelector:
+#    matchLabels:
+#      app: vgpu-manager-remote-gpu-server
+#  policyTypes:
+#    - Egress
+#  egress:
+#    # 集群 DNS
+#    - to:
+#        - namespaceSelector:
+#            matchLabels:
+#              kubernetes.io/metadata.name: kube-system
+#          podSelector:
+#            matchLabels:
+#              k8s-app: kube-dns
+#      ports:
+#        - protocol: UDP
+#          port: 53
+#        - protocol: TCP
+#          port: 53
+#    # API server（端点地址，不是 kubernetes 服务的 ClusterIP —— 策略在 DNAT 之前生效）
+#    - to:
+#        - ipBlock:
+#            cidr: 10.0.0.10/32    # ← 控制面地址
+#      ports:
+#        - protocol: TCP
+#          port: 6443

@@ -17,6 +17,7 @@ limitations under the License.
 package kubeletplugin
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -91,7 +92,7 @@ func TestNRIPartitionInjection_PidsConfigIsReadOnlyAndSourceExists(t *testing.T)
 	contRoot := t.TempDir()
 	manager := &VGPUManager{hostManagerPath: hostRoot, contManagerPath: contRoot}
 
-	inj, err := manager.GetNRIPartitionInjection("claim-nri", "pod", "ns", "pod-uid", "ctr")
+	inj, err := manager.GetNRIPartitionInjection(context.Background(), "claim-nri", "pod", "ns", "pod-uid", "ctr")
 	require.NoError(t, err)
 	require.NotNil(t, inj)
 
@@ -123,12 +124,12 @@ func TestPartitionMounts_StalePidListIsCleared(t *testing.T) {
 	contRoot := t.TempDir()
 	manager := &VGPUManager{hostManagerPath: hostRoot, contManagerPath: contRoot}
 
-	inj, err := manager.GetNRIPartitionInjection("claim-stale", "pod", "ns", "pod-uid", "ctr")
+	inj, err := manager.GetNRIPartitionInjection(context.Background(), "claim-stale", "pod", "ns", "pod-uid", "ctr")
 	require.NoError(t, err)
 
 	require.NoError(t, os.WriteFile(filepath.Join(inj.ConfigDir, registry.PidsConfig), []byte("4242\n"), 0o644))
 
-	inj, err = manager.GetNRIPartitionInjection("claim-stale", "pod", "ns", "pod-uid", "ctr")
+	inj, err = manager.GetNRIPartitionInjection(context.Background(), "claim-stale", "pod", "ns", "pod-uid", "ctr")
 	require.NoError(t, err)
 	content, err := os.ReadFile(filepath.Join(inj.ConfigDir, registry.PidsConfig))
 	require.NoError(t, err)

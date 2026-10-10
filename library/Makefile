@@ -85,12 +85,12 @@ build-in-docker: ## Build the .so in an ephemeral CUDA container (no local toolk
 	    -w /vgpu-library \
 	    -e DEBIAN_FRONTEND=noninteractive \
 	    $(CUDA_BASE_IMAGE) \
-	    sh -c "apt-get -y update && apt-get -y install make cmake $(PYTHON) && sh ./build.sh"
+	    sh -c "apt-get -y update && apt-get -y install make cmake $(PYTHON) && bash ./build.sh"
 
 ##@ Checks (no GPU needed)
 
 .PHONY: check
-check: check-hook-consistency check-struct-layout ## Run every static check.
+check: check-hook-consistency check-struct-layout check-session-paths ## Run every static check.
 
 .PHONY: check-hook-consistency
 check-hook-consistency: ## Verify dispatch table / enum / wrapper alignment + ABI-conflict coverage.
@@ -99,6 +99,10 @@ check-hook-consistency: ## Verify dispatch table / enum / wrapper alignment + AB
 .PHONY: check-struct-layout
 check-struct-layout: ## Compare cuda-subset.h struct layouts vs real <cuda.h> on this host.
 	$(PYTHON) $(LIBRARY_DIR)hack/check_struct_layout.py --cuda-home $(CUDA_HOME)
+
+.PHONY: check-session-paths
+check-session-paths: ## Reject compile-time paths that bypass session_path().
+	$(BASH) $(LIBRARY_DIR)hack/check_session_paths.sh
 
 .PHONY: check-exports
 check-exports: $(SO_FILE) ## Verify the built .so exports both ABI versions of every conflict family.

@@ -48,13 +48,17 @@ type ConfigSpec struct {
 	DeviceMemoryScaling *float64                   `json:"deviceMemoryScaling,omitempty" yaml:"deviceMemoryScaling,omitempty"`
 	DeviceMemoryFactor  *int                       `json:"deviceMemoryFactor,omitempty"  yaml:"deviceMemoryFactor,omitempty"`
 	DeviceCoresScaling  *float64                   `json:"deviceCoresScaling,omitempty"  yaml:"deviceCoresScaling,omitempty"`
-	ExcludeDevices      *IDStore                   `json:"excludeDevices,omitempty"      yaml:"excludeDevices,omitempty"`
-	GDSEnabled          *bool                      `json:"gdsEnabled,omitempty"          yaml:"gdsEnabled,omitempty"`
-	MOFEDEnabled        *bool                      `json:"mofedEnabled,omitempty"        yaml:"mofedEnabled,omitempty"`
-	GDRCopyEnabled      *bool                      `json:"gdrcopyEnabled,omitempty"      yaml:"gdrcopyEnabled,omitempty"`
-	MigStrategy         *string                    `json:"migStrategy,omitempty"         yaml:"migStrategy,omitempty"`
-	OpenKernelModules   *bool                      `json:"openKernelModules,omitempty"   yaml:"openKernelModules,omitempty"`
-	Imex                *imex.Imex                 `json:"imex,omitempty"                yaml:"imex,omitempty"`
+	// DeviceMemoryOverride is the memory size (MiB) to use for devices NVML
+	// cannot report one for -- a GPU sharing one physical pool with the CPU
+	// (unified memory, e.g. GB10). 0 leaves such a device at 0 memory.
+	DeviceMemoryOverride *int       `json:"deviceMemoryOverride,omitempty" yaml:"deviceMemoryOverride,omitempty"`
+	ExcludeDevices       *IDStore   `json:"excludeDevices,omitempty"      yaml:"excludeDevices,omitempty"`
+	GDSEnabled           *bool      `json:"gdsEnabled,omitempty"          yaml:"gdsEnabled,omitempty"`
+	MOFEDEnabled         *bool      `json:"mofedEnabled,omitempty"        yaml:"mofedEnabled,omitempty"`
+	GDRCopyEnabled       *bool      `json:"gdrcopyEnabled,omitempty"      yaml:"gdrcopyEnabled,omitempty"`
+	MigStrategy          *string    `json:"migStrategy,omitempty"         yaml:"migStrategy,omitempty"`
+	OpenKernelModules    *bool      `json:"openKernelModules,omitempty"   yaml:"openKernelModules,omitempty"`
+	Imex                 *imex.Imex `json:"imex,omitempty"                yaml:"imex,omitempty"`
 }
 
 type NodeConfigSpec struct {
@@ -111,6 +115,13 @@ func (nc NodeConfigSpec) GetDeviceMemoryFactor() int {
 		return 0
 	}
 	return *nc.DeviceMemoryFactor
+}
+
+func (nc NodeConfigSpec) GetDeviceMemoryOverride() int {
+	if nc.DeviceMemoryOverride == nil {
+		return 0
+	}
+	return *nc.DeviceMemoryOverride
 }
 
 func (nc NodeConfigSpec) GetDeviceCoresScaling() float64 {
@@ -250,6 +261,17 @@ func (nc NodeConfigSpec) checkNodeConfig() (errs []error) {
 	if nc.GetDeviceMemoryScaling() < 0 {
 		errs = append(errs, fmt.Errorf("deviceMemoryScaling must be any number greater than or equal to 0"))
 	}
+	if nc.GetDeviceMemoryOverride() < 0 {
+		errs = append(errs, fmt.Errorf("deviceMemoryOverride must be any number greater than or equal to 0"))
+	}
+	if nc.GetDeviceMemoryOverride() > 0 && nc.GetDeviceMemoryScaling() > 1 {
+		// The override is only ever used for a GPU that shares one physical pool
+		// with the CPU, where the override is a bookkeeping ceiling and not a
+		// physical one: overselling it hands out memory the host also needs and
+		// takes the node down instead of failing an allocation.
+		errs = append(errs, fmt.Errorf("deviceMemoryScaling must be 1 when deviceMemoryOverride is set: "+
+			"a unified-memory device shares its memory with the host and cannot be oversold"))
+	}
 	if nc.GetDeviceMemoryFactor() <= 0 {
 		errs = append(errs, fmt.Errorf("deviceMemoryFactor must be a positive integer greater than 0"))
 	}
@@ -349,6 +371,9 @@ func loadConfigSpec(nodeConfig *NodeConfigSpec) error {
 		if config.DeviceMemoryScaling != nil {
 			nodeConfig.DeviceMemoryScaling = config.DeviceMemoryScaling
 		}
+		if config.DeviceMemoryOverride != nil {
+			nodeConfig.DeviceMemoryOverride = config.DeviceMemoryOverride
+		}
 		if config.ExcludeDevices != nil {
 			nodeConfig.ExcludeDevices = config.ExcludeDevices
 		}
@@ -357,6 +382,9 @@ func loadConfigSpec(nodeConfig *NodeConfigSpec) error {
 		}
 		if config.MOFEDEnabled != nil {
 			nodeConfig.MOFEDEnabled = config.MOFEDEnabled
+		}
+		if config.GDRCopyEnabled != nil {
+			nodeConfig.GDRCopyEnabled = config.GDRCopyEnabled
 		}
 		if config.MigStrategy != nil {
 			nodeConfig.MigStrategy = config.MigStrategy
@@ -442,6 +470,12 @@ func WithDeviceCoresScalingOption(deviceCoresScaling float64) Option {
 func WithDeviceMemoryFactorOption(deviceMemoryFactor int) Option {
 	return func(spec *NodeConfigSpec) {
 		spec.DeviceMemoryFactor = ptr.To[int](deviceMemoryFactor)
+	}
+}
+
+func WithDeviceMemoryOverrideOption(deviceMemoryOverride int) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.DeviceMemoryOverride = ptr.To[int](deviceMemoryOverride)
 	}
 }
 

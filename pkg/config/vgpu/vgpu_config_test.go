@@ -269,3 +269,54 @@ func Test_WriDriverConfigFile(t *testing.T) {
 		})
 	}
 }
+
+// TestGetDefaultComputePolicy pins the precedence the two arguments carry: the
+// object asking for a policy first, the object holding the node-wide default
+// second, and fixed when neither says anything usable.
+func TestGetDefaultComputePolicy(t *testing.T) {
+	withPolicy := func(policy string) metav1.Object {
+		return &metav1.ObjectMeta{Annotations: map[string]string{util.VGPUComputePolicyAnnotation: policy}}
+	}
+
+	tests := map[string]struct {
+		current metav1.Object
+		fallout metav1.Object
+		want    util.ComputePolicy
+	}{
+		"current wins over the default": {
+			current: withPolicy(string(util.NoneComputePolicy)),
+			fallout: withPolicy(string(util.BalanceComputePolicy)),
+			want:    util.NoneComputePolicy,
+		},
+		"an empty current value falls through to the default": {
+			current: withPolicy(""),
+			fallout: withPolicy(string(util.BalanceComputePolicy)),
+			want:    util.BalanceComputePolicy,
+		},
+		"no annotation at all falls through to the default": {
+			current: &metav1.ObjectMeta{},
+			fallout: withPolicy(string(util.BalanceComputePolicy)),
+			want:    util.BalanceComputePolicy,
+		},
+		"neither carries one": {
+			current: &metav1.ObjectMeta{},
+			fallout: &metav1.ObjectMeta{},
+			want:    util.FixedComputePolicy,
+		},
+		// A caller with nothing to read passes nil, e.g. the DRA path before it
+		// has a node object.
+		"nil objects": {
+			want: util.FixedComputePolicy,
+		},
+		"an unknown value is fixed": {
+			current: withPolicy("round-robin"),
+			want:    util.FixedComputePolicy,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, GetDefaultComputePolicy(tc.current, tc.fallout))
+		})
+	}
+}

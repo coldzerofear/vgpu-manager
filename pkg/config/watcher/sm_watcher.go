@@ -133,18 +133,6 @@ func (d *MmapDeviceUtil) WLock(deviceIndex int) (unlock func() error, err error)
 	}, nil
 }
 
-//func (d *MmapDeviceUtil) Munmap(msync bool) error {
-//	if d == nil {
-//		return fmt.Errorf("DeviceUtil is nil")
-//	}
-//	if msync {
-//		if err := d.mmapFile.Sync(); err != nil {
-//			klog.V(3).ErrorS(err, "failed to sync mmap", "filepath", d.filePath)
-//		}
-//	}
-//	return d.mmapFile.Close()
-//}
-
 func (d *MmapDeviceUtil) Sync() error {
 	return d.mmapFile.Sync()
 }

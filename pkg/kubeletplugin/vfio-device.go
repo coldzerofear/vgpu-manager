@@ -61,15 +61,7 @@ type VfioPciManager struct {
 	inflightDriverSwitches map[string]struct{}
 }
 
-func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib *deviceLib, nvidiaEnabled bool) (*VfioPciManager, error) {
-	iommuEnabled, err := checkIommuEnabled(nvlib.hostRoot)
-	if err != nil {
-		return nil, fmt.Errorf("error checking if IOMMU is enabled: %w", err)
-	}
-	if !iommuEnabled {
-		return nil, fmt.Errorf("IOMMU is not enabled in the kernel")
-	}
-
+func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib *deviceLib, nvidiaEnabled bool) *VfioPciManager {
 	vm := &VfioPciManager{
 		containerDriverRoot:    containerDriverRoot,
 		hostDriverRoot:         hostDriverRoot,
@@ -78,7 +70,7 @@ func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib 
 		inflightDriverSwitches: make(map[string]struct{}),
 	}
 
-	return vm, nil
+	return vm
 }
 
 // Configure binds the GPU to the vfio-pci driver.
@@ -220,11 +212,11 @@ func (vm *VfioPciManager) WaitForGPUFree(ctx context.Context, info *VfioDeviceIn
 					return nil
 				}
 				err = fmt.Errorf("unexpected error checking if gpu device %q is free: %w", info.PciBusID, cmdErr)
-				klog.V(6).Infof("[DEBUG] %s", err.Error())
+				klog.V(6).Infof("%v", err)
 				continue
 			}
 			err = fmt.Errorf("gpu device %q has open fds by process(es): %q", info.PciBusID, string(out))
-			klog.V(6).Infof("[DEBUG] %s", err.Error())
+			klog.V(6).Infof("%v", err)
 		}
 	}
 }

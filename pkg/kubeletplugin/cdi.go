@@ -45,7 +45,7 @@ const (
 	cdiVendor     = "k8s." + util.DRADriverName
 	cdiClaimClass = "claim"
 
-	defaultCDIRoot = "/var/run/cdi"
+	defaultCDIRoot = util.CDIRoot
 	procNvCapsPath = "/proc/driver/nvidia/capabilities"
 )
 
@@ -175,7 +175,7 @@ func (cdi *CDIHandler) GetDeviceSpecsByUUIDCached(uuid string) ([]cdispec.Device
 
 	t0 := time.Now()
 	devs, err := cdi.nvcdiClaim.GetDeviceSpecsByID(uuid)
-	klog.V(1).Infof("GetDeviceSpecsByID() called for %s, t_cdi_get_device_specs_by_id %.3f s", uuid, time.Since(t0).Seconds())
+	klog.V(6).Infof("GetDeviceSpecsByID() called for %s, t_cdi_get_device_specs_by_id %.3f s", uuid, time.Since(t0).Seconds())
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +259,7 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 				// generated further below. One reason for doing things this way
 				// is that `nvcdiDevice.GetDeviceSpecsByID(MIG_UUID)` may yield
 				// an incomplete spec for MIG devices, see
-				// https://sigs.k8s.io/dra-driver-nvidia-gpu/issues/787.
+				// https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/issues/787.
 				uuid = dev.Mig.Concrete.ParentUUID
 				// Get (copy of) cached device spec (is safe to be mutated below,
 				// w/o compromising cache).

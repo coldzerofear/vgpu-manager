@@ -35,6 +35,11 @@ import (
 type PatchMetadata struct {
 	Annotations map[string]*string `json:"annotations,omitempty"`
 	Labels      map[string]*string `json:"labels,omitempty"`
+	// ResourceVersion, when set, makes the patch conditional: the apiserver
+	// rejects it with a Conflict unless the object still has this version
+	// (optimistic concurrency). Left empty, the patch applies unconditionally
+	// and the serialized body does not mention resourceVersion at all.
+	ResourceVersion string `json:"resourceVersion,omitempty"`
 }
 
 func (p PatchMetadata) PatchType() k8stypes.PatchType {
@@ -105,8 +110,11 @@ func PatchPodAllocationSucceed(kubeClient kubernetes.Interface, pod *corev1.Pod)
 		},
 	}
 	if len(pod.Spec.NodeName) > 0 {
-		// Covering to correct certain possible errors
-		patchData.Labels[util.PodMetricsNodeLabel] = &pod.Spec.NodeName
+		// Covering to correct certain possible errors. The metrics come from the
+		// node whose devices the pod uses: a remote pod's GPU server.
+		if nodeName := util.PodPlanSchedulingNode(pod); len(nodeName) > 0 {
+			patchData.Labels[util.PodMetricsNodeLabel] = &nodeName
+		}
 	}
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
 		return PatchPodMetadata(kubeClient, pod, patchData)

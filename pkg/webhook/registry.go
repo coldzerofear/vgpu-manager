@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
+	podhostname "github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/hostname"
 	podmutate "github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/mutate"
 	podvalidate "github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/validate"
 	resvalidate "github.com/coldzerofear/vgpu-manager/pkg/webhook/resourceclaim/validate"
@@ -46,6 +47,7 @@ var (
 func init() {
 	handlerRegistry = make(map[string]NewHandlerFunc)
 	handlerRegistry[podmutate.Path] = podmutate.NewMutateWebhook
+	handlerRegistry[podhostname.Path] = podhostname.NewMutateWebhook
 	handlerRegistry[podvalidate.Path] = podvalidate.NewValidateWebhook
 	handlerRegistry[resvalidate.Path] = resvalidate.NewValidateWebhook
 	handlerRegistry[vcjobmutate.Path] = vcjobmutate.NewMutateWebhook

@@ -27,7 +27,7 @@ if [[ ! -d "$DEST_DIR" ]]; then
     exit 1
 fi
 
-find "$SRC_DIR" -type f | while read -r src_file; do
+find "$SRC_DIR" \( -type f -o -type l \) | while read -r src_file; do
 
     rel_path="${src_file#$SRC_DIR/}"
     dest_file="$DEST_DIR/$rel_path"
@@ -38,26 +38,40 @@ find "$SRC_DIR" -type f | while read -r src_file; do
     fi
 
     do_copy=false
-    if [[ ! -f "$dest_file" ]]; then
-        echo "copy file: $rel_path ($src_file -> $dest_file)"
-        do_copy=true
-    else
-        src_md5=$(md5sum "$src_file" | cut -d' ' -f1)
-        dest_md5=$(md5sum "$dest_file" | cut -d' ' -f1)
 
-        if [[ "$src_md5" != "$dest_md5" ]]; then
-            echo "replace file: $rel_path (MD5: $dest_md5 -> $src_md5)"
+    if [[ -L "$src_file" ]]; then
+        if [[ ! -L "$dest_file" ]] || [[ "$(readlink "$src_file")" != "$(readlink "$dest_file")" ]]; then
+            echo "copy symlink: $rel_path ($(readlink "$src_file"))"
             do_copy=true
         else
-            echo "skipped file: $rel_path (MD5: $dest_md5)"
+            echo "skipped symlink: $rel_path (already points to $(readlink "$dest_file"))"
+        fi
+    else
+        if [[ ! -f "$dest_file" ]]; then
+            echo "copy file: $rel_path ($src_file -> $dest_file)"
+            do_copy=true
+        else
+            src_md5=$(md5sum "$src_file" | cut -d' ' -f1)
+            dest_md5=$(md5sum "$dest_file" | cut -d' ' -f1)
+
+            if [[ "$src_md5" != "$dest_md5" ]]; then
+                echo "replace file: $rel_path (MD5: $dest_md5 -> $src_md5)"
+                do_copy=true
+            else
+                echo "skipped file: $rel_path (MD5: $dest_md5)"
+            fi
         fi
     fi
 
     if [[ "$do_copy" == true ]]; then
-        if cp --help 2>&1 | grep -q -- '--preserve'; then
-            cp -f --preserve=all "$src_file" "$dest_file"
+        if [[ -L "$src_file" ]]; then
+            cp -a "$src_file" "$dest_file"
         else
-            cp -fp "$src_file" "$dest_file"
+            if cp --help 2>&1 | grep -q -- '--preserve'; then
+                cp -f --preserve=all "$src_file" "$dest_file"
+            else
+                cp -fp "$src_file" "$dest_file"
+            fi
         fi
     fi
 done

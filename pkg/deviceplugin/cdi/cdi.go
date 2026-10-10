@@ -37,10 +37,6 @@ import (
 	cdiparser "tags.cncf.io/container-device-interface/pkg/parser"
 )
 
-// cdiRoot is the directory where generated CDI specification files are written.
-// It is expected to be mounted from the host (the standard CDI dynamic dir).
-const cdiRoot = "/var/run/cdi"
-
 // pluginName identifies this device plugin in CDI container annotation keys.
 const pluginName = "vgpu-manager"
 
@@ -52,7 +48,8 @@ type Config struct {
 	// Vendor is the CDI vendor used for qualified device names and spec files.
 	Vendor string
 	// Class is the CDI device class (e.g. "gpu").
-	Class string
+	Class   string
+	CdiRoot string
 	// DeviceIDStrategy controls how devices are named in the spec ("uuid"|"index").
 	DeviceIDStrategy string
 	// AnnotationPrefix is the prefix used for CDI container annotation keys.
@@ -81,6 +78,7 @@ type handler struct {
 	devicelib        device.Interface
 	vendor           string
 	class            string
+	cdiRoot          string
 	annotationPrefix string
 	driverRoot       string
 	devRoot          string
@@ -107,6 +105,9 @@ func New(devicelib *nvidia.DeviceLib, cfg Config) (Handler, error) {
 	}
 	if cfg.Class == "" {
 		cfg.Class = util.CDIClass
+	}
+	if cfg.CdiRoot == "" {
+		cfg.CdiRoot = util.CDIRoot
 	}
 	if cfg.DeviceIDStrategy == "" {
 		cfg.DeviceIDStrategy = util.CDIDeviceIDStrategy
@@ -201,6 +202,7 @@ func New(devicelib *nvidia.DeviceLib, cfg Config) (Handler, error) {
 		cdilibs:          cdilibs,
 		vendor:           cfg.Vendor,
 		class:            cfg.Class,
+		cdiRoot:          cfg.CdiRoot,
 		annotationPrefix: cfg.AnnotationPrefix,
 		driverRoot:       cfg.DriverRoot,
 		devRoot:          cfg.DevRoot,
@@ -269,7 +271,7 @@ func (h *handler) CreateSpecFile() error {
 			return fmt.Errorf("failed to generate CDI spec name: %w", err)
 		}
 		klog.V(3).Infof("Write CDI spec: %s", specName)
-		specPath := filepath.Join(cdiRoot, specName+".json")
+		specPath := filepath.Join(h.cdiRoot, specName+".json")
 		if err = spec.Save(specPath); err != nil {
 			// TODO: This is a brittle check since it relies on exact string matches.
 			// We should pull this functionality into the CDI tooling instead.
