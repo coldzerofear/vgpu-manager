@@ -1,0 +1,61 @@
+# golangci-lint configuration.
+#
+# The linter set is deliberately the default five (errcheck, govet,
+# ineffassign, staticcheck, unused) plus misspell: this repository is being
+# retrofitted with CI, and a wider set would bury the signal under style
+# opinions nobody has agreed to yet.
+#
+# CI runs this with only-new-issues, so the findings that predate it are debt
+# rather than a wall: a pull request is blocked by what it introduces, not by
+# what it inherited. Run `golangci-lint run ./...` locally to see the whole
+# list.
+version: "2"
+
+run:
+  timeout: 15m
+  # The library's Go bindings compile with cgo, and the linters have to see the
+  # same build as the compiler does.
+  build-tags: []
+
+linters:
+  enable:
+    # misspell with no locale: it then flags real typos only. Enforcing US
+    # spelling would rewrite ~50 comment words (serialises, recognised,
+    # behaviour) that are consistent as they are.
+    - misspell
+  settings:
+    errcheck:
+      # Deferred Close on a read-only handle and the metric/log helpers are
+      # checked at the call site where it matters; requiring `_ =` everywhere
+      # would be noise.
+      check-type-assertions: false
+      check-blank: false
+  exclusions:
+    generated: lax
+    rules:
+      # Generated protobuf bindings and the NVIDIA-derived allocator are not
+      # ours to restyle; vendored-in upstream code keeps its upstream shape so
+      # it stays diffable against the source it came from.
+      - path: (pkg/api/.*\.pb\.go|pkg/device/gpuallocator/.*\.go|pkg/device/nvidia/mig-dp\.go)
+        linters:
+          - errcheck
+          - govet
+          - ineffassign
+          - misspell
+          - staticcheck
+          - unused
+      # Table-driven tests shadow and reassign fixtures on purpose.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/coldzerofear/vgpu-manager
+  exclusions:
+    generated: lax

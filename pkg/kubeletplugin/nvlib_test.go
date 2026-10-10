@@ -213,22 +213,22 @@ func TestDeviceLibGetGpuInfoByMinor(t *testing.T) {
 	}{
 		"finds the GPU with the matching minor": {
 			gpuInfosByUUID: map[string]*GpuDeviceInfo{
-				"GPU-1": &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{UUID: "GPU-1", Minor: 1}},
-				"GPU-2": &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{UUID: "GPU-2", Minor: 2}},
+				"GPU-1": {GpuInfo: &nvidia.GpuInfo{UUID: "GPU-1", Minor: 1}},
+				"GPU-2": {GpuInfo: &nvidia.GpuInfo{UUID: "GPU-2", Minor: 2}},
 			},
 			minor:        2,
 			expectedUUID: "GPU-2",
 		},
 		"finds a GPU with minor zero": {
 			gpuInfosByUUID: map[string]*GpuDeviceInfo{
-				"GPU-0": &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{UUID: "GPU-0", Minor: 0}},
+				"GPU-0": {GpuInfo: &nvidia.GpuInfo{UUID: "GPU-0", Minor: 0}},
 			},
 			minor:        0,
 			expectedUUID: "GPU-0",
 		},
 		"returns an error when the minor is not found": {
 			gpuInfosByUUID: map[string]*GpuDeviceInfo{
-				"GPU-1": &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{UUID: "GPU-1", Minor: 1}},
+				"GPU-1": {GpuInfo: &nvidia.GpuInfo{UUID: "GPU-1", Minor: 1}},
 			},
 			minor:         2,
 			expectedError: "gpu info not found for minor 2",

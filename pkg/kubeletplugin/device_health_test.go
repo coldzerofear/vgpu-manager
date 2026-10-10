@@ -674,7 +674,7 @@ func TestResolveDeviceByEventAddressUsesGPUUUIDIndex(t *testing.T) {
 				},
 			},
 		},
-		gpuInfosByUUID: map[string]*GpuDeviceInfo{parent.UUID: &GpuDeviceInfo{GpuInfo: parent}},
+		gpuInfosByUUID: map[string]*GpuDeviceInfo{parent.UUID: {GpuInfo: parent}},
 	}
 
 	got, err := monitor.resolveDeviceByEventAddress(parent.UUID, nil, 2, 3)

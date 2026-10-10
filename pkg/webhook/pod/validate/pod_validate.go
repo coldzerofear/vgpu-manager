@@ -276,7 +276,7 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 				if claimRef.Request != "" {
 					requestKeys = []string{buildVGPURequestKey(claimRef.Name, claimRef.Request)}
 				} else {
-					for request, _ := range requestSet {
+					for request := range requestSet {
 						requestKeys = append(requestKeys, buildVGPURequestKey(claimRef.Name, request))
 					}
 				}
