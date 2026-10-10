@@ -13,16 +13,6 @@
 # One-time setup, outside this file: Settings > Pages > Source "Deploy from a
 # branch", branch gh-pages, / (root).
 #
-# Manual only, because the charts are not ready to be published yet. To publish
-# on every chart change, add this above `workflow_dispatch:`
-#
-#   push:
-#     branches:
-#       - main
-#     paths:
-#       - 'charts/**'
-#       - '.github/workflows/chart-release.yaml'
-#
 # A chart is published only if its exact version is not on the branch already,
 # and an already-published package is never overwritten. The version field in
 # Chart.yaml is therefore what decides whether anything happens - bump it in
@@ -33,6 +23,14 @@
 name: Chart release
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'charts/**'
+      # Changes to the publishing logic itself take effect straight away. A run
+      # that finds nothing new publishes nothing, so this costs a no-op run.
+      - '.github/workflows/chart-release.yaml'
   workflow_dispatch:
 
 permissions:
