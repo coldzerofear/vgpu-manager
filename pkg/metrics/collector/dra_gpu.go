@@ -179,6 +179,27 @@ func (c draGPUCollector) listManagerResourceSlices() ([]*v1.ResourceSlice, error
 	return nodeSlices, nil
 }
 
+// deviceMemoryUsage is how much of a device's memory is in use. NVML answers
+// this for a GPU with its own framebuffer; a unified-memory device (GB10 and
+// other integrated parts) has none to report, and nvidia-smi shows
+// "Memory-Usage: Not Supported" there while still listing per-process memory.
+// So fall back to the sum of the per-process numbers already collected for the
+// process metrics - no extra NVML call.
+//
+// The sum is residency in a pool shared with the CPU and the operator's
+// --device-memory-override is only a bookkeeping ceiling, so the sum can exceed
+// it; it is capped at the ceiling rather than reported above 100% of it.
+func deviceMemoryUsage(gpuInfo *nvidia.GpuInfo, procs procInfoList) uint64 {
+	if !gpuInfo.UnifiedMemory || gpuInfo.Memory.Used > 0 || gpuInfo.Memory.Total == 0 {
+		return gpuInfo.Memory.Used
+	}
+	var used uint64
+	for _, proc := range procs {
+		used += proc.UsedGpuMemory
+	}
+	return min(used, gpuInfo.Memory.Total)
+}
+
 func CollectBasedOnNvml(
 	ch chan<- prometheus.Metric, lib *nvidia.DeviceLib, nodeName, managerRoot string, devTypeMap map[string]string,
 	devIndexMap map[string]int, devHealthMap map[string]int, devHealthLvs map[string][]string,
@@ -250,16 +271,24 @@ func CollectBasedOnNvml(
 			nodeName, deviceIndex, gpuInfo.UUID, gpuInfo.ProductName, gpuInfo.PciBusID,
 			minorNumber, migEnabled, gpuInfo.CudaComputeCapability, numaNode,
 		}
+		// Collected before the memory metrics: on a unified-memory device the
+		// per-process list is the only source of a usage number (see
+		// deviceMemoryUsage), and only a non-MIG device has one.
+		if !gpuInfo.MigEnabled {
+			collectorDeviceProcesses(utilAdapter, deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
+		}
+
+		memoryUsed := deviceMemoryUsage(gpuInfo, devProcInfoMap[gpuInfo.UUID])
 
 		ch <- prometheus.MustNewConstMetric(physicalGPUTotalMemory,
 			prometheus.GaugeValue, float64(gpuInfo.Memory.Total), devHealthLvs[gpuInfo.UUID]...)
 
 		ch <- prometheus.MustNewConstMetric(physicalGPUMemoryUsage,
-			prometheus.GaugeValue, float64(gpuInfo.Memory.Used), devHealthLvs[gpuInfo.UUID]...)
+			prometheus.GaugeValue, float64(memoryUsed), devHealthLvs[gpuInfo.UUID]...)
 
 		memoryUtilRate := int64(0)
 		if gpuInfo.Memory.Total > 0 {
-			memoryUtilRate = int64(float64(gpuInfo.Memory.Used) / float64(gpuInfo.Memory.Total) * 100)
+			memoryUtilRate = min(int64(float64(memoryUsed)/float64(gpuInfo.Memory.Total)*100), 100)
 		}
 		ch <- prometheus.MustNewConstMetric(physicalGPUMemoryUtilRate,
 			prometheus.GaugeValue, float64(memoryUtilRate), devHealthLvs[gpuInfo.UUID]...)
@@ -286,7 +315,6 @@ func CollectBasedOnNvml(
 				prometheus.GaugeValue, float64(deviceUtilRates.Gpu), devHealthLvs[gpuInfo.UUID]...)
 		}
 
-		collectorDeviceProcesses(utilAdapter, deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
 		return nil
 	})
 	if err != nil {

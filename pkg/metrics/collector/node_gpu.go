@@ -598,9 +598,15 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 
 				deviceMemUsage += deviceVMemUsage
 				memoryUtilRate := int64(0)
-				if deviceMemUsage >= deviceMemLimit {
+				switch {
+				case deviceMemLimit == 0:
+					// No quota: a whole-card request, or a device whose size
+					// nothing could report. Nothing to be a percentage of, and
+					// reporting 100% of nothing reads as a container at its
+					// limit.
+				case deviceMemUsage >= deviceMemLimit:
 					memoryUtilRate = 100
-				} else if deviceMemLimit > 0 {
+				default:
 					memoryUtilRate = int64(float64(deviceMemUsage) / float64(deviceMemLimit) * 100)
 				}
 				ch <- prometheus.MustNewConstMetric(containerVGPUMemoryUtilRate,
