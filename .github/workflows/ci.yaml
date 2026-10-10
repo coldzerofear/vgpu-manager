@@ -180,6 +180,10 @@ jobs:
 
   image:
     name: Image build (amd64, no push)
+    # Pull requests only: a push to main goes to image.yaml, which builds both
+    # architectures and publishes them, so repeating an amd64 build here would
+    # just spend another quarter of an hour.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - name: Free disk space
