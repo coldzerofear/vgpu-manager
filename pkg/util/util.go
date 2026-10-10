@@ -933,3 +933,19 @@ func AddContainerRequiredNRIPluginAnnotations(obj metav1.Object, container strin
 	}
 	return nil
 }
+
+// GetEnvIntDefault reads an integer env var, falling back to defaultValue when
+// it is unset or not a number. Flag defaults are built from these, so a typo
+// must not take the process down before flag parsing can report anything.
+func GetEnvIntDefault(env string, defaultValue int) int {
+	value := strings.TrimSpace(os.Getenv(env))
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		klog.Warningf("Invalid integer in env %s=%q, using default %d", env, value, defaultValue)
+		return defaultValue
+	}
+	return parsed
+}

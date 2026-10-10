@@ -90,6 +90,7 @@ func runApp(ctx context.Context, opt *options.Options) (exitCode int) {
 		node.WithDevicePluginPathOption(opt.DevicePluginPath),
 		node.WithDeviceMemoryScalingOption(opt.DeviceMemoryScaling),
 		node.WithDeviceMemoryFactorOption(opt.DeviceMemoryFactor),
+		node.WithDeviceMemoryOverrideOption(opt.DeviceMemoryOverride),
 		node.WithDeviceCoresScalingOption(opt.DeviceCoresScaling),
 		node.WithExcludeDevicesOption(opt.ExcludeDevices),
 		node.WithGDSEnabledOption(opt.GDSEnabled),

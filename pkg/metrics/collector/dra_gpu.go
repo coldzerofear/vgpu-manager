@@ -90,7 +90,8 @@ func NewDRAGPUCollector(
 	featureGate featuregate.FeatureGate, sessionBase, managerRoot string,
 ) (prometheus.Collector, error) {
 	driverRoot := config.GetDriverRoot()
-	deviceLib, err := nvidia.DetectionDeviceLib(driverRoot)
+	deviceLib, err := nvidia.DetectionDeviceLib(driverRoot,
+		nvidia.WithMemoryOverrideMB(uint64(config.GetDeviceMemoryOverride())))
 	if err != nil {
 		return nil, err
 	}

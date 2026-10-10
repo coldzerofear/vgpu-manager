@@ -51,7 +51,7 @@ type deviceLib struct {
 	devhandleByUUID   map[string]nvml.Device
 }
 
-func newDeviceLib(root nvidia.RootPath, hostRoot string) (*deviceLib, error) {
+func newDeviceLib(root nvidia.RootPath, hostRoot string, memoryOverrideMB uint64) (*deviceLib, error) {
 	vfioEnabled := false
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
 		var err error
@@ -61,7 +61,7 @@ func newDeviceLib(root nvidia.RootPath, hostRoot string) (*deviceLib, error) {
 		}
 	}
 
-	devlib, err := nvidia.NewDeviceLib(root)
+	devlib, err := nvidia.NewDeviceLib(root, nvidia.WithMemoryOverrideMB(memoryOverrideMB))
 	if err != nil {
 		return nil, err
 	}

@@ -48,6 +48,7 @@ type Options struct {
 	DeviceSplitCount     int
 	DeviceMemoryScaling  float64
 	DeviceMemoryFactor   int
+	DeviceMemoryOverride int
 	DeviceCoresScaling   float64
 	NodeConfigPath       string
 	ExcludeDevices       string
@@ -160,6 +161,7 @@ func NewOptions() *Options {
 		DeviceCoresScaling:   defaultDeviceCoresScaling,
 		DeviceMemoryScaling:  defaultDeviceMemoryScaling,
 		DeviceMemoryFactor:   defaultDeviceMemoryFactor,
+		DeviceMemoryOverride: util.GetEnvIntDefault("DEVICE_MEMORY_OVERRIDE", 0),
 		DevicePluginPath:     pluginapi.DevicePluginPath,
 		PprofBindPort:        defaultPprofBindPort,
 		MigStrategy:          defaultMigStrategy,
@@ -202,6 +204,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.Float64Var(&o.DeviceCoresScaling, "device-cores-scaling", o.DeviceCoresScaling, "The ratio for NVIDIA device cores scaling.")
 	pflag.Float64Var(&o.DeviceMemoryScaling, "device-memory-scaling", o.DeviceMemoryScaling, "The ratio for NVIDIA device memory scaling.")
 	pflag.IntVar(&o.DeviceMemoryFactor, "device-memory-factor", o.DeviceMemoryFactor, "The default gpu memory block size is 1MB.")
+	pflag.IntVar(&o.DeviceMemoryOverride, "device-memory-override", o.DeviceMemoryOverride, "Memory size (MiB) to use for GPUs that cannot report one, i.e. unified-memory parts such as GB10 where NVML has no device memory to query. 0 disables it. (env: DEVICE_MEMORY_OVERRIDE)")
 	pflag.StringVar(&o.NodeConfigPath, "node-config-path", o.NodeConfigPath, "Specify the node configuration path to apply differentiated configuration to the node.")
 	pflag.StringVar(&o.ExcludeDevices, "exclude-devices", "", "Specify the GPU IDs that need to be excluded. (example: \"0,1,2\" | \"0-2\")")
 	pflag.StringVar(&o.DevicePluginPath, "device-plugin-path", o.DevicePluginPath, "The path for kubelet receive device plugin registration.")

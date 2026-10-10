@@ -74,6 +74,11 @@ type GpuInfo struct {
 	PcieRootAttr          *deviceattribute.DeviceAttribute `json:"-"`
 	NumaNodeAttr          *deviceattribute.DeviceAttribute `json:"-"`
 	AddressingMode        *string                          `json:"-"`
+	// UnifiedMemory reports a GPU with no framebuffer of its own, sharing one
+	// physical pool with the CPU (NVIDIA integrated parts such as GB10). Its
+	// Memory.Total can only come from the configured memory override, and NVML
+	// cannot report its usage either (see resolveDeviceMemory).
+	UnifiedMemory bool `json:"-"`
 }
 
 type GpuDevice struct {
@@ -169,6 +174,9 @@ type DeviceLib struct {
 	DevRoot           string
 	SysfsRoot         string
 	NvidiaSMIPath     string
+	// memoryOverrideMB is the operator-supplied memory size in MiB, used only
+	// for devices NVML cannot report a size for (unified memory). 0 = unset.
+	memoryOverrideMB uint64
 }
 
 func NewFakeDeviceLib(
@@ -183,7 +191,19 @@ func NewFakeDeviceLib(
 	}
 }
 
-func DetectionDeviceLib(root RootPath) (lib *DeviceLib, err error) {
+// Option configures a DeviceLib. Variadic so the existing call sites that
+// need nothing extra stay unchanged.
+type Option func(*DeviceLib)
+
+// WithMemoryOverrideMB supplies the memory size (MiB) to use for devices
+// NVML cannot report one for. 0 leaves them at 0.
+func WithMemoryOverrideMB(mb uint64) Option {
+	return func(l *DeviceLib) {
+		l.memoryOverrideMB = mb
+	}
+}
+
+func DetectionDeviceLib(root RootPath, opts ...Option) (lib *DeviceLib, err error) {
 	defer func() {
 		if err != nil {
 			klog.Errorln("If this is a GPU node, did you configure the NVIDIA Container Toolkit?")
@@ -193,7 +213,7 @@ func DetectionDeviceLib(root RootPath) (lib *DeviceLib, err error) {
 			klog.Errorln("If this is not a GPU node, you should set up a toleration or nodeSelector to only deploy this plugin on GPU nodes")
 		}
 	}()
-	if lib, err = NewDeviceLib(root); err != nil {
+	if lib, err = NewDeviceLib(root, opts...); err != nil {
 		return nil, err
 	}
 	platform := lib.ResolvePlatform()
@@ -209,7 +229,7 @@ func DetectionDeviceLib(root RootPath) (lib *DeviceLib, err error) {
 	return lib, err
 }
 
-func NewDeviceLib(root RootPath) (*DeviceLib, error) {
+func NewDeviceLib(root RootPath, opts ...Option) (*DeviceLib, error) {
 	driverLibraryPath, err := root.GetDriverLibraryPath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to locate driver libraries: %w", err)
@@ -244,6 +264,9 @@ func NewDeviceLib(root RootPath) (*DeviceLib, error) {
 		DevRoot:           root.GetDevRoot(),
 		SysfsRoot:         sysfsRoot,
 		NvidiaSMIPath:     nvidiaSMIPath,
+	}
+	for _, opt := range opts {
+		opt(&d)
 	}
 	return &d, nil
 }
@@ -332,13 +355,12 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		return nil, fmt.Errorf("error checking if MIG mode enabled for device %d: %w", index, err)
 	}
 	memory, ret := device.GetMemoryInfo()
-	if ret != nvml.SUCCESS {
-		if ret == nvml.ERROR_NOT_SUPPORTED {
-			klog.Infof("device %d does not support getting memory info (possible unified memory architecture), skipping", index)
-		} else {
-			return nil, fmt.Errorf("error getting memory info for device %d: %w", index, ret)
-		}
+	memoryTotal, unifiedMemory, err := resolveDeviceMemory(ret, memory.Total, l.memoryOverrideMB)
+	if err != nil {
+		return nil, fmt.Errorf("error getting memory info for device %d: %w", index, err)
 	}
+	logDeviceMemory(index, memoryTotal, unifiedMemory, l.memoryOverrideMB)
+	memory.Total = memoryTotal
 	productName, ret := device.GetName()
 	if ret != nvml.SUCCESS {
 		return nil, fmt.Errorf("error getting product name for device %d: %w", index, ret)
@@ -470,6 +492,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		NumaNodeAttr:          numaNodeAttr,
 		DriverVersion:         driverVersion,
 		AddressingMode:        addressingMode,
+		UnifiedMemory:         unifiedMemory,
 	}
 
 	return gpuInfo, nil

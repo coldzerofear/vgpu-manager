@@ -378,3 +378,43 @@ configs:
 		})
 	}
 }
+
+// baseValidNodeConfig is a spec every other field of which passes validation,
+// so a test can assert on exactly the field it sets.
+func baseValidNodeConfig() NodeConfigSpec {
+	spec := NodeConfigSpec{}
+	for _, opt := range []Option{
+		WithDeviceListStrategyOption([]string{string(util.DeviceListStrategyEnvvar)}),
+		WithDeviceSplitCountOption(10),
+		WithDeviceMemoryScalingOption(1),
+		WithDeviceMemoryFactorOption(1),
+		WithDeviceCoresScalingOption(1),
+		WithDevicePluginPathOption("/var/lib/kubelet/device-plugins"),
+		WithMigStrategyOption(util.MigStrategyNone),
+	} {
+		opt(&spec)
+	}
+	return spec
+}
+
+// The memory override describes hardware NVML cannot describe (a GPU with no
+// framebuffer of its own, e.g. GB10). It is a size in MiB, unset by default.
+func Test_DeviceMemoryOverride(t *testing.T) {
+	var unset NodeConfigSpec
+	assert.Equal(t, 0, unset.GetDeviceMemoryOverride(), "unset must read as disabled")
+
+	spec := NodeConfigSpec{}
+	WithDeviceMemoryOverrideOption(65536)(&spec)
+	assert.Equal(t, 65536, spec.GetDeviceMemoryOverride())
+
+	valid := baseValidNodeConfig()
+	WithDeviceMemoryOverrideOption(65536)(&valid)
+	assert.Empty(t, valid.checkNodeConfig())
+
+	negative := baseValidNodeConfig()
+	WithDeviceMemoryOverrideOption(-1)(&negative)
+	errs := negative.checkNodeConfig()
+	if assert.Len(t, errs, 1) {
+		assert.Contains(t, errs[0].Error(), "deviceMemoryOverride")
+	}
+}

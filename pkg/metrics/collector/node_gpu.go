@@ -71,7 +71,8 @@ func NewNodeGPUCollector(
 	contLister *lister.ContainerLister, managerRoot, sessionBase string, featureGate featuregate.FeatureGate,
 ) (prometheus.Collector, error) {
 	driverRoot := config.GetDriverRoot()
-	deviceLib, err := nvidia.DetectionDeviceLib(driverRoot)
+	deviceLib, err := nvidia.DetectionDeviceLib(driverRoot,
+		nvidia.WithMemoryOverrideMB(uint64(config.GetDeviceMemoryOverride())))
 	if err != nil {
 		return nil, err
 	}

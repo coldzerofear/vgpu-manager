@@ -38,23 +38,24 @@ type Options struct {
 	QPS            float32
 	Burst          int
 
-	Domain              string
-	NodeName            string
-	CGroupDriver        string
-	NodeConfigPath      string
-	ServerBindPort      int
-	PprofBindPort       int
-	EnableRBAC          bool
-	EnableTls           bool
-	TlsKeyFile          string
-	TlsCertFile         string
-	CertRefreshInterval time.Duration
-	MinScrapeInterval   time.Duration
-	StuckGracePeriod    time.Duration
-	ContainerDriverRoot string
-	EnableDRAMonitor    bool
-	RemoteSessionBase   string
-	FeatureGate         featuregate.MutableFeatureGate
+	Domain               string
+	NodeName             string
+	CGroupDriver         string
+	NodeConfigPath       string
+	ServerBindPort       int
+	PprofBindPort        int
+	EnableRBAC           bool
+	EnableTls            bool
+	TlsKeyFile           string
+	TlsCertFile          string
+	CertRefreshInterval  time.Duration
+	MinScrapeInterval    time.Duration
+	StuckGracePeriod     time.Duration
+	ContainerDriverRoot  string
+	DeviceMemoryOverride int
+	EnableDRAMonitor     bool
+	RemoteSessionBase    string
+	FeatureGate          featuregate.MutableFeatureGate
 }
 
 const (
@@ -97,19 +98,20 @@ func NewOptions() *Options {
 		util.RemoteSessionBasePath,
 	)
 	return &Options{
-		QPS:                 defaultQPS,
-		Burst:               defaultBurst,
-		Domain:              util.GetGlobalDomain(),
-		NodeName:            os.Getenv("NODE_NAME"),
-		CGroupDriver:        os.Getenv("CGROUP_DRIVER"),
-		ServerBindPort:      defaultServerBindPort,
-		PprofBindPort:       defaultPprofBindPort,
-		CertRefreshInterval: defaultCertRefreshInterval,
-		MinScrapeInterval:   defaultMinScrapeInterval,
-		StuckGracePeriod:    defaultStuckGracePeriod,
-		RemoteSessionBase:   remoteSessionBasePath,
-		ContainerDriverRoot: util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
-		FeatureGate:         featureGate,
+		QPS:                  defaultQPS,
+		Burst:                defaultBurst,
+		Domain:               util.GetGlobalDomain(),
+		NodeName:             os.Getenv("NODE_NAME"),
+		CGroupDriver:         os.Getenv("CGROUP_DRIVER"),
+		ServerBindPort:       defaultServerBindPort,
+		PprofBindPort:        defaultPprofBindPort,
+		CertRefreshInterval:  defaultCertRefreshInterval,
+		MinScrapeInterval:    defaultMinScrapeInterval,
+		DeviceMemoryOverride: util.GetEnvIntDefault("DEVICE_MEMORY_OVERRIDE", 0),
+		StuckGracePeriod:     defaultStuckGracePeriod,
+		RemoteSessionBase:    remoteSessionBasePath,
+		ContainerDriverRoot:  util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
+		FeatureGate:          featureGate,
 	}
 }
 
@@ -139,6 +141,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.DurationVar(&o.MinScrapeInterval, "min-scrape-interval", o.MinScrapeInterval, "Minimum grasping interval duration. (must be greater than or equal to 1s)")
 	pflag.DurationVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
 	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications.")
+	pflag.IntVar(&o.DeviceMemoryOverride, "device-memory-override", o.DeviceMemoryOverride, "Memory size (MiB) to use for GPUs that cannot report one, i.e. unified-memory parts such as GB10 where NVML has no device memory to query. Must match the device plugin. 0 disables it. (env: DEVICE_MEMORY_OVERRIDE)")
 	pflag.BoolVar(&o.EnableDRAMonitor, "enable-dra-monitor", false, "Enable monitoring metrics for DRA driver paths.")
 	pflag.StringVar(&o.RemoteSessionBase, "remote-session-base", o.RemoteSessionBase, "Remote GPU session directory root shared with remote-agent/lupine-server (used when the RemoteGPUSupport feature gate is enabled).")
 	o.FeatureGate.AddFlag(pflag.CommandLine)

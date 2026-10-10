@@ -254,7 +254,8 @@ func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (*DeviceM
 	}
 	if manager.DeviceLib == nil {
 		driverRoot := config.GetDriverRoot()
-		deviceLib, err := nvidia.DetectionDeviceLib(driverRoot)
+		deviceLib, err := nvidia.DetectionDeviceLib(driverRoot,
+			nvidia.WithMemoryOverrideMB(uint64(config.GetDeviceMemoryOverride())))
 		if err != nil {
 			return nil, err
 		}

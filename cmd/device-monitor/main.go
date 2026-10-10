@@ -93,6 +93,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		node.WithNodeNameOption(opt.NodeName),
 		node.WithConfigPathOption(opt.NodeConfigPath),
 		node.WithCGroupDriverOption(string(cgroupDriver)),
+		node.WithDeviceMemoryOverrideOption(opt.DeviceMemoryOverride),
 		node.WithDriverRootOption(driverRoot))
 	if err != nil {
 		klog.Errorf("Initialization of node config failed: %v", err)

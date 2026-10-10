@@ -196,6 +196,13 @@ func newApp() *cli.App {
 			Destination: &flags.DeviceMemoryRatio,
 			EnvVars:     []string{"DEVICE_MEMORY_RATIO"},
 		},
+		&cli.UintFlag{
+			Name:        "device-memory-override",
+			Usage:       "Memory size (MiB) to use for GPUs that cannot report one, i.e. unified-memory parts such as GB10 where NVML has no device memory to query. 0 disables it.",
+			Value:       0,
+			Destination: &flags.DeviceMemoryOverride,
+			EnvVars:     []string{"DEVICE_MEMORY_OVERRIDE"},
+		},
 		&cli.StringFlag{
 			Name:        "nri-root",
 			Usage:       "Directory (mounted from the host) holding the runtime NRI socket; the in-process NRI plugin dials <nri-root>/nri.sock. Only used when the NRISupport feature gate is enabled.",
