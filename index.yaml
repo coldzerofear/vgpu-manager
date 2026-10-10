@@ -1,0 +1,51 @@
+apiVersion: v1
+entries:
+  vgpu-manager:
+  - apiVersion: v2
+    appVersion: v1.0.0
+    created: "2026-10-10T10:29:52.587739385Z"
+    description: A management component that provides advanced scheduling and allocation
+      of vGPU devices in Kubernetes clusters.
+    digest: e3ac18e34176985f53b4ebd1c8e40af270a7f9c9f4361220af4445904c92bd30
+    keywords:
+    - vgpu
+    - gpu
+    - scheduler
+    - device-plugin
+    kubeVersion: '>= 1.18.0'
+    maintainers:
+    - email: coldzerofear@outlook.com
+      name: coldzerofear
+    name: vgpu-manager
+    sources:
+    - https://github.com/coldzerofear/vgpu-manager
+    type: application
+    urls:
+    - https://coldzerofear.github.io/vgpu-manager/vgpu-manager-1.0.0.tgz
+    version: 1.0.0
+  vgpu-manager-dra-driver:
+  - apiVersion: v2
+    appVersion: v1.0.0
+    created: "2026-10-10T10:29:52.588778552Z"
+    description: A dynamic resource allocation (DRA) driver used for scheduling and
+      allocating vGPU local devices.
+    digest: 2dd033b87828c36bd3fa763e656c2743d8ed38ab51dca83c3ba06d78818e86dd
+    keywords:
+    - vgpu
+    - gpu
+    - dra
+    - dra-driver
+    - kubelet-plugin
+    - dynamic-resource-allocation
+    kubeVersion: '>= 1.32.0-0'
+    maintainers:
+    - email: coldzerofear@outlook.com
+      name: coldzerofear
+    name: vgpu-manager-dra-driver
+    sources:
+    - https://github.com/coldzerofear/vgpu-manager
+    type: application
+    urls:
+    - https://coldzerofear.github.io/vgpu-manager/vgpu-manager-dra-driver-1.0.0.tgz
+    version: 1.0.0
+generated: "2026-10-10T10:29:52.586453254Z"
