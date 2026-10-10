@@ -7,6 +7,8 @@
 #   make docker-build            build the .so inside a CUDA docker image
 #   make build-in-docker         same, but via an ephemeral run (no Dockerfile)
 #   make check                   run all static checks (no GPU needed)
+#   make test-nogpu              run the GPU-less tests (no GPU, no CUDA needed)
+#   make test-sanitize           the same tests under ASan+UBSan
 #   make check-exports           verify ABI-conflict symbol exports on the built .so
 #   make test                    build and run the smoke tests under test/
 #   make help                    show this listing
@@ -21,6 +23,11 @@ DOCKER          ?= docker
 PYTHON          ?= python3
 BASH            ?= bash
 CMAKE_BUILD_TYPE ?= Release
+# Build the CUDA-linked tools under tools/ (needs a CUDA toolkit). OFF lets
+# every GPU-less check run on a plain machine -- what CI does.
+WITH_CUDA_TOOLS ?= ON
+# ASan+UBSan for the GPU-less tests. See VGPU_SANITIZE in CMakeLists.txt.
+SANITIZE        ?= OFF
 J               ?= $(shell nproc 2>/dev/null | awk '{print int(($$0+1)/2)}')
 IMG             ?= coldzerofear/vgpu-control:dev
 CUDA_BASE_IMAGE ?= nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
@@ -54,6 +61,8 @@ configure: ## Run cmake to (re)configure the build tree.
 	@mkdir -p $(BUILD_DIR)
 	cd $(BUILD_DIR) && CUDA_HOME=$(CUDA_HOME) $(CMAKE) \
 	    -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) \
+	    -DVGPU_WITH_CUDA_TOOLS=$(WITH_CUDA_TOOLS) \
+	    -DVGPU_SANITIZE=$(SANITIZE) \
 	    $(CMAKE_EXTRA_ARGS) \
 	    $(LIBRARY_DIR)
 
@@ -120,6 +129,8 @@ build-tests: ## Compile smoke tests under test/.
 	@mkdir -p $(BUILD_DIR)
 	cd $(BUILD_DIR) && CUDA_HOME=$(CUDA_HOME) $(CMAKE) \
 	    -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) \
+	    -DVGPU_WITH_CUDA_TOOLS=$(WITH_CUDA_TOOLS) \
+	    -DVGPU_SANITIZE=$(SANITIZE) \
 	    -DBUILD_TESTS=ON \
 	    -DBUILD_SM_NODE_TESTS=ON \
 	    -DTEST_DEVICE_ID=$(TEST_DEVICE_ID) \
@@ -161,6 +172,13 @@ test-nogpu: build-tests ## Run the GPU-less checks (no GPU, no CUDA needed).
 #
 # Depends on test-nogpu rather than repeating it: two prerequisites here would
 # be eligible to run in parallel under -j, and the tests would race the build.
+# Separate build tree: sanitized and plain objects never share one, so CI can
+# cache both and a human can switch back and forth without a full rebuild.
+.PHONY: test-sanitize
+test-sanitize: ## Run the GPU-less checks under ASan+UBSan (no GPU, no CUDA needed).
+	$(MAKE) -f $(lastword $(MAKEFILE_LIST)) test-nogpu \
+	    SANITIZE=ON WITH_CUDA_TOOLS=$(WITH_CUDA_TOOLS) BUILD_DIR=$(LIBRARY_DIR)build-asan
+
 test: test-nogpu ## Build then run all tests with LD_PRELOAD of libvgpu-control.so.
 	TEST_DEVICE_ID=$(TEST_DEVICE_ID) \
 	    $(BASH) $(BUILD_DIR)/test/run_tests_with_env.sh $(BUILD_DIR)/test $(SO_FILE)

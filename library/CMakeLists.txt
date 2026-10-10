@@ -126,6 +126,22 @@ endif()
 # ---------------------------------------------------------------------------
 option(VGPU_RUN_HOOK_CHECKS "Run hack/check_*.* during build" ON)
 
+# ---------------------------------------------------------------------------
+# Sanitizers (CI: the GPU-less tests run twice, once plain and once here).
+#
+# This library's correctness lives in mmap'd shared regions, file locks,
+# atomics and fork handling, where a wrong offset or a missed bound is a
+# silent memory error rather than a failed assertion. ASan+UBSan turn those
+# into a failing test. Deliberately global rather than per-target: the test
+# executables link the same sources the .so is built from, and sanitizing
+# only one side is how ODR/ABI mismatches appear.
+# ---------------------------------------------------------------------------
+option(VGPU_SANITIZE "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+if(VGPU_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 if(VGPU_RUN_HOOK_CHECKS)
     find_package(Python3 COMPONENTS Interpreter)
 
@@ -316,6 +332,19 @@ if(BUILD_SM_NODE_TESTS)
     # dependency has to be spelled out -- otherwise the test builds, finds no
     # shim to preload, and reports failures that say nothing about the code.
     add_dependencies(test_dlsym_entry dlsym_entry_shim)
+
+    if(VGPU_SANITIZE)
+        # ASan requires its runtime to be first in the initial library list,
+        # and this test exists to put a shim there through LD_PRELOAD -- both
+        # cannot hold at once. What it checks is dlsym/RTLD_NEXT symbol
+        # resolution, not memory safety, so these three targets opt out and
+        # the test keeps running in the sanitizer job instead of being
+        # silently dropped from it.
+        foreach(tgt dlsym_entry_shim dlsym_caller test_dlsym_entry)
+            target_compile_options(${tgt} PRIVATE -fno-sanitize=all)
+            target_link_options(${tgt} PRIVATE -fno-sanitize=all)
+        endforeach()
+    endif()
 endif()
 
 # Writes a session quota region the way the GPU-node agent would, so the
@@ -328,28 +357,36 @@ target_include_directories(vgpu-session-config PRIVATE
 target_link_libraries(vgpu-session-config PRIVATE Threads::Threads)
 
 # find_package(CUDAToolkit REQUIRED)
-add_executable(mem_occupy_tool tools/mem_occupy_tool.c)
-target_include_directories(mem_occupy_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
-target_link_libraries(mem_occupy_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
-target_compile_options(mem_occupy_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
+# The tools below link libcuda / libnvidia-ml and include <cuda.h>, so they
+# need a CUDA toolkit on the build host. Turn them off to build and run the
+# GPU-less checks anywhere (CI does: the hook checks, the nogpu tests and the
+# sanitizer runs need no toolkit, and pulling a CUDA image for them would cost
+# several gigabytes per job).
+option(VGPU_WITH_CUDA_TOOLS "Build the CUDA-linked helper tools under tools/" ON)
+if(VGPU_WITH_CUDA_TOOLS)
+    add_executable(mem_occupy_tool tools/mem_occupy_tool.c)
+    target_include_directories(mem_occupy_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
+    target_link_libraries(mem_occupy_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
+    target_compile_options(mem_occupy_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
-add_executable(mem_managed_tool tools/mem_managed_tool.c)
-target_include_directories(mem_managed_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
-target_link_libraries(mem_managed_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
-target_compile_options(mem_managed_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
+    add_executable(mem_managed_tool tools/mem_managed_tool.c)
+    target_include_directories(mem_managed_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
+    target_link_libraries(mem_managed_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
+    target_compile_options(mem_managed_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
-add_executable(mem_view_tool tools/mem_view_tool.c)
-target_include_directories(mem_view_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
-target_link_libraries(mem_view_tool PRIVATE cuda nvidia-ml ${STATIC_C_LIBRARIES})
-target_compile_options(mem_view_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
+    add_executable(mem_view_tool tools/mem_view_tool.c)
+    target_include_directories(mem_view_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
+    target_link_libraries(mem_view_tool PRIVATE cuda nvidia-ml ${STATIC_C_LIBRARIES})
+    target_compile_options(mem_view_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
-add_executable(virt_mem_tool tools/virt_mem_tool.c)
-target_include_directories(virt_mem_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
-target_link_libraries(virt_mem_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
-target_compile_options(virt_mem_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
+    add_executable(virt_mem_tool tools/virt_mem_tool.c)
+    target_include_directories(virt_mem_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
+    target_link_libraries(virt_mem_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
+    target_compile_options(virt_mem_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
-add_executable(mem_pool_tool tools/mem_pool_tool.c)
-target_include_directories(mem_pool_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
-target_link_libraries(mem_pool_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
-target_compile_options(mem_pool_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
+    add_executable(mem_pool_tool tools/mem_pool_tool.c)
+    target_include_directories(mem_pool_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
+    target_link_libraries(mem_pool_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
+    target_compile_options(mem_pool_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
+endif()

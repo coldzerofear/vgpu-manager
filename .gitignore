@@ -6,5 +6,6 @@ bin/
 build/
 library/build/
 library/build_test/
+library/build-asan/
 library/.vscode/
 library/hack/__pycache__/
