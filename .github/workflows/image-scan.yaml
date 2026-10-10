@@ -1,0 +1,74 @@
+# Vulnerability scan of the published images.
+#
+# Scheduled rather than per-build: the images change when we build them, but the
+# vulnerability database changes daily, and a CVE disclosed after a release is
+# exactly what a build-time scan cannot catch.
+#
+# Results go to the Security tab as code scanning alerts. The scan does not fail
+# the run on findings - a base-image CVE with no fix available would otherwise
+# leave a permanently red schedule that everyone learns to ignore.
+name: Image scan
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to scan'
+        required: false
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: Trivy ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Uploading SARIF to the Security tab.
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - vgpu-manager
+          - vgpu-manager-dra-driver
+    steps:
+      - name: Scan ${{ matrix.image }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ inputs.tag || 'main' }}
+          format: sarif
+          output: trivy-${{ matrix.image }}.sarif
+          severity: 'CRITICAL,HIGH'
+          # Unfixed findings are reported but do not gate: the CUDA base image
+          # carries some that only NVIDIA can fix.
+          ignore-unfixed: false
+      - name: Upload the results
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        with:
+          sarif_file: trivy-${{ matrix.image }}.sarif
+          category: trivy-${{ matrix.image }}
+      - name: Summary
+        # A table in the run summary, so the schedule is readable without
+        # opening the Security tab.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ inputs.tag || 'main' }}
+          format: table
+          severity: 'CRITICAL,HIGH'
+          output: trivy-${{ matrix.image }}.txt
+      - name: Write the summary
+        run: |
+          {
+            echo "### ${{ matrix.image }}:${{ inputs.tag || 'main' }}"
+            echo
+            echo '```'
+            cat "trivy-${{ matrix.image }}.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
