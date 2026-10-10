@@ -11,6 +11,21 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # volcano.sh/apis is a vanity import path, so resolving it means
+      # fetching https://volcano.sh/apis?go-get=1 for the go-import meta tag.
+      # That host answers 403 to dependabot - it answers 200 to everyone else,
+      # and the module itself is fine on proxy.golang.org, so builds are
+      # unaffected - and the failed resolution fails the whole updater run:
+      #
+      #   dependency_file_not_resolvable: go: unrecognized import path
+      #   "volcano.sh/apis": reading https://volcano.sh/apis?go-get=1:
+      #   403 Forbidden
+      #
+      # Nothing on this side can fix that, and a permanently red updater is
+      # one nobody reads. The cost of ignoring it is that this module has to
+      # be bumped by hand.
+      - dependency-name: volcano.sh/apis
     groups:
       # One pull request for the Kubernetes libraries: they are released
       # together and only ever upgrade cleanly together.
