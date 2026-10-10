@@ -19,11 +19,13 @@ package node
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/utils/ptr"
 )
 
@@ -453,5 +455,51 @@ func Test_DeviceMemoryOverrideRefusesOversold(t *testing.T) {
 				assert.Contains(t, errs[0].Error(), "deviceMemoryScaling must be 1")
 			}
 		})
+	}
+}
+
+// loadConfigSpec copies the matched file entry field by field, so a field added
+// to ConfigSpec is silently ignored until someone remembers to copy it too -
+// which is how gdrcopyEnabled and deviceMemoryOverride were both lost. This
+// pins every field: the file below sets all of them, so a new field makes the
+// test fail until it is added here and to loadConfigSpec.
+func Test_loadConfigSpecCopiesEveryField(t *testing.T) {
+	const everyField = `
+version: v1
+configs:
+  - nodeName: demo
+    cgroupDriver: systemd
+    deviceListStrategy: envvar
+    deviceSplitCount: 5
+    deviceMemoryScaling: 1
+    deviceMemoryFactor: 1
+    deviceCoresScaling: 1
+    deviceMemoryOverride: 65536
+    excludeDevices: "0"
+    gdsEnabled: true
+    mofedEnabled: true
+    gdrcopyEnabled: true
+    migStrategy: none
+    openKernelModules: true
+    imex:
+      channelIDs: [0]
+      required: true
+`
+	path := fmt.Sprintf("%s/nodeConfig.yaml", t.TempDir())
+	require.NoError(t, os.WriteFile(path, []byte(everyField), 0o600))
+
+	spec := NodeConfigSpec{ConfigSpec: ConfigSpec{NodeName: "demo"}, nodeConfigPath: path}
+	require.NoError(t, loadConfigSpec(&spec))
+
+	value := reflect.ValueOf(spec.ConfigSpec)
+	for i := range value.NumField() {
+		field := value.Type().Field(i)
+		if field.Type.Kind() != reflect.Ptr {
+			// nodeName is the matcher, not a copied setting.
+			continue
+		}
+		assert.False(t, value.Field(i).IsNil(),
+			"ConfigSpec.%s was not copied out of the config file: set it in this test's "+
+				"config and copy it in loadConfigSpec", field.Name)
 	}
 }

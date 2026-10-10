@@ -383,6 +383,9 @@ func loadConfigSpec(nodeConfig *NodeConfigSpec) error {
 		if config.MOFEDEnabled != nil {
 			nodeConfig.MOFEDEnabled = config.MOFEDEnabled
 		}
+		if config.GDRCopyEnabled != nil {
+			nodeConfig.GDRCopyEnabled = config.GDRCopyEnabled
+		}
 		if config.MigStrategy != nil {
 			nodeConfig.MigStrategy = config.MigStrategy
 		}
