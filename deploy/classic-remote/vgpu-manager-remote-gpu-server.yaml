@@ -97,7 +97,7 @@ spec:
         # 把 libvgpu-control.so / nvidia-cdi-hook 等文件从镜像落盘到节点 hostPath，
         # lupine-server 的 LD_PRELOAD 与 checkpoint provider 都指向它。
         - name: init-install
-          image: coldzerofear/vgpu-manager:latest
+          image: ghcr.io/coldzerofear/vgpu-managerlatest
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
           env:
@@ -115,7 +115,7 @@ spec:
               mountPropagation: Bidirectional
       containers:
         - name: remote-agent
-          image: coldzerofear/vgpu-manager:latest      # ← 需含 remote-agent 二进制
+          image: ghcr.io/coldzerofear/vgpu-managerlatest      # ← 需含 remote-agent 二进制
           imagePullPolicy: IfNotPresent
           command:
             - remote-agent
@@ -288,7 +288,7 @@ spec:
               mountPath: /run/vgpu
               readOnly: true
         - name: device-monitor
-          image: coldzerofear/vgpu-manager:latest
+          image: ghcr.io/coldzerofear/vgpu-managerlatest
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor

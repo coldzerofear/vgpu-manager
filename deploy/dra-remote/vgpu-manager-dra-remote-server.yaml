@@ -100,7 +100,7 @@ spec:
       serviceAccountName: vgpu-manager-dra-remote-server
       initContainers:
         - name: init-container
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
@@ -122,7 +122,7 @@ spec:
               readOnly: true
       containers:
         - name: kubelet-plugin
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c]
           args:

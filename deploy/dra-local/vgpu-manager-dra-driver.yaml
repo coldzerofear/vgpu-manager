@@ -147,7 +147,7 @@ spec:
       hostPID: true
       initContainers:
         - name: init-container
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
@@ -168,7 +168,7 @@ spec:
               mountPath: /driver-root-parent
               readOnly: true
         - name: init-install
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c, /usr/bin/install_files.sh]
           env:
@@ -186,7 +186,7 @@ spec:
               mountPropagation: Bidirectional
       containers:
         - name: kubelet-plugin
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c]
           args:
@@ -315,7 +315,7 @@ spec:
               mountPropagation: HostToContainer
               readOnly: true
         - name: device-monitor
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor

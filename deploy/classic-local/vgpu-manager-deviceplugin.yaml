@@ -126,7 +126,7 @@ spec:
       initContainers:
         - name: install
           command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
-          image: coldzerofear/vgpu-manager:latest
+          image: ghcr.io/coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: HOST_MANAGER_DIR
@@ -143,7 +143,7 @@ spec:
               mountPropagation: Bidirectional
       containers:
         - name: device-plugin
-          image: coldzerofear/vgpu-manager:latest
+          image: ghcr.io/coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-plugin
@@ -230,7 +230,7 @@ spec:
               mountPath: /driver-root
               readOnly: true
         - name: device-monitor
-          image: coldzerofear/vgpu-manager:latest
+          image: ghcr.io/coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor

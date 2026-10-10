@@ -14,9 +14,9 @@
 
 # Image URL to use all building/pushing image targets
 TAG ?= latest
-REGISTRY ?= coldzerofear
+REGISTRY ?= ghcr.io/coldzerofear
 IMG = $(REGISTRY)/vgpu-manager:$(TAG)
-DRA_IMG = $(REGISTRY)/vgpu-manager-dra:$(TAG)
+DRA_IMG = $(REGISTRY)/vgpu-manager-dra-driver:$(TAG)
 BASE_IMG = $(REGISTRY)/vgpu-manager-base:$(TAG)
 VERSION ?= $(shell cat VERSION)
 

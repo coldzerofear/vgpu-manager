@@ -270,7 +270,7 @@ spec:
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 5
-        - image: coldzerofear/vgpu-manager:latest
+        - image: ghcr.io/coldzerofear/vgpu-managerlatest
           imagePullPolicy: IfNotPresent
           name: device-scheduler
           command:

@@ -125,7 +125,7 @@ spec:
               mountPropagation: Bidirectional
       containers:
         - name: kubelet-plugin
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c]
           args:

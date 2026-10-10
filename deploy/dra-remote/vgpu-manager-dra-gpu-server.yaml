@@ -100,7 +100,7 @@ spec:
       serviceAccountName: vgpu-manager-dra-gpu-server
       initContainers:
         - name: init-install
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c, /usr/bin/install_files.sh]
           env:
@@ -118,7 +118,7 @@ spec:
               mountPropagation: Bidirectional
       containers:
         - name: remote-agent
-          image: coldzerofear/vgpu-manager-dra:latest      # ← 需含 remote-agent 二进制
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest      # ← 需含 remote-agent 二进制
           imagePullPolicy: IfNotPresent
           command:
             - remote-agent
@@ -293,7 +293,7 @@ spec:
               mountPath: /run/vgpu
               readOnly: true
         - name: device-monitor
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor

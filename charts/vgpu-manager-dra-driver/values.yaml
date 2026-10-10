@@ -9,7 +9,7 @@ fullnameOverride: ""
 imagePullSecrets: []
 
 # Set up the image repository for the vgpu-manager DRA driver.
-image: coldzerofear/vgpu-manager-dra
+image: ghcr.io/coldzerofear/vgpu-manager-dra-driver
 # Overrides the image tag whose default is the chart appVersion.
 imageTag: ""
 imagePullPolicy: IfNotPresent

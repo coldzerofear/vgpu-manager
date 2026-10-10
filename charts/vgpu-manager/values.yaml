@@ -9,7 +9,7 @@ fullnameOverride: ""
 imagePullSecrets: []
 
 # Set up the image repository for vgpu-manager
-image: coldzerofear/vgpu-manager
+image: ghcr.io/coldzerofear/vgpu-manager
 # Overrides the image tag whose default is the chart appVersion.
 imageTag: ""
 imagePullPolicy: IfNotPresent
