@@ -58,13 +58,52 @@ func (d *VGpuDeviceInfo) CanonicalName() string {
 	return fmt.Sprintf("vgpu-%d", d.Minor)
 }
 
+// memoryCapacityBytes is the memory capacity published for a vGPU: the
+// device size after the oversold ratio, floored to a whole MiB. Requests are
+// MiB-granular, and the API server wants max to be a whole number of steps
+// from min, so a capacity that is not itself a MiB multiple (any ratio that
+// does not divide the device size) would make the published policy invalid.
+func memoryCapacityBytes(total uint64, ratio uint) int64 {
+	scaled := float64(total) * (float64(ratio) / float64(util.HundredCore))
+	if scaled <= 0 {
+		return 0
+	}
+	return int64(scaled) / int64(units.MiB) * int64(units.MiB)
+}
+
+// memoryRequestPolicy is the consumption policy published with the memory
+// capacity. A device with no capacity at all is the unified-memory case:
+// NVML cannot report a size (GB10 and other integrated parts) and no
+// --device-memory-override was configured. The policy still has to be
+// internally consistent or the API server rejects the whole ResourceSlice:
+// min may not exceed the capacity, and neither may min+step -- so a
+// capacity with no room for a MiB step publishes neither a step nor a
+// non-zero minimum.
+func memoryRequestPolicy(totalBytes int64) *resourceapi.CapacityRequestPolicy {
+	if totalBytes < 0 {
+		totalBytes = 0
+	}
+	policy := &resourceapi.CapacityRequestPolicy{
+		Default: resource.NewQuantity(totalBytes, resource.BinarySI),
+		ValidRange: &resourceapi.CapacityRequestPolicyRange{
+			Min: resource.NewQuantity(0, resource.BinarySI),
+			Max: resource.NewQuantity(totalBytes, resource.BinarySI),
+		},
+	}
+	if totalBytes >= 2*int64(units.MiB) {
+		policy.ValidRange.Min = resource.NewQuantity(int64(units.MiB), resource.BinarySI)
+		policy.ValidRange.Step = resource.NewQuantity(int64(units.MiB), resource.BinarySI)
+	}
+	return policy
+}
+
 func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 	attributes := d.GpuDeviceInfo.Attributes()
 	attributes["type"] = resourceapi.DeviceAttribute{
 		StringValue: ptr.To(VGpuDeviceType),
 	}
 
-	totalMemory := float64(d.Memory.Total) * (float64(d.deviceMemoryRatio) / float64(util.HundredCore))
+	totalMemory := memoryCapacityBytes(d.Memory.Total, d.deviceMemoryRatio)
 
 	attributes["coreRatio"] = resourceapi.DeviceAttribute{
 		IntValue: ptr.To[int64](int64(d.deviceCoresRatio)),
@@ -90,15 +129,8 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 				},
 			},
 			MemoryResourceName: {
-				Value: *resource.NewQuantity(int64(totalMemory), resource.BinarySI),
-				RequestPolicy: &resourceapi.CapacityRequestPolicy{
-					Default: resource.NewQuantity(int64(totalMemory), resource.BinarySI),
-					ValidRange: &resourceapi.CapacityRequestPolicyRange{
-						Min:  resource.NewQuantity(int64(units.MiB), resource.BinarySI),
-						Max:  resource.NewQuantity(int64(totalMemory), resource.BinarySI),
-						Step: resource.NewQuantity(int64(units.MiB), resource.BinarySI),
-					},
-				},
+				Value:         *resource.NewQuantity(totalMemory, resource.BinarySI),
+				RequestPolicy: memoryRequestPolicy(totalMemory),
 			},
 		},
 		AllowMultipleAllocations: pointer.Bool(true),
@@ -282,7 +314,7 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 	if deviceMemoryRatio == 0 {
 		deviceMemoryRatio = m.deviceMemoryRatio
 	}
-	totalMemory := float64(device.VGpu.Memory.Total) * (float64(deviceMemoryRatio) / float64(util.HundredCore))
+	totalMemory := memoryCapacityBytes(device.VGpu.Memory.Total, deviceMemoryRatio)
 	totalMemoryMB := uint64(totalMemory) / units.MiB
 
 	oversold := "FALSE"
@@ -321,11 +353,14 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 	if quantity, ok := result.ConsumedCapacity[MemoryResourceName]; ok {
 		if val, ok := quantity.AsInt64(); ok {
 			requestMB := uint64(val / units.MiB)
-			if requestMB < totalMemoryMB {
-				envs = append(envs, fmt.Sprintf("%s_%d=%vm", util.CudaMemoryLimitEnv, idx, requestMB))
-			} else {
+			// 0 would reach the library as CUDA_MEM_LIMIT=0m, which it reads as a
+			// zero-byte quota (every allocation fails), not as "no quota". A
+			// zero-capacity device is exactly the request that lands here.
+			if requestMB == 0 || requestMB >= totalMemoryMB {
 				// unlimited
 				envs = append(envs, fmt.Sprintf("%s_%d=", util.CudaMemoryLimitEnv, idx))
+			} else {
+				envs = append(envs, fmt.Sprintf("%s_%d=%vm", util.CudaMemoryLimitEnv, idx, requestMB))
 			}
 		}
 	}
