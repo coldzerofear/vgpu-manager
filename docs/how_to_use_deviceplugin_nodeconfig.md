@@ -14,6 +14,7 @@ NodeConfig is array, with each array element having the following structural par
 | deviceSplitCount    | int                                        | The maximum number of VGPU that can be split per physical GPU (optional)               |
 | deviceMemoryScaling | float                                      | The ratio for NVIDIA device memory scaling (optional)                                  |
 | deviceMemoryFactor  | int                                        | The default gpu memory block size is 1MB (optional)                                    |
+| deviceMemoryOverride | int                                       | Memory size (MiB) for GPUs that cannot report one, i.e. unified-memory parts such as GB10; 0 disables it, and deviceMemoryScaling must stay 1 when it is set (optional). See [unified memory GPUs](how_to_use_unified_memory_gpu.md). |
 | deviceCoresScaling  | float                                      | The ratio for NVIDIA device cores scaling (optional)                                   |
 | excludeDevices      | string (example: "0,1,2"/"0..2")           | Specify the GPU IDs or UUIDs that need to be excluded (optional)                       |
 | gdsEnabled          | bool                                       | Ensure that containers are started with NVIDIA_GDS=enabled (optional)                  |

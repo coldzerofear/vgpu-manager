@@ -206,6 +206,11 @@ spec:
             - --kube-api-burst=30
             - --device-cores-ratio=100
             - --device-memory-ratio=100
+            # Unified-memory GPUs (GB10 / DGX Spark) cannot report their memory size;
+            # supply it in MiB here, and on the device-monitor container below.
+            # Oversold memory is refused together with it.
+            # See docs/how_to_use_unified_memory_gpu.md
+#            - --device-memory-override=65536
             - -v=6
           env:
             - name: NODE_NAME
@@ -320,6 +325,8 @@ spec:
             - --enable-dra-monitor
             - --server-bind-port=3456
             - --container-driver-root=/driver-root
+            # Must match the kubelet plugin. See docs/how_to_use_unified_memory_gpu.md
+#            - --device-memory-override=65536
             - --min-scrape-interval=1s
             - --feature-gates=SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
             - --v=4

@@ -109,6 +109,7 @@ spec:
             - --device-cores-scaling={{ .Values.devicePlugin.devicePlugin.commands.deviceCoresScaling | default 1.0 }}
             - --device-memory-scaling={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryScaling | default 1.0 }}
             - --device-memory-factor={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor | default 1 }}
+            - --device-memory-override={{ .Values.devicePlugin.deviceMemoryOverride | default 0 }}
             - --pprof-bind-port={{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
             - --cgroup-driver={{ .Values.devicePlugin.cgroupDriver }}
             - --feature-gates={{ include "vgpu-manager.featureGates" .Values.devicePlugin.devicePlugin.commands.featureGates }}
@@ -192,6 +193,7 @@ spec:
             - --server-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
             - --pprof-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
             - --cgroup-driver={{ .Values.devicePlugin.cgroupDriver }}
+            - --device-memory-override={{ .Values.devicePlugin.deviceMemoryOverride | default 0 }}
             - --feature-gates={{ include "vgpu-manager.featureGates" .Values.devicePlugin.deviceMonitor.commands.featureGates }}
             {{- if $nc.yaml }}
             - --node-config-path=/config/nodeConfig.yaml

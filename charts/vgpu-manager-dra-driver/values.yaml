@@ -93,6 +93,12 @@ kubeletPlugin:
   nriRoot: "/var/run/nri"
   # Cgroup driver for the container environment. Empty lets the plugin auto-detect. (supported values: systemd | cgroupfs)
   cgroupDriver: "auto"
+  # Memory size (MiB) to use for GPUs that cannot report one: a unified-memory
+  # part such as GB10 / DGX Spark, where NVML has no device memory to query and
+  # nvidia-smi shows "Memory-Usage: Not Supported". Applies only to those
+  # devices, and deviceMemoryRatio must stay 100 when it is set (a pool shared
+  # with the host cannot be oversold). 0 disables it.
+  deviceMemoryOverride: 0
   # After enabling the ConsumableShares feature, configure consumable shares support. ("disabled", "memory", "unlimited", or a positive integer)
   consumableShares: ""
   # Conditionally mask /proc/driver/nvidia/params to prevent the plugin from recreating

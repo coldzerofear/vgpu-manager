@@ -135,6 +135,7 @@ spec:
             - --nri-plugin-index={{ $plugin.commands.nriPluginIdx | default "00" }}
             - --device-cores-ratio={{ $plugin.commands.coresRatio | default 100 }}
             - --device-memory-ratio={{ $plugin.commands.memoryRatio | default 100 }}
+            - --device-memory-override={{ .Values.kubeletPlugin.deviceMemoryOverride | default 0 }}
             - -v={{ $plugin.commands.logLevel | default 5 }}
           env:
             - name: NODE_NAME
@@ -282,6 +283,7 @@ spec:
             {{- if .Values.kubeletPlugin.cgroupDriver }}
             - --cgroup-driver={{ .Values.kubeletPlugin.cgroupDriver }}
             {{- end }}
+            - --device-memory-override={{ .Values.kubeletPlugin.deviceMemoryOverride | default 0 }}
             {{- if $monitorFeatureGates }}
             - --feature-gates={{ $monitorFeatureGates }}
             {{- end }}

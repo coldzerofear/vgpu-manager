@@ -152,6 +152,11 @@ spec:
             - --device-split-count=10
             - --device-cores-scaling=1
             - --device-memory-scaling=1
+            # Unified-memory GPUs (GB10 / DGX Spark) cannot report their memory size;
+            # supply it in MiB here (or in the node config, which also reaches the
+            # monitor). Oversold memory is refused together with it. See
+            # docs/how_to_use_unified_memory_gpu.md
+#            - --device-memory-override=65536
             - --node-config-path=/config/nodeConfig.json
             - --open-kernel-modules=false
             # CDI device injection (set deviceListStrategy to cdi-annotations and/or
@@ -232,6 +237,9 @@ spec:
             - --domain=nvidia.com
             - --server-bind-port=3456
             - --node-config-path=/config/nodeConfig.json
+            # Must match the device plugin when set there as a flag rather than in
+            # the node config. See docs/how_to_use_unified_memory_gpu.md
+#            - --device-memory-override=65536
             - --container-driver-root=/driver-root
             - --v=4
           ports:
