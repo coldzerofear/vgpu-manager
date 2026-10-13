@@ -15,7 +15,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.0
 	github.com/go-logr/logr v1.4.4
 	github.com/google/uuid v1.6.0
-	github.com/grepplabs/cert-source v0.1.0
+	github.com/grepplabs/cert-source v0.1.1
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/miekg/dns v1.1.73
 	github.com/opencontainers/cgroups v0.1.0
