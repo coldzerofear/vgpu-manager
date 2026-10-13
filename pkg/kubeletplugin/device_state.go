@@ -360,7 +360,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	if exists && preparedClaim.CheckpointState == ClaimCheckpointStatePrepareStarted {
 		klog.V(4).Infof("Claim %s already in PrepareStarted state: attempt rollback before new prepare", ResourceClaimToString(claim))
 		if err := s.rollbackPartiallyPreparedClaim(ctx, claimUID, preparedClaim, checkpoint); err != nil {
-			return nil, fmt.Errorf("rollback failed for partially prepared claim %s failed: %w", PreparedClaimToString(&preparedClaim, claimUID), err)
+			return nil, fmt.Errorf("failed to roll back partially prepared claim %s: %w", PreparedClaimToString(&preparedClaim, claimUID), err)
 		}
 	}
 
@@ -522,7 +522,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 
 	checkpoint, err := s.getCheckpoint(ctx)
 	if err != nil {
-		return false, fmt.Errorf("unable to get checkpoint: %v", err)
+		return false, fmt.Errorf("failed to get checkpoint: %w", err)
 	}
 
 	claimUID := string(claimRef.UID)
@@ -540,12 +540,12 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 	switch pc.CheckpointState {
 	case ClaimCheckpointStatePrepareStarted:
 		if err := s.unpreparePartiallyPreparedClaim(ctx, claimUID, pc, checkpoint); err != nil {
-			return false, fmt.Errorf("unprepare failed for partially prepared claim %s failed: %w", claimRef.String(), err)
+			return false, fmt.Errorf("failed to unprepare partially prepared claim %s: %w", claimRef.String(), err)
 		}
 	case ClaimCheckpointStatePrepareCompleted:
 		taintRemoved, err = s.unprepareDevices(ctx, claimRef, pc.PreparedDevices, checkpoint)
 		if err != nil {
-			return false, fmt.Errorf("unprepare devices failed for claim %s: %w", claimRef.String(), err)
+			return false, fmt.Errorf("failed to unprepare devices for claim %s: %w", claimRef.String(), err)
 		}
 	default:
 		return false, fmt.Errorf("unsupported ClaimCheckpointState: %v", pc.CheckpointState)
@@ -631,7 +631,7 @@ func (s *DeviceState) rollbackPartiallyPreparedClaim(ctx context.Context, cuid s
 
 			err := s.rollbackPartiallyPreparedMIGDevices(ctx, cuid, pc, checkpoint)
 			if err != nil {
-				return fmt.Errorf("rollback partially prepared MIG devices failed: %w", err)
+				return fmt.Errorf("failed to roll back partially prepared MIG devices: %w", err)
 			}
 		}
 	}
@@ -657,7 +657,7 @@ func (s *DeviceState) unpreparePartiallyPreparedClaim(ctx context.Context, cuid 
 
 			err := s.rollbackPartiallyPreparedMIGDevices(ctx, cuid, pc, checkpoint)
 			if err != nil {
-				return fmt.Errorf("rollback partially prepared MIG devices failed: %w", err)
+				return fmt.Errorf("failed to roll back partially prepared MIG devices: %w", err)
 			}
 		}
 	}
@@ -670,7 +670,7 @@ func (s *DeviceState) unpreparePartiallyPreparedClaim(ctx context.Context, cuid 
 
 			err := s.rollbackPartiallyPreparedVFIODevices(ctx, vfioDevices)
 			if err != nil {
-				return fmt.Errorf("rollback partially prepared VFIO devices failed: %w", err)
+				return fmt.Errorf("failed to roll back partially prepared VFIO devices: %w", err)
 			}
 		}
 	}
@@ -776,7 +776,7 @@ func (s *DeviceState) rollbackPartiallyPreparedMIGDevices(ctx context.Context, c
 
 		klog.V(1).Infof("Device %s is a MIG device, DynamicMIG mode: deleteMigDevIfExistsAndNotUsedByCompletedClaim()", devname)
 		if err := s.deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms, devname, completedClaims); err != nil {
-			return fmt.Errorf("deleteMigDevIfExistsAndNotUsedByCompletedClaim failed: %w", err)
+			return fmt.Errorf("failed to delete unused MIG device %s (deleteMigDevIfExistsAndNotUsedByCompletedClaim): %w", devname, err)
 		}
 	}
 
@@ -1716,7 +1716,7 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 	}
 	partitionID, err := s.resolveFabricPartition(gpus)
 	if err != nil {
-		return fmt.Errorf("%v; refusing partition activation", err)
+		return fmt.Errorf("failed to resolve fabric partition activation: %w", err)
 	}
 	// ActivatePartition is idempotent: a retried Prepare (e.g. after a later
 	// step failed) that hits an already-active partition is a no-op rather than
@@ -2114,7 +2114,7 @@ func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpec
 	klog.V(1).Infof("Device '%s' is not in use by any completely prepared claim, find corresponding actual MIG device", dname)
 	mlt, err := s.nvdevlib.FindMigDevBySpec(ms)
 	if err != nil {
-		return fmt.Errorf("FindMigDevBySpecTuple() failed for %s: %s", dname, err)
+		return fmt.Errorf("failed to find MIG device %s (FindMigDevBySpec): %w", dname, err)
 	}
 
 	if mlt == nil {
@@ -2124,7 +2124,7 @@ func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpec
 
 	klog.V(1).Infof("MIG device corresponding to name %s found with UUID %s -- attempt to tear down", dname, mlt.MigUUID)
 	if err := s.nvdevlib.deleteMigDevice(mlt); err != nil {
-		return fmt.Errorf("MIG device deletion failed: %w", err)
+		return fmt.Errorf("failed to delete MIG device %s (deleteMigDevice): %w", dname, err)
 	}
 
 	return nil

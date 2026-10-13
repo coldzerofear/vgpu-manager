@@ -1030,7 +1030,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	// INVALID_ARGUMENT, NO_PERMISSION: for those three, it's worth erroring out
 	// here (to be retried later).
 	if cires != nvml.SUCCESS && cires != nvml.ERROR_NOT_FOUND {
-		return fmt.Errorf("error getting Compute instance handle for MIG device %s: %w", migStr, ret)
+		return fmt.Errorf("error getting Compute instance handle for MIG device %s: %w", migStr, cires)
 	}
 
 	// A previous, partial cleanup may actually have already deleted that. Seen
