@@ -50,7 +50,7 @@ require (
 	sigs.k8s.io/dra-driver-nvidia-gpu v0.5.1
 	tags.cncf.io/container-device-interface v1.1.1
 	tags.cncf.io/container-device-interface/specs-go v1.1.1
-	volcano.sh/apis v1.15.1
+	volcano.sh/apis v1.15.3
 )
 
 require (
@@ -156,7 +156,7 @@ require (
 )
 
 replace (
-	github.com/NVIDIA/go-nvml => github.com/coldzerofear/go-nvml v0.0.0-20260711104112-31ab639bbf44
+	github.com/NVIDIA/go-nvml => github.com/coldzerofear/go-nvml v0.0.0-20261013031909-02fb7f4f2c54
 	k8s.io/cloud-provider => k8s.io/cloud-provider v0.37.0
 	k8s.io/cluster-bootstrap => k8s.io/cluster-bootstrap v0.37.0
 	k8s.io/cri-streaming => k8s.io/cri-streaming v0.37.0
