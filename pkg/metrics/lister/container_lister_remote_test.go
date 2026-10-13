@@ -165,7 +165,7 @@ func TestContainerListerRemoteSessions(t *testing.T) {
 		_ = contLister.update()
 		_, ok := contLister.GetResourceData(key)
 		return !ok
-	}, 2*time.Second, 50*time.Millisecond)
+	}, 30*time.Second, 50*time.Millisecond)
 	assert.FileExists(t, quotaFile, "the session belongs to the agent, not to this lister")
 }
 

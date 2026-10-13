@@ -124,7 +124,7 @@ jobs:
             REGISTRY=${{ env.REGISTRY }} \
             TAG=${{ needs.meta.outputs.version }}-${{ matrix.arch }} \
             GOPROXY=https://proxy.golang.org,direct \
-            APT_MIRROR=
+            DNF_MIRROR=
           df -h /
       - name: Build the classic image
         run: |

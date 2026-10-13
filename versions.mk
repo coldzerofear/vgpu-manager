@@ -28,7 +28,7 @@ VERSION ?= $(shell cat VERSION)
 TARGETOS   ?= $(GOOS)
 TARGETARCH ?= $(shell go env GOARCH 2>/dev/null || dpkg --print-architecture 2>/dev/null || echo amd64)
 
-CUDA_BASE_IMAGE ?= nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
+CUDA_BASE_IMAGE ?= nvidia/cuda:13.4.2-devel-rockylinux8
 
 # Git info
 GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "Not a git repo")

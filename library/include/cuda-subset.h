@@ -1387,6 +1387,12 @@ typedef CUDA_HOST_NODE_PARAMS_v1 CUDA_HOST_NODE_PARAMS;
 typedef struct CUDA_HOST_NODE_PARAMS_v2_st {
     CUhostFn fn;    /**< The function to call when the node executes */
     void* userData; /**< Argument to pass to the function */
+    unsigned int syncMode;  /**< The sync mode to use for the host task */
+    // preferred context to use for the host task
+    union {
+        CUcontext ctx;
+        CUgreenCtx gCtx;
+    };
 } CUDA_HOST_NODE_PARAMS_v2;
 
 /**
@@ -1525,6 +1531,12 @@ typedef struct CUDA_EVENT_WAIT_NODE_PARAMS_st {
  */
 typedef struct CUDA_EVENT_RECORD_NODE_PARAMS_st {
     CUevent event; /**< The event to record when the node executes */
+
+    // preferred context to use for the event record
+    union {
+        CUcontext ctx;
+        CUgreenCtx gCtx;
+    };
 } CUDA_EVENT_RECORD_NODE_PARAMS;
 
 typedef struct CUDA_BATCH_MEM_OP_NODE_PARAMS_v1_st {
@@ -3033,6 +3045,11 @@ typedef struct CUDA_EXT_SEM_SIGNAL_NODE_PARAMS_v2_st {
     CUexternalSemaphore* extSemArray;                         /**< Array of external semaphore handles. */
     const CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS* paramsArray; /**< Array of external semaphore signal parameters. */
     unsigned int numExtSems;                                  /**< Number of handles and parameters supplied in extSemArray and paramsArray. */
+    // preferred context to use for the semaphore signal task
+    union {
+        CUcontext ctx;
+        CUgreenCtx gCtx;
+    };
 } CUDA_EXT_SEM_SIGNAL_NODE_PARAMS_v2;
 
 /**
@@ -3094,6 +3111,11 @@ typedef struct CUDA_EXT_SEM_WAIT_NODE_PARAMS_v2_st {
     CUexternalSemaphore* extSemArray;                       /**< Array of external semaphore handles. */
     const CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS* paramsArray; /**< Array of external semaphore wait parameters. */
     unsigned int numExtSems;                                /**< Number of handles and parameters supplied in extSemArray and paramsArray. */
+    // preferred context to use for the semaphore wait task
+    union {
+        CUcontext ctx;
+        CUgreenCtx gCtx;
+    };
 } CUDA_EXT_SEM_WAIT_NODE_PARAMS_v2;
 
 /**

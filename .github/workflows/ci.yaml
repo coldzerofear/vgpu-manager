@@ -234,7 +234,7 @@ jobs:
         run: |
           make docker-build-all \
             GOPROXY=https://proxy.golang.org,direct \
-            APT_MIRROR= \
+            DNF_MIRROR= \
             TAG=ci-${{ github.run_id }}
       - name: Image sizes
         run: docker images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}' | grep vgpu-manager

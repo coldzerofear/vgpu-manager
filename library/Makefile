@@ -20,7 +20,7 @@ BUILD_DIR       ?= $(LIBRARY_DIR)build
 CUDA_HOME       ?= /usr/local/cuda
 CMAKE           ?= cmake
 DOCKER          ?= docker
-PYTHON          ?= python3
+PYTHON          ?= python3.12
 BASH            ?= bash
 CMAKE_BUILD_TYPE ?= Release
 # Build the CUDA-linked tools under tools/ (needs a CUDA toolkit). OFF lets
@@ -29,9 +29,9 @@ WITH_CUDA_TOOLS ?= ON
 # ASan+UBSan for the GPU-less tests. See VGPU_SANITIZE in CMakeLists.txt.
 SANITIZE        ?= OFF
 J               ?= $(shell nproc 2>/dev/null | awk '{print int(($$0+1)/2)}')
-IMG             ?= coldzerofear/vgpu-control:dev
-CUDA_BASE_IMAGE ?= nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
-APT_MIRROR      ?= https://mirrors.aliyun.com
+IMG             ?= ghcr.io/coldzerofear/vgpu-control:dev
+CUDA_BASE_IMAGE ?= nvidia/cuda:13.4.2-devel-rockylinux8
+DNF_MIRROR      ?= https://mirrors.ustc.edu.cn/rocky
 TEST_DEVICE_ID  ?= 0
 TEST_TIMEOUT    ?= 120
 
@@ -85,16 +85,16 @@ clean: ## Remove the build tree.
 
 .PHONY: docker-build
 docker-build: ## Build libvgpu-control.so inside $(IMG) using the local Dockerfile.
-	$(DOCKER) build --build-arg NVIDIA_CUDA_IMAGE=$(CUDA_BASE_IMAGE) --build-arg APT_MIRROR=$(APT_MIRROR) -t $(IMG) $(LIBRARY_DIR)
+	$(DOCKER) build --build-arg NVIDIA_CUDA_IMAGE=$(CUDA_BASE_IMAGE) --build-arg DNF_MIRROR=$(DNF_MIRROR) -t $(IMG) $(LIBRARY_DIR)
 
 .PHONY: build-in-docker
 build-in-docker: ## Build the .so in an ephemeral CUDA container (no local toolkit required).
-	$(DOCKER) run -i --rm \
-	    -v $(LIBRARY_DIR):/vgpu-library \
-	    -w /vgpu-library \
-	    -e DEBIAN_FRONTEND=noninteractive \
-	    $(CUDA_BASE_IMAGE) \
-	    sh -c "apt-get -y update && apt-get -y install make cmake $(PYTHON) && bash ./build.sh"
+	$(DOCKER) run -i --rm -v $(LIBRARY_DIR):/vgpu-library -w /vgpu-library -e DEBIAN_FRONTEND=noninteractive $(CUDA_BASE_IMAGE) sh -c '\
+		if [ -n "$(DNF_MIRROR)" ]; then \
+	      sed -e '\''s|^mirrorlist=|#mirrorlist=|g'\'' \
+	          -e '\''s|^#baseurl=http://dl\.rockylinux\.org/\$$contentdir|baseurl=$(DNF_MIRROR)|g'\'' \
+	          -i.bak /etc/yum.repos.d/Rocky-*.repo; \
+	    fi && dnf clean all && dnf makecache && dnf install -y make cmake gcc-c++ $(PYTHON) && bash ./build.sh'
 
 ##@ Checks (no GPU needed)
 

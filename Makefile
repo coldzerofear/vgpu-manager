@@ -19,7 +19,7 @@
 CONTAINER_TOOL ?= docker
 GOOS ?= linux
 GOPROXY ?= https://goproxy.cn,direct
-APT_MIRROR ?= https://mirrors.aliyun.com
+DNF_MIRROR ?= https://mirrors.ustc.edu.cn/rocky
 
 include $(CURDIR)/versions.mk
 
@@ -134,7 +134,7 @@ docker-build-base: ## Build base docker image.
       --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
       --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
       --build-arg BUILD_NVVERSION="${NVVERSION}" --build-arg GOLANG_VERSION="${GOLANG_VERSION}" \
-      --build-arg APT_MIRROR="${APT_MIRROR}" --build-arg GOPROXY="${GOPROXY}" \
+      --build-arg DNF_MIRROR="${DNF_MIRROR}" --build-arg GOPROXY="${GOPROXY}" \
       --build-arg TARGETOS="${TARGETOS}" --build-arg TARGETARCH="${TARGETARCH}" -t "${BASE_IMG}" -f Dockerfile.base .
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
@@ -196,7 +196,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx create --name vgpu-manager-builder
 	$(CONTAINER_TOOL) buildx use vgpu-manager-builder
 	- $(CONTAINER_TOOL) buildx build --platform=$(PLATFORMS) --build-arg NVIDIA_CUDA_IMAGE="${CUDA_BASE_IMAGE}" --build-arg GIT_BRANCH="${GIT_BRANCH}" \
-      --build-arg APT_MIRROR="${APT_MIRROR}" --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
+      --build-arg DNF_MIRROR="${DNF_MIRROR}" --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
 	  --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" --build-arg GOLANG_VERSION="${GOLANG_VERSION}" \
 	  --build-arg GOPROXY="${GOPROXY}" --tag "${BASE_IMG}" -f Dockerfile.base.cross .
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" \

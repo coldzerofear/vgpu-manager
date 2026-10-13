@@ -12,16 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG NVIDIA_CUDA_IMAGE=nvidia/cuda:12.4.1-devel-ubuntu20.04
+ARG NVIDIA_CUDA_IMAGE=nvidia/cuda:13.4.2-devel-rockylinux8
 
 FROM $NVIDIA_CUDA_IMAGE
 
-ARG APT_MIRROR
+ARG DNF_MIRROR
 
 RUN echo "Asia/Shanghai" > /etc/timezone && \
     ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
-RUN if [ -n "$APT_MIRROR" ]; then sed -i "s@http://archive.ubuntu.com@${APT_MIRROR}@g" /etc/apt/sources.list ; fi && \
-    apt-get -y update && apt-get -y install make cmake && rm -rf /var/lib/apt/lists/*
+
+RUN if [ -n "$DNF_MIRROR" ]; then \
+      sed -e 's|^mirrorlist=|#mirrorlist=|g' \
+          -e "s|^#baseurl=http://dl\.rockylinux\.org/\$contentdir|baseurl=${DNF_MIRROR}|g" \
+          -i.bak /etc/yum.repos.d/Rocky-*.repo; \
+    fi && dnf makecache && dnf install -y make cmake gcc-c++ && dnf clean all
 
 WORKDIR /vgpu-controller
 
