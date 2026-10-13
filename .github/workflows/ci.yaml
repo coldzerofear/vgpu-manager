@@ -60,6 +60,14 @@ jobs:
           # The findings that predate CI are debt, not a wall: a pull request is
           # blocked by what it introduces. See the comment in .golangci.yaml.
           only-new-issues: true
+          # The action's own schema check downloads the schema from
+          # golangci-lint.run and fails the job outright when that host does
+          # not answer. The step below does the same check without making a
+          # network blip a build failure.
+          verify: false
+      - name: Verify the lint configuration
+        # After the step above, which is what installed the binary.
+        run: hack/verify-lint-config.sh
 
   test:
     name: Go test

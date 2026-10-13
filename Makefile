@@ -92,6 +92,7 @@ ACTIONLINT_VERSION    ?= v1.7.12
 lint: ## Run golangci-lint (installs it into GOBIN if missing).
 	@command -v golangci-lint >/dev/null 2>&1 || \
 	    go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	hack/verify-lint-config.sh
 	golangci-lint run --timeout 15m ./...
 
 .PHONY: lint-actions
