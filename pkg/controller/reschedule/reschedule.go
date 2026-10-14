@@ -78,9 +78,14 @@ func (a *eventRecorderAdapter) AnnotatedEventf(regarding runtime.Object, _ runti
 
 func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfigSpec) (controller.Controller, error) {
 	var eventRecorder recorder.EventRecorder
+	// The manager's own recorder writes to events.k8s.io. A cluster that does
+	// not serve that group has to be given the core/v1 recorder instead, which
+	// is the deprecated one: being deprecated is what makes it the fallback,
+	// not a reason to avoid it here.
 	if _, err := manager.GetClient().RESTMapper().ResourceFor(eventsv1.SchemeGroupVersion.WithResource("events")); err == nil {
 		eventRecorder = manager.GetEventRecorder("re-schedule")
 	} else {
+		//nolint:staticcheck // SA1019: the legacy recorder is the point of this branch.
 		eventRecorder = NewEventRecorderAdapter(manager.GetEventRecorderFor("re-schedule"))
 	}
 	recovery, err := newRecoveryController(manager.GetClient(), eventRecorder)
