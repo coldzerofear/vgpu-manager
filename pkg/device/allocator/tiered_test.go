@@ -827,7 +827,7 @@ func Test_LinkDowngrade_IsReported(t *testing.T) {
 				cap.warnings = append(cap.warnings, reason+": "+msg)
 			}
 		}}
-		_, rsn, err := NewAllocator(n, rec).Allocate(BuildAllocationRequest(linkPod(need, false, "")))
+		_, rsn, err := NewAllocator(n, WithEventRecorder(rec)).Allocate(BuildAllocationRequest(linkPod(need, false, "")))
 		require.NoError(t, err)
 		require.Nil(t, rsn, "non-strict must still place the pod")
 		return cap

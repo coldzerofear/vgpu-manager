@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
@@ -44,7 +44,7 @@ func Test_Bind_RemotePod(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			k8sClient := fake.NewClientset()
-			bindPredicate, err := New(k8sClient, record.NewFakeRecorder(16), nil, true)
+			bindPredicate, err := New(k8sClient, events.NewFakeRecorder(16), nil, true)
 			assert.NoError(t, err)
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{

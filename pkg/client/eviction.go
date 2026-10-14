@@ -33,7 +33,7 @@ import (
 const (
 	// Reason is the reason reported back in status.
 	Reason = "Evict"
-	Action = "Evicted"
+	Action = "Evicting"
 )
 
 type Eviction interface {
@@ -107,7 +107,7 @@ func (e *eviction) evictPod(ctx context.Context, gracePeriodSeconds *int64, pod 
 	}
 }
 
-func (e *eviction) Evict(ctx context.Context, pod *corev1.Pod, eventRecorder events.EventRecorder, gracePeriodSeconds int64, evictMsg string) bool {
+func (e *eviction) Evict(ctx context.Context, pod *corev1.Pod, recorder events.EventRecorder, gracePeriodSeconds int64, evictMsg string) bool {
 	if types.IsCriticalPod(pod) {
 		klog.ErrorS(nil, "Cannot evict a critical pod", "pod", klog.KObj(pod))
 		return false
@@ -117,8 +117,9 @@ func (e *eviction) Evict(ctx context.Context, pod *corev1.Pod, eventRecorder eve
 		klog.ErrorS(err, "Failed to evict pod", "pod", klog.KObj(pod))
 		return false
 	}
-
-	eventRecorder.Eventf(pod, nil, corev1.EventTypeWarning, Reason, Action, evictMsg)
+	if recorder != nil {
+		recorder.Eventf(pod, nil, corev1.EventTypeWarning, Reason, Action, "%s", evictMsg)
+	}
 	klog.InfoS("Successfully evicted pod", "pod", klog.KObj(pod))
 	return true
 }

@@ -39,6 +39,7 @@ rules:
     resources:
       - resourceclaims/status
     verbs:
+      - get
       - update
   - apiGroups:
       - ""

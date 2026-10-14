@@ -41,7 +41,7 @@ rules:
   - apiGroups: [""]
     resources: ["pods/eviction"]
     verbs: ["create"]
-  - apiGroups: [""]
+  - apiGroups: ["","events.k8s.io"]
     resources: ["events"]
     verbs: ["create","patch","update"]
 ---

@@ -38,7 +38,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
@@ -281,13 +281,9 @@ func runFilterPerfScenario(t *testing.T, nodeCount, podCount int, pv perfPolicy)
 
 	k8sClient := fake.NewClientset()
 	factory := informers.NewSharedInformerFactory(k8sClient, 0)
-	broadcaster := record.NewBroadcaster()
-	recorder := broadcaster.NewRecorder(nil, corev1.EventSource{Component: "perf"})
-	defer broadcaster.Shutdown()
-
 	// serialFilterNode=true to match the production-like setting the
 	// user wanted us to measure under.
-	fp, err := New(k8sClient, factory, recorder, true, true)
+	fp, err := New(k8sClient, factory, events.NewFakeRecorder(10), true, true)
 	if err != nil {
 		t.Fatalf("filter New: %v", err)
 	}

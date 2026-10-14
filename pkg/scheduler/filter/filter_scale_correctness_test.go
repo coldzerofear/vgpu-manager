@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
@@ -42,9 +42,11 @@ func driveFilter(t *testing.T, nodeCount, podCount int, pv perfPolicy) (
 	t.Helper()
 	k8sClient := fake.NewClientset()
 	factory := informers.NewSharedInformerFactory(k8sClient, 0)
-	broadcaster := record.NewBroadcaster()
+
+	broadcaster := events.NewEventBroadcasterAdapter(k8sClient)
 	defer broadcaster.Shutdown()
-	recorder := broadcaster.NewRecorder(nil, corev1.EventSource{Component: "scale-ovc"})
+	recorder := broadcaster.NewRecorder("scale-ovc")
+
 	fp, err := New(k8sClient, factory, recorder, true, true)
 	require.NoError(t, err)
 

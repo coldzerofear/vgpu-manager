@@ -32,7 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
@@ -74,7 +74,7 @@ func remotePod(name string, number, cores, memory int) *corev1.Pod {
 type remoteFixture struct {
 	filter    *gpuFilter
 	client    *fake.Clientset
-	recorder  *record.FakeRecorder
+	recorder  *events.FakeRecorder
 	consumers []corev1.Node
 }
 
@@ -92,7 +92,7 @@ func newRemoteFixture(t *testing.T, servers []corev1.Node, pods ...*corev1.Pod) 
 		require.NoError(t, err)
 	}
 	factory := informers.NewSharedInformerFactory(k8sClient, 0)
-	recorder := record.NewFakeRecorder(64)
+	recorder := events.NewFakeRecorder(64)
 	filterPredicate, err := New(k8sClient, factory, recorder, true, true)
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())

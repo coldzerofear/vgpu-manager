@@ -33,16 +33,10 @@ rules:
   # 远程 Pod 的预分配/实分配注解与阶段标签（Pod 跑在消费节点，但记账挂在本节点）
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: [""]
     resources: ["pods/status"]
-    verbs: ["get", "update", "patch"]
-  - apiGroups: [""]
-    resources: ["pods/eviction"]
-    verbs: ["create"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create", "patch", "update"]
+    verbs: ["get"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -128,19 +122,13 @@ spec:
             # 本机 remote-agent 怎么连：同节点走 unix 套接字（需与 agent 的
             # LISTEN_SERVER_ENDPOINT 一致）；也可写 grpc://:14834（host 留空 = 节点 InternalIP）。
             - --remote-agent-endpoint=unix:///etc/vgpu-manager/agent.sock
-            - --device-list-strategy=envvar
             - --device-split-count=10
             - --device-cores-scaling=1
             - --device-memory-scaling=1
-            - --node-config-path=/config/nodeConfig.json
-            - --open-kernel-modules=false
             # 驱动装在宿主机上时保持默认；GPU-Operator 驱动容器场景改成驱动根路径，
             # 并把同一宿主路径以同名挂进来（见 driver-root 卷）。
             - --host-driver-root=/
             - --container-driver-root=/driver-root
-            # 启用 cdi-annotations / cdi-cri 策略时才需要：再加 cdi-root 卷与挂载
-            # （见 deploy/classic-local/vgpu-manager-deviceplugin.yaml 的写法）。
-#            - --cdi-root=/var/run/cdi
             - --v=4
           env:
             - name: NODE_NAME
@@ -181,9 +169,6 @@ spec:
             - name: cgroup-root
               mountPath: /sys/fs/cgroup
               readOnly: true
-            - name: node-config
-              mountPath: /config
-              readOnly: true
             - name: driver-root
               mountPath: /driver-root
               readOnly: true
@@ -207,6 +192,3 @@ spec:
         - name: driver-root
           hostPath:
             path: /
-        - name: node-config
-          configMap:
-            name: vgpu-manager-remote-server-plugin-config

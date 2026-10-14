@@ -28,9 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/kubernetes/scheme"
-	typedv1 "k8s.io/client-go/kubernetes/typed/core/v1"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
@@ -45,12 +43,8 @@ func bindCount(result string) float64 {
 // API server rejected, so the two must never collapse into a single "failed".
 func Test_Bind_RecordsOutcomePerFailureMode(t *testing.T) {
 	k8sClient := fake.NewSimpleClientset()
-	broadcaster := record.NewBroadcaster()
-	broadcaster.StartRecordingToSink(&typedv1.EventSinkImpl{Interface: k8sClient.CoreV1().Events("")})
-	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
-	defer broadcaster.Shutdown()
 
-	binding, err := New(k8sClient, recorder, nil, true)
+	binding, err := New(k8sClient, events.NewFakeRecorder(100), nil, true)
 	assert.NoError(t, err)
 
 	podUID := uuid.NewUUID()
@@ -120,12 +114,7 @@ func Test_Bind_RecordsOutcomePerFailureMode(t *testing.T) {
 // A pod without vGPU resources skips every vGPU gate and binds normally.
 func Test_Bind_RecordsSuccess(t *testing.T) {
 	k8sClient := fake.NewSimpleClientset()
-	broadcaster := record.NewBroadcaster()
-	broadcaster.StartRecordingToSink(&typedv1.EventSinkImpl{Interface: k8sClient.CoreV1().Events("")})
-	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
-	defer broadcaster.Shutdown()
-
-	binding, err := New(k8sClient, recorder, nil, true)
+	binding, err := New(k8sClient, events.NewFakeRecorder(10), nil, true)
 	assert.NoError(t, err)
 
 	podUID := uuid.NewUUID()

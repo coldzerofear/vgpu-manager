@@ -353,7 +353,8 @@ func (rw *validateHandle) admitResourceClaimParameters(ctx context.Context, req 
 		if req.Operation == admissionv1.Update && req.SubResource == "status" {
 			if err = rw.validateAllocatedVGPUSharing(ctx, claim); err != nil {
 				if rw.recorder != nil && !dryrun {
-					rw.recorder.Eventf(claim, nil, corev1.EventTypeWarning, "AdmissionFailed", "Conflict", err.Error())
+					rw.recorder.WithLogger(logger.V(2)).Eventf(claim, nil, corev1.EventTypeWarning,
+						"AdmissionFailed", "Conflict", "%s", err.Error())
 				}
 				logger.Error(err, "validateAllocatedVGPUSharing failed")
 				return admissionv1.AdmissionResponse{

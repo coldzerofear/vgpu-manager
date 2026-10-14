@@ -56,7 +56,7 @@ limitations under the License.
 // Preemption re-runs the allocator as a DRY RUN for every victim set it tests,
 // and so does the dry-run filter. Those simulations place nothing, so the
 // placement- and allocator-scoped series are suppressed at the source (see
-// allocator.NewSimulationAllocator) rather than being subtracted later. Without
+// allocator.WithSimulate) rather than being subtracted later. Without
 // that, a single preemption would inflate placement counts several times over.
 package metrics
 

@@ -28,26 +28,27 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/klog/v2"
 )
 
 type allocator struct {
 	nodeInfo *device.NodeInfo
-	recorder record.EventRecorder
+	recorder events.EventRecorderLogger
 	// simulate suppresses every observable side effect (events, metrics).
-	// See NewSimulationAllocator.
+	// See WithSimulate.
 	simulate bool
 }
 
-func NewAllocator(nodeInfo *device.NodeInfo, recorder record.EventRecorder) *allocator {
-	return &allocator{
-		nodeInfo: nodeInfo,
-		recorder: recorder,
+type Option func(*allocator)
+
+func WithEventRecorder(recorder events.EventRecorderLogger) Option {
+	return func(a *allocator) {
+		a.recorder = recorder
 	}
 }
 
-// NewSimulationAllocator builds an allocator for DRY RUNS — currently
+// WithSimulate builds an allocator for DRY RUNS — currently
 // preemption, which re-runs allocation once per victim set it tests to ask
 // "would the pod fit if these pods were gone?".
 //
@@ -56,11 +57,22 @@ func NewAllocator(nodeInfo *device.NodeInfo, recorder record.EventRecorder) *all
 // inflate the per-search metrics by an unbounded factor and make the numbers
 // unreadable. Excluding them here, at the source, is more reliable than trying
 // to subtract them from a dashboard later.
-func NewSimulationAllocator(nodeInfo *device.NodeInfo) *allocator {
-	return &allocator{
-		nodeInfo: nodeInfo,
-		simulate: true,
+func WithSimulate(simulate bool) Option {
+	return func(a *allocator) {
+		a.simulate = simulate
 	}
+}
+
+func NewAllocator(nodeInfo *device.NodeInfo, opts ...Option) *allocator {
+	a := &allocator{
+		nodeInfo: nodeInfo,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(a)
+		}
+	}
+	return a
 }
 
 func (alloc *allocator) addContainerAllocate(contDevices *device.ContainerDeviceClaim) error {
@@ -194,8 +206,8 @@ func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.F
 				// to attempt 2, whose reason is the one worth reporting.
 				claim, _, err = alloc.allocateOne(req, need, preferred)
 				if err != nil {
-					klog.V(3).ErrorS(err, "init container reuse allocation internal error",
-						"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
+					klog.V(3).ErrorS(err, "init container reuse allocation internal error", "node",
+						alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
 					return nil, nil, err
 				}
 			}
@@ -205,8 +217,8 @@ func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.F
 			if claim == nil {
 				claim, rsn, err = alloc.allocateOne(req, need, nil)
 				if err != nil {
-					klog.V(3).ErrorS(err, "init container allocation internal error",
-						"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
+					klog.V(3).ErrorS(err, "init container allocation internal error", "node",
+						alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
 					return nil, nil, err
 				}
 				if rsn != nil {
@@ -288,8 +300,8 @@ func (alloc *allocator) allocateOne(
 	klog.V(4).InfoS("Attempt to allocate devices for container on node",
 		"node", nodeInfo.GetName(), "container", need.Name, "dryRun", alloc.simulate)
 	if need.Number > alloc.nodeInfo.GetSchedulableDeviceCount() {
-		return nil, reason.New(reason.InsufficientGPUCards).
-			WithDetail("need %d devices, node has %d schedulable", need.Number, nodeInfo.GetSchedulableDeviceCount()), nil
+		return nil, reason.New(reason.InsufficientGPUCards).WithDetail(
+			"need %d devices, node has %d schedulable", need.Number, nodeInfo.GetSchedulableDeviceCount()), nil
 	}
 	needCores, needMemory := resolveContainerNeeds(need, nodeInfo.MemoryFactor, nodeInfo.HasSameCapacity(), nodeInfo.GetMaxDeviceMemory())
 
@@ -411,12 +423,13 @@ func (alloc *allocator) sortDeviceStore(req *AllocationRequest, deviceStore []*d
 	pod := req.Pod
 	switch req.DevicePolicy {
 	case util.BinpackPolicy, util.SpreadPolicy, util.NonePolicy:
-		klog.V(4).InfoS("Pod device scheduling policy", "pod", klog.KObj(req.Pod),
-			"policy", req.DevicePolicy, "dryRun", alloc.simulate)
+		klog.V(4).InfoS("Pod device scheduling policy", "pod",
+			klog.KObj(req.Pod), "policy", req.DevicePolicy, "dryRun", alloc.simulate)
 	default:
 		klog.V(4).InfoS("Pod not supported device scheduling policy", "pod",
 			klog.KObj(req.Pod), "policy", req.DevicePolicy, "dryRun", alloc.simulate)
-		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported device scheduling policy %q", req.DevicePolicy)
+		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
+			"unsupported device scheduling policy %q", req.DevicePolicy)
 	}
 	// TODO The device score weight used here is the average value, which may be adjusted in the future
 	NewDevicePolicyPriority(*req).Sort(deviceStore)
@@ -424,7 +437,7 @@ func (alloc *allocator) sortDeviceStore(req *AllocationRequest, deviceStore []*d
 
 func (alloc *allocator) sendEventf(object runtime.Object, eventtype, reason, messageFmt string, args ...interface{}) {
 	if alloc.recorder != nil && !alloc.simulate {
-		alloc.recorder.Eventf(object, eventtype, reason, messageFmt, args...)
+		alloc.recorder.Eventf(object, nil, eventtype, reason, "PreAllocation", messageFmt, args...)
 	}
 }
 
@@ -498,7 +511,8 @@ func (alloc *allocator) allocateByTopologyMode(
 		klog.V(4).InfoS("Pod NUMA device topology mode", "pod",
 			klog.KObj(req.Pod), "strict", req.TopologyStrict, "dryRun", alloc.simulate)
 		// TODO RequestProfile uses average value, maintain semantic consistency with sortDeviceStore.
-		if claims, ok := alloc.allocateNUMA(deviceStore, UniformProfile, req.DevicePolicy, needNumber, needCores, needMemory); ok {
+		if claims, ok := alloc.allocateNUMA(deviceStore, UniformProfile,
+			req.DevicePolicy, needNumber, needCores, needMemory); ok {
 			alloc.recordOutcome(req, metrics.ResultNUMA, "")
 			return claims, nil
 		}
@@ -512,11 +526,13 @@ func (alloc *allocator) allocateByTopologyMode(
 		// Non-strict: placed, but spanning NUMA nodes.
 		alloc.recordOutcome(req, metrics.ResultCrossNUMA, "")
 	case util.NoneTopology:
-		klog.V(4).InfoS("Pod none device topology mode", "pod", klog.KObj(req.Pod), "dryRun", alloc.simulate)
+		klog.V(4).InfoS("Pod none device topology mode",
+			"pod", klog.KObj(req.Pod), "dryRun", alloc.simulate)
 	default:
 		klog.V(4).InfoS("Pod not supported device topology mode", "pod",
 			klog.KObj(req.Pod), "mode", req.Topology, "dryRun", alloc.simulate)
-		alloc.sendEventf(req.Pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported device topology mode %q", req.Topology)
+		alloc.sendEventf(req.Pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
+			"unsupported device topology mode %q", req.Topology)
 	}
 	return buildClaims(deviceStore[:needNumber], needCores, needMemory), nil
 }
@@ -594,12 +610,14 @@ func (alloc *allocator) allocateLink(
 		hasAnchor       = anchorRoot >= 0
 	)
 	if req.GangRailKey != "" {
-		if w := sets.New[string](alloc.nodeInfo.UUIDsMatchingRailSignature(req.GangRailKey)...); w.Len() >= needNumber {
+		w := sets.New[string](alloc.nodeInfo.UUIDsMatchingRailSignature(req.GangRailKey)...)
+		if w.Len() >= needNumber {
 			railWindow = w
 		}
 	}
 	if hasAnchor {
-		if w := sets.New[string](alloc.nodeInfo.ComponentUUIDs(anchorRoot)...); w.Len() >= needNumber {
+		w := sets.New[string](alloc.nodeInfo.ComponentUUIDs(anchorRoot)...)
+		if w.Len() >= needNumber {
 			componentWindow = w
 		} else if req.TopologyStrict {
 			// strict promised the gang stays connected and this node's anchored
@@ -726,8 +744,8 @@ func (alloc *allocator) reportLinkDowngrade(pod *corev1.Pod, plan *linkPlan, nee
 		achieved += " (spanning multiple components)"
 	}
 
-	klog.V(3).InfoS("Link topology downgraded", "node", alloc.nodeInfo.GetName(),
-		"pod", klog.KObj(pod), "want", device.TierNVLink.String(), "got", achieved, "devices", getDeviceUUIDs(plan.Devices))
+	klog.V(3).InfoS("Link topology downgraded", "node", alloc.nodeInfo.GetName(), "pod",
+		klog.KObj(pod), "want", device.TierNVLink.String(), "got", achieved, "devices", getDeviceUUIDs(plan.Devices))
 
 	alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventTopologyFallback,
 		"Link topology downgraded on node %q: %d GPUs connected at %q, not NVLink; "+
@@ -822,7 +840,9 @@ func buildClaims(picked []*device.Device, needCores, needMemory int64) []device.
 // pkg/scheduler/reason — no parallel enum here. That keeps the counts
 // directly bucketable by the FilteringFailed aggregator without any
 // translation table.
-func (alloc *allocator) filterDevices(req *AllocationRequest, needCores, needMemory int64, restrictUUIDs map[string]struct{}) ([]*device.Device, map[reason.Code]int) {
+func (alloc *allocator) filterDevices(
+	req *AllocationRequest, needCores, needMemory int64, restrictUUIDs map[string]struct{},
+) ([]*device.Device, map[reason.Code]int) {
 	nodeName := alloc.nodeInfo.GetName()
 	counts := make(map[reason.Code]int)
 	devices := make([]*device.Device, 0, alloc.nodeInfo.GetDeviceCount())
