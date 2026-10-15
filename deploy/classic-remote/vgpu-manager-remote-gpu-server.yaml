@@ -53,7 +53,7 @@ spec:
     matchLabels:
       app: vgpu-manager-remote-gpu-server
   updateStrategy:
-    type: RollingUpdate
+    type: Recreate
   template:
     metadata:
       labels:

@@ -39,6 +39,13 @@ scheduler:
       effect: NoSchedule
     - key: CriticalAddonsOnly
       operator: Exists
+  # Rolling upgrade of components, and keeping at least one component running during
+  # the upgrade period without causing service interruption during the upgrade period.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   terminationGracePeriodSeconds: 30
   # HTTP timeout time for device extension scheduler, unit: seconds
   extenderHTTPTimeout: 30
@@ -196,6 +203,12 @@ devicePlugin:
     securityContext:
       privileged: true
       runAsUser: 0
+  # Rollout strategy for the DaemonSet. As with the NVIDIA DRA driver, a node-critical GPU
+  # driver is rolled out with maxUnavailable 100% so all nodes update at once.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "100%"
   devicePlugin:
     env:
       - name: DP_ENABLE_HEALTHCHECKS
@@ -378,6 +391,13 @@ webhook:
       effect: NoSchedule
     - key: CriticalAddonsOnly
       operator: Exists
+  # Rolling upgrade of components, and keeping at least one component running during
+  # the upgrade period without causing service interruption during the upgrade period.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   # Webhook will not be effective for resources under these namespaces.
   excludeNamespaces:
     - kube-system

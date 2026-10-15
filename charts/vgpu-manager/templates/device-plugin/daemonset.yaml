@@ -17,8 +17,10 @@ metadata:
     app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
     {{- include "vgpu-manager.labels" . | nindent 4 }}
 spec:
-  updateStrategy:
-    type: RollingUpdate
+  revisionHistoryLimit: 10
+  {{- with .Values.devicePlugin.updateStrategy }}
+  updateStrategy: {{ toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}

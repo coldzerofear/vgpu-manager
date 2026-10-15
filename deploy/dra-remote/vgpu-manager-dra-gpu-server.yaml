@@ -59,6 +59,8 @@ spec:
   selector:
     matchLabels:
       app: vgpu-manager-dra-gpu-server
+  updateStrategy:
+    type: Recreate
   template:
     metadata:
       labels:

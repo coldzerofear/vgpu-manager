@@ -19,7 +19,11 @@ metadata:
     app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
     {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
 spec:
+  revisionHistoryLimit: 10
   replicas: {{ .Values.webhook.replicas }}
+  {{- with .Values.webhook.strategy }}
+  strategy: {{ toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
