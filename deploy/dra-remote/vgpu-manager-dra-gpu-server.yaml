@@ -60,7 +60,9 @@ spec:
     matchLabels:
       app: vgpu-manager-dra-gpu-server
   updateStrategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "100%"
   template:
     metadata:
       labels:
