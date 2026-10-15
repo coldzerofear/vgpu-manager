@@ -108,7 +108,7 @@ spec:
       hostPID: true
       containers:
         - name: device-plugin
-          image: ghcr.io/coldzerofear/vgpu-managerlatest
+          image: ghcr.io/coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-plugin

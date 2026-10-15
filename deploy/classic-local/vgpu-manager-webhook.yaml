@@ -137,7 +137,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: device-webhook
-          image: ghcr.io/coldzerofear/vgpu-managerlatest
+          image: ghcr.io/coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-webhook

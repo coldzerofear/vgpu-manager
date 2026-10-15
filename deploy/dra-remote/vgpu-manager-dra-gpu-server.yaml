@@ -145,6 +145,9 @@ spec:
             # 知道 lupine-server 的地址。端口从上面的 LUPINE_PORT 展开，改端口只改那一处（和 lupine-server 容器里的同名变量）。
             - name: REMOTE_SERVER_ENDPOINT
               value: ":$(LUPINE_PORT)"
+            # 控制agent->lupine-server探测客户端跳过证书校验
+            - name: PROBE_INSECURE_SKIP_VERIFY
+              value: "0"
             # 【按域名寻址时打开这一组】HOSTNAME 由 webhook 按节点名注入；两个 ADVERTISE_*
             # 让 agent 把域名（而不是 Pod IP）报出去，dra-server 再发布成设备属性
             # serverEndpoint / agentEndpoint。少了 agent 那条，inject 侧会拿到 Pod IP。
