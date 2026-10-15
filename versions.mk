@@ -40,7 +40,31 @@ else
   GIT_TREE_STATE?=dirty
 endif
 
-GOLANG_VERSION := $(shell grep -E '^go [0-9]' go.mod | grep -oE '[0-9][0-9.]*')
+# The toolchain the images are built with, taken from go.mod's `toolchain`
+# directive and falling back to the `go` directive when there is none.
+#
+# These are not the same thing, and reading the second as the first is what
+# shipped every image built with Go 1.26.0 - the first patch release of that
+# minor. `go 1.26.0` states the language version the source needs; it says
+# nothing about which compiler to use. govulncheck found 41 reachable
+# vulnerabilities in those binaries, 39 of them standard-library fixes that
+# had already shipped in 1.26.1 through 1.26.9 (net/http, crypto/x509,
+# html/template, os). The toolchain directive is the one Go itself reads, so
+# `go build` here, setup-go in CI and the image build now agree on it.
+#
+# To take a Go patch release: `go mod edit -toolchain=go1.26.N`.
+GOLANG_VERSION := $(shell grep -E '^toolchain go[0-9]' go.mod | grep -oE '[0-9][0-9.]*' \
+                          || grep -E '^go [0-9]' go.mod | grep -oE '[0-9][0-9.]*')
+
+# The language version, kept separate so the guard below can tell them apart.
+GOLANG_LANG_VERSION := $(shell grep -E '^go [0-9]' go.mod | grep -oE '[0-9][0-9.]*')
+
+# A toolchain from a different minor than the source targets builds the images
+# with something the code was never checked against. The nightly job's image
+# drifted exactly this way while a comment asked someone to keep it in step.
+ifneq ($(shell echo $(GOLANG_VERSION) | cut -d. -f1,2),$(shell echo $(GOLANG_LANG_VERSION) | cut -d. -f1,2))
+  $(error GOLANG_VERSION=$(GOLANG_VERSION) is not a patch of go.mod's go $(GOLANG_LANG_VERSION))
+endif
 TOOLKIT_CONTAINER_IMAGE := $(shell chmod +x ./scripts/toolkit-container-image.sh && ./scripts/toolkit-container-image.sh)
 
 # nvVersion represents the version of dra-driver-nvidia-gpu that this project is based on
