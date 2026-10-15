@@ -2813,35 +2813,29 @@ CUresult cuGraphAddHostNode(CUgraphNode *phGraphNode, CUgraph hGraph,
                          hGraph, dependencies, numDependencies, nodeParams);
 }
 
-CUresult _cuGraphAddKernelNode(CUgraphNode *phGraphNode, CUgraph hGraph,
-                              const CUgraphNode *dependencies,
-                              size_t numDependencies,
-                              const CUDA_KERNEL_NODE_PARAMS *nodeParams) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphAddKernelNode_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddKernelNode_v2, phGraphNode,
-                                  hGraph, dependencies, numDependencies, nodeParams);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphAddKernelNode))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddKernelNode, phGraphNode,
-                                  hGraph, dependencies, numDependencies, nodeParams);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
-}
+/* Each exported symbol binds to the driver entry of ITS OWN ABI.
+ * The caller's layout is already decided by the symbol it entered through -
+ * the unversioned name means a 56-byte CUDA_KERNEL_NODE_PARAMS_v1, _v2 means
+ * the 72-byte form - so there is nothing to probe for, and probing is what
+ * went wrong before: both wrappers shared one dispatcher that preferred the
+ * _v2 entry, which had the driver write 16 bytes past a v1 caller's struct.
+ * No cross-ABI fallback, per rule 2 in cuda-helper.h: an absent entry is
+ * CUDA_ERROR_NOT_SUPPORTED, never a silently downgraded ABI. */
 
 CUresult cuGraphAddKernelNode(CUgraphNode *phGraphNode, CUgraph hGraph,
                               const CUgraphNode *dependencies,
                               size_t numDependencies,
-                              const CUDA_KERNEL_NODE_PARAMS *nodeParams) {
-  return _cuGraphAddKernelNode(phGraphNode, hGraph, dependencies, numDependencies, nodeParams);
+                              const CUDA_KERNEL_NODE_PARAMS_v1 *nodeParams) {
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuGraphAddKernelNode, phGraphNode,
+                                 hGraph, dependencies, numDependencies, nodeParams);
 }
 
 CUresult cuGraphAddKernelNode_v2(CUgraphNode *phGraphNode, CUgraph hGraph,
                               const CUgraphNode *dependencies,
                               size_t numDependencies,
-                              const CUDA_KERNEL_NODE_PARAMS *nodeParams) {
-  return _cuGraphAddKernelNode(phGraphNode, hGraph, dependencies, numDependencies, nodeParams);
+                              const CUDA_KERNEL_NODE_PARAMS_v2 *nodeParams) {
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuGraphAddKernelNode_v2, phGraphNode,
+                                 hGraph, dependencies, numDependencies, nodeParams);
 }
 
 CUresult cuGraphAddMemcpyNode(CUgraphNode *phGraphNode, CUgraph hGraph,
@@ -2958,6 +2952,12 @@ CUresult _cuGraphInstantiate(CUgraphExec *phGraphExec, CUgraph hGraph,
 //  return _cuGraphInstantiate(phGraphExec, hGraph, phErrorNode, logBuffer, bufferSize);
 //}
 
+/* Internal only: for OUR callers, which allocate the _v2 form and zero it
+ * (see the graph walk in cuda_hook.c). Preferring the _v2 entry is right for
+ * them, and the v1 fallback is safe here in a way it is not for an exported
+ * wrapper: we over-allocate rather than under-allocate, so a v1 entry fills
+ * the prefix and leaves kern/ctx at the {0} we set, instead of garbage.
+ * Exported symbols must NOT route through this - see cuGraphKernelNodeGetParams. */
 CUresult _cuGraphKernelNodeGetParams(CUgraphNode hNode,
                                     CUDA_KERNEL_NODE_PARAMS *nodeParams) {
   CUresult ret;
@@ -2974,39 +2974,29 @@ CUresult _cuGraphKernelNodeGetParams(CUgraphNode hNode,
 }
 
 CUresult cuGraphKernelNodeGetParams(CUgraphNode hNode,
-                                    CUDA_KERNEL_NODE_PARAMS *nodeParams) {
-  return _cuGraphKernelNodeGetParams(hNode, nodeParams);
+                                    CUDA_KERNEL_NODE_PARAMS_v1 *nodeParams) {
+  /* The out-param case, and the reason this split exists: the _v2 entry
+   * fills 72 bytes, and this caller owns 56. */
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuGraphKernelNodeGetParams,
+                                 hNode, nodeParams);
 }
 
 CUresult cuGraphKernelNodeGetParams_v2(CUgraphNode hNode,
-                                    CUDA_KERNEL_NODE_PARAMS *nodeParams) {
-  return _cuGraphKernelNodeGetParams(hNode, nodeParams);
+                                    CUDA_KERNEL_NODE_PARAMS_v2 *nodeParams) {
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuGraphKernelNodeGetParams_v2,
+                                 hNode, nodeParams);
 }
-
-CUresult _cuGraphKernelNodeSetParams(CUgraphNode hNode,
-                                    const CUDA_KERNEL_NODE_PARAMS *nodeParams) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphKernelNodeSetParams_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphKernelNodeSetParams_v2,
-                                        hNode, nodeParams);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphKernelNodeSetParams))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphKernelNodeSetParams,
-                                        hNode, nodeParams);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
-}
-
 
 CUresult cuGraphKernelNodeSetParams(CUgraphNode hNode,
-                                    const CUDA_KERNEL_NODE_PARAMS *nodeParams) {
-  return _cuGraphKernelNodeSetParams(hNode, nodeParams);
+                                    const CUDA_KERNEL_NODE_PARAMS_v1 *nodeParams) {
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuGraphKernelNodeSetParams,
+                                 hNode, nodeParams);
 }
 
 CUresult cuGraphKernelNodeSetParams_v2(CUgraphNode hNode,
-                                    const CUDA_KERNEL_NODE_PARAMS *nodeParams) {
-  return _cuGraphKernelNodeSetParams(hNode, nodeParams);
+                                    const CUDA_KERNEL_NODE_PARAMS_v2 *nodeParams) {
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuGraphKernelNodeSetParams_v2,
+                                 hNode, nodeParams);
 }
 
 /* cuGraphLaunch / _ptsz: public symbols now provided by the throttled hooks

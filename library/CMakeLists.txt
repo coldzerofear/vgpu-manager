@@ -257,6 +257,13 @@ endif()
 # anyone configures with -DBUILD_TESTS=ON. The subdirectory keeps the two test
 # families apart -- test/ needs a GPU and links CUDA, test/nogpu/ needs neither.
 #
+# Found here rather than next to the first target that links it, because every
+# GPU-less test below needs it and find_package has to precede them all.
+# THREADS_PREFER_PTHREAD_FLAG asks for -pthread over -lpthread, which sets the
+# compile flag too.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 # Sources that touch neither CUDA nor NVML, shared by the GPU-less test and
 # the session-config tool so neither has to restate the library's own file
 # handling (region layout, locking, path derivation).
@@ -347,10 +354,31 @@ if(BUILD_SM_NODE_TESTS)
     endif()
 endif()
 
+# The GPU-less tests compile library sources that call pthread_once and, in
+# loader.c / cuda_hook.c / checkpoint_provider.c, dlopen and dlvsym. glibc only
+# folded both sets of symbols into libc in 2.34; before that they live in
+# libpthread and libdl. Only the .so (-pthread via STATIC_C_LIBRARIES) and the
+# session-config tool linked threads, and nothing here linked dl - so these
+# built on CI's Ubuntu 24.04 and failed to link in the Rocky 8 container the
+# nightly job uses, which is the container the shipped library is built in.
+# Each target is guarded because most sit behind an option().
+foreach(vgpu_nogpu_test
+        test_sm_node_shared
+        test_vmem_region_concurrency
+        test_session_paths
+        test_session_pids_concurrency
+        test_delta_step
+        test_delta_campaign
+        test_dlsym_entry)
+    if(TARGET ${vgpu_nogpu_test})
+        target_link_libraries(${vgpu_nogpu_test} PRIVATE
+                              Threads::Threads ${CMAKE_DL_LIBS})
+    endif()
+endforeach()
+
 # Writes a session quota region the way the GPU-node agent would, so the
 # session paths can be exercised without Kubernetes. Needs no CUDA toolkit,
 # hence its placement outside the CUDA tool block below.
-find_package(Threads REQUIRED)
 add_executable(vgpu-session-config tools/session_config.c ${VGPU_NODRIVER_SRCS})
 target_include_directories(vgpu-session-config PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)

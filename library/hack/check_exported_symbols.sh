@@ -45,6 +45,11 @@ FAMILIES=(
   "cuGraphAddNode                cuGraphAddNode                 cuGraphAddNode_v2"
   "cuGetProcAddress              cuGetProcAddress               cuGetProcAddress_v2"
   "cuStreamGetCaptureInfo        cuStreamGetCaptureInfo_v2      cuStreamGetCaptureInfo_v3"
+  "cuGraphAddKernelNode          cuGraphAddKernelNode           cuGraphAddKernelNode_v2"
+  "cuGraphKernelNodeSetParams    cuGraphKernelNodeSetParams     cuGraphKernelNodeSetParams_v2"
+  "cuGraphKernelNodeGetParams    cuGraphKernelNodeGetParams     cuGraphKernelNodeGetParams_v2"
+  "cuGraphExecUpdate             cuGraphExecUpdate              cuGraphExecUpdate_v2"
+  "cuStreamGetCtx                cuStreamGetCtx                 cuStreamGetCtx_v2"
   # cuGetProcAddress above is listed for export-completeness (we must
   # export both ABI versions of this symbol) even though its substitution
   # logic is handled specially inside cuGetProcAddress() / _v2() in
@@ -89,8 +94,8 @@ if (( errors > 0 )); then
   exit 1
 fi
 
-echo "[PASS] ABI-conflict symbol export check: all ${#FAMILIES[@]} family "\
-"pairs present in $(basename "${SO_PATH}")"
+so_name="$(basename "${SO_PATH}")"
+echo "[PASS] ABI-conflict symbol export check: all ${#FAMILIES[@]} family pairs present in ${so_name}"
 
 # ---------------------------------------------------------------------------
 # Negative assertions: internal helpers MUST NOT leak into .dynsym.

@@ -2,6 +2,17 @@
 #
 # Action versions are pinned to commit SHAs rather than tags, because a tag can
 # be moved to point at different code; dependabot keeps them current.
+#
+# setup-go is pinned to a commit after v7.0.0 rather than to the release.
+# codeload cannot serve an archive for the v7.0.0 commit - and for v6.5.0's
+# either, while it serves setup-go's branch commits and other actions' release
+# commits fine - so every job that sets up Go failed to even start with
+# "An action could not be found at the URI". Tags are no escape: the runner
+# resolves any ref to a commit SHA and downloads that, which is the URL in the
+# failure. The pinned commit is nine commits past v7.0.0, all dependency
+# bumps, license files and action outputs, none touching go-version-file.
+# Move it back to a release SHA once GitHub can serve one; dependabot will
+# propose exactly that, and its own CI run will say whether it works yet.
 name: CI
 
 on:
@@ -38,7 +49,7 @@ jobs:
           # and read real git history.
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: actions/setup-go@90ad2b35f69faf97585ad74d28fa006d2739b7af # post-v7.0.0, see header
         with:
           go-version-file: go.mod
       - name: License headers
@@ -48,6 +59,14 @@ jobs:
           go mod tidy
           git diff --exit-code -- go.mod go.sum
       - name: golangci-lint
+        # Skipped when a push creates the branch. github.event.before is all
+        # zeros then, the compare API 404s on it, and the action falls back to
+        # reporting every finding - including the debt that predates CI, which
+        # only-new-issues exists to tolerate. "New" has no meaning with no base
+        # to measure against; the pull request that follows measures the branch
+        # against main. On a pull_request event `before` is unset, so the
+        # comparison is true and the step runs.
+        if: github.event.before != '0000000000000000000000000000000000000000'
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           version: v2.6.2
@@ -76,7 +95,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: actions/setup-go@90ad2b35f69faf97585ad74d28fa006d2739b7af # post-v7.0.0, see header
         with:
           go-version-file: go.mod
       - name: Unit tests with coverage
@@ -101,7 +120,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: actions/setup-go@90ad2b35f69faf97585ad74d28fa006d2739b7af # post-v7.0.0, see header
         with:
           go-version-file: go.mod
       - name: Build every binary
@@ -130,13 +149,13 @@ jobs:
         run: make -C library test-sanitize WITH_CUDA_TOOLS=OFF
 
   workflows:
-    name: Workflow lint
+    name: Workflow and shell lint
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: actions/setup-go@90ad2b35f69faf97585ad74d28fa006d2739b7af # post-v7.0.0, see header
         with:
           go-version-file: go.mod
       - name: actionlint
@@ -145,6 +164,14 @@ jobs:
         run: |
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           actionlint
+      - name: Shell scripts
+        # actionlint shellchecks the run: blocks in these workflows, and
+        # nothing covered the scripts under hack/ and scripts/ - several of
+        # which decide whether a build passes. Gated at warning and above: the
+        # tree is clean there, while the info and style findings in
+        # long-standing scripts are not worth a red build. shellcheck ships
+        # with the runner image.
+        run: git ls-files -z '*.sh' | xargs -0 -r shellcheck --severity=warning
 
   cppcheck:
     name: C static analysis

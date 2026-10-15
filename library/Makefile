@@ -7,11 +7,19 @@
 #   make docker-build            build the .so inside a CUDA docker image
 #   make build-in-docker         same, but via an ephemeral run (no Dockerfile)
 #   make check                   run all static checks (no GPU needed)
+#   make check-all               the above plus the built .so's export surface
+#   make cppcheck                just the C static analysis CI gates on
+#   make check-abi-signatures    classify versioned APIs against a real <cuda.h>
 #   make test-nogpu              run the GPU-less tests (no GPU, no CUDA needed)
 #   make test-sanitize           the same tests under ASan+UBSan
 #   make check-exports           verify ABI-conflict symbol exports on the built .so
 #   make test                    build and run the smoke tests under test/
 #   make help                    show this listing
+#
+# The static checks skip rather than fail when a tool they need is missing -
+# cppcheck, or a <cuda.h> for the struct layout and ABI signature checks - so
+# `make check` works on a bare machine. CI installs them, so nothing is skipped
+# where it gates.
 #
 .DEFAULT_GOAL := help
 
@@ -20,7 +28,11 @@ BUILD_DIR       ?= $(LIBRARY_DIR)build
 CUDA_HOME       ?= /usr/local/cuda
 CMAKE           ?= cmake
 DOCKER          ?= docker
-PYTHON          ?= python3.12
+# Whichever interpreter the host actually has. Pinning python3.12 meant the
+# hack/ checks could not run in the CUDA container, whose Ubuntu base ships
+# python3.8 or 3.10 - the scripts need 3.8+, not a specific minor.
+PYTHON          ?= $(shell command -v python3.12 2>/dev/null || \
+                          command -v python3 2>/dev/null || echo python3)
 BASH            ?= bash
 CMAKE_BUILD_TYPE ?= Release
 # Build the CUDA-linked tools under tools/ (needs a CUDA toolkit). OFF lets
@@ -99,7 +111,8 @@ build-in-docker: ## Build the .so in an ephemeral CUDA container (no local toolk
 ##@ Checks (no GPU needed)
 
 .PHONY: check
-check: check-hook-consistency check-struct-layout check-session-paths ## Run every static check.
+check: check-hook-consistency check-struct-layout check-abi-signatures \
+       check-session-paths cppcheck ## Run every static check.
 
 .PHONY: check-hook-consistency
 check-hook-consistency: ## Verify dispatch table / enum / wrapper alignment + ABI-conflict coverage.
@@ -113,6 +126,29 @@ check-struct-layout: ## Compare cuda-subset.h struct layouts vs real <cuda.h> on
 check-session-paths: ## Reject compile-time paths that bypass session_path().
 	$(BASH) $(LIBRARY_DIR)hack/check_session_paths.sh
 
+.PHONY: cppcheck
+cppcheck: ## Run the same cppcheck invocation CI gates on.
+	@# -I library matters: without it cppcheck misresolves the NVML headers and
+	@# invents an uninitvar in cuda_hook.c, so a hand-typed command disagrees
+	@# with the gate. Keep this and the ci.yaml step identical.
+	@# Skips rather than fails when cppcheck is absent, the way the struct
+	@# layout check skips without a CUDA toolkit, so `make check` still runs
+	@# on a machine that has only python3 and bash. The gate that must not be
+	@# skipped is the ci.yaml job, which installs it.
+	@if ! command -v cppcheck >/dev/null 2>&1; then \
+	    echo "[SKIP] cppcheck not installed - no C static analysis"; \
+	else \
+	    cppcheck --enable=warning,performance,portability \
+	        --std=c11 --inline-suppr --error-exitcode=1 \
+	        --suppress=missingInclude --suppress=missingIncludeSystem \
+	        -I $(LIBRARY_DIR)include -I $(LIBRARY_DIR). \
+	        $(LIBRARY_DIR)src $(LIBRARY_DIR)tools; \
+	fi
+
+.PHONY: check-abi-signatures
+check-abi-signatures: ## Classify every versioned API family against a real <cuda.h>.
+	$(PYTHON) $(LIBRARY_DIR)hack/check_abi_signatures.py --cuda-home $(CUDA_HOME) --check-wrappers $(ARGS)
+
 .PHONY: check-exports
 check-exports: $(SO_FILE) ## Verify the built .so exports both ABI versions of every conflict family.
 	$(BASH) $(LIBRARY_DIR)hack/check_exported_symbols.sh $(SO_FILE)
@@ -120,7 +156,7 @@ check-exports: $(SO_FILE) ## Verify the built .so exports both ABI versions of e
 $(SO_FILE): build
 
 .PHONY: check-all
-check-all: check check-exports ## Static + post-build symbol-export checks.
+check-all: check check-exports ## Every check: the static ones plus the built .so's exports.
 
 ##@ Tests (need GPU + NVIDIA driver)
 
