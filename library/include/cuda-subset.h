@@ -1328,6 +1328,29 @@ typedef struct CUaccessPolicyWindow_st {
 typedef CUaccessPolicyWindow_v1 CUaccessPolicyWindow;
 
 /**
+ * GPU kernel node parameters, CUDA 11 ABI.
+ *
+ * Kept next to _v2 because the two are distinct ELF symbols with distinct
+ * layouts: _v2 appends kern and ctx, so this is a strict prefix of it
+ * (56 bytes against 72, every shared field at the same offset). A caller
+ * that entered through the unversioned symbol owns a struct of THIS size,
+ * so the wrappers for that symbol must declare it: handing it to the _v2
+ * driver entry has the driver write 16 bytes past the end.
+ */
+typedef struct CUDA_KERNEL_NODE_PARAMS_v1_st {
+    CUfunction func;             /**< Kernel to launch */
+    unsigned int gridDimX;       /**< Width of grid in blocks */
+    unsigned int gridDimY;       /**< Height of grid in blocks */
+    unsigned int gridDimZ;       /**< Depth of grid in blocks */
+    unsigned int blockDimX;      /**< X dimension of each thread block */
+    unsigned int blockDimY;      /**< Y dimension of each thread block */
+    unsigned int blockDimZ;      /**< Z dimension of each thread block */
+    unsigned int sharedMemBytes; /**< Dynamic shared-memory size per thread block in bytes */
+    void **kernelParams;         /**< Array of pointers to kernel parameters */
+    void **extra;                /**< Extra options */
+} CUDA_KERNEL_NODE_PARAMS_v1;
+
+/**
  * GPU kernel node parameters
  */
 typedef struct CUDA_KERNEL_NODE_PARAMS_st {

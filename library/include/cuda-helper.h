@@ -1334,6 +1334,9 @@ static inline int is_abi_conflict_base(const char *sym) {
     "cuGraphRemoveDependencies",
     "cuGraphAddNode",
     "cuStreamGetCaptureInfo",
+    "cuGraphAddKernelNode",        /* _v2 appends kern+ctx to the params   */
+    "cuGraphKernelNodeSetParams",  /* 56-byte v1 struct -> 72-byte _v2     */
+    "cuGraphKernelNodeGetParams",  /* ditto, and this one is an out-param  */
     /*
      * Note: cuGetProcAddress is intentionally NOT listed here even though
      * its unversioned form also has cross-major ABI drift (v1 4-arg vs _v2

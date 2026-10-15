@@ -62,7 +62,16 @@ def set_root(root: Path) -> None:
 set_root(ROOT)
 
 # ABI-conflict families: base name -> (old_abi_symbol, new_abi_symbol).
-# Must stay in sync with is_abi_conflict_base() in include/cuda-helper.h.
+#
+# Related to is_abi_conflict_base() in include/cuda-helper.h but not identical
+# to it, and conflating the two costs real behaviour. This table is the set of
+# families whose two ABIs take different parameters. That list is the subset of
+# them whose base name cuGetProcAddress must answer with the driver's own
+# pointer - which is only right for a family we do not hook. A family we DO
+# hook under its base name, with a wrapper of the matching ABI, belongs here
+# and not there, and is recorded in R5_ALLOWLIST with the reason.
+#
+# Verified against a real <cuda.h> by hack/check_abi_signatures.py.
 ABI_CONFLICT_FAMILIES = {
     "cuCtxCreate":                   ("cuCtxCreate_v2",                  "cuCtxCreate_v4"),
     "cuMemAdvise":                   ("cuMemAdvise",                     "cuMemAdvise_v2"),
@@ -74,35 +83,223 @@ ABI_CONFLICT_FAMILIES = {
     "cuGraphRemoveDependencies":     ("cuGraphRemoveDependencies",       "cuGraphRemoveDependencies_v2"),
     "cuGraphAddNode":                ("cuGraphAddNode",                  "cuGraphAddNode_v2"),
     "cuStreamGetCaptureInfo":        ("cuStreamGetCaptureInfo_v2",       "cuStreamGetCaptureInfo_v3"),
-    # cuGetProcAddress is handled inline in cuGetProcAddress() and
-    # cuGetProcAddress_v2() rather than via is_abi_conflict_base(), so
-    # it is intentionally NOT in this table.
+    "cuGraphAddKernelNode":          ("cuGraphAddKernelNode",            "cuGraphAddKernelNode_v2"),
+    "cuGraphKernelNodeSetParams":    ("cuGraphKernelNodeSetParams",      "cuGraphKernelNodeSetParams_v2"),
+    "cuGraphKernelNodeGetParams":    ("cuGraphKernelNodeGetParams",      "cuGraphKernelNodeGetParams_v2"),
+    # (CUgraphExec, CUgraph, CUgraphNode*, CUgraphExecUpdateResult*) against
+    # (CUgraphExec, CUgraph, CUgraphExecUpdateResultInfo*): four arguments
+    # against three. Both wrappers already bind their own entry.
+    "cuGraphExecUpdate":             ("cuGraphExecUpdate",               "cuGraphExecUpdate_v2"),
+    # (CUstream, CUcontext*) against (CUstream, CUcontext*, CUgreenCtx*).
+    # Both wrappers already call the entry of their own name directly, with
+    # no trampoline between them, and the base is not hooked.
+    "cuStreamGetCtx":                ("cuStreamGetCtx",                  "cuStreamGetCtx_v2"),
+    # Four arguments against five (the fifth being
+    # CUdriverProcAddressQueryResult*). It is in this table because its ABIs do
+    # differ, and in R5_ALLOWLIST because its base name has to stay hooked:
+    # see the note in is_abi_conflict_base(), which keeps it out of THAT list
+    # for the opposite reason - handing back the driver's own resolver would
+    # let every later lookup bypass cuda_hooks_entry[] entirely.
+    "cuGetProcAddress":              ("cuGetProcAddress",                "cuGetProcAddress_v2"),
 }
 
 # R5 allowlist: conflict-family base names that MAY appear in
-# cuda_hooks_entry[]. Empty today.
-R5_ALLOWLIST: set = set()
-
-# R7 allowlist: base names that have multiple ELF _vN exports but where
-# the C parameter list is IDENTICAL across all versions (driver-internal
-# bumps for descriptor format changes etc., not real ABI breaks).
-# Adding a name here is a claim verified by the author at allowlisting
-# time — re-verify if any new _vN form gets added later.
+# cuda_hooks_entry[].
 #
-# To audit: each version's wrapper in src/cuda_originals.c (or its
-# trampoline like _cuFooBar) MUST take the same parameter types in the
-# same order as every other version of that base name.
+# R5's blanket rule assumes a conflict family is one we keep our hands off, so
+# that cuGetProcAddress can hand back the driver's pointer. A family we need to
+# intercept cannot be handled that way: not hooking it would lose the
+# interception, and hooking only the _vN form would leave callers of the older
+# one unhooked. The requirement that actually matters is that EACH registered
+# name carries a wrapper of ITS OWN ABI, and that substitution picks between
+# them by the pointer the driver returned (lookup_cuda_hook_ptr) rather than by
+# name. An entry here is a claim that both hold.
+R5_ALLOWLIST: set = {
+    # cuGraphExecUpdate and _v2 are both hooked, both needed: each refreshes
+    # the cached graph cost after an update, and a CUDA 11 caller reaching only
+    # the four-argument form still has to be seen. The two wrappers take four
+    # and three arguments respectively, each calling the entry of that name, so
+    # whichever one substitution lands on matches the caller's frame.
+    "cuGraphExecUpdate",
+    # cuGetProcAddress and _v2 are both hooked and both must be: the pointer
+    # this call hands back is what the caller uses to find every other CUDA
+    # symbol, so letting it through unhooked would take the whole table out of
+    # the picture. The four-argument and five-argument wrappers each call the
+    # entry of their own name, and substitution picks between them by the
+    # pointer the driver returned.
+    "cuGetProcAddress",
+}
+
+# Families upstream gave two ABIs where this library deliberately implements
+# only the newer one, under both exported names.
+#
+# These are the CUDA 3.2 -> 4.0 widening: upstream's plain ELF symbol still
+# takes 32-bit sizes and CUdeviceptr_v1, its _v2 takes size_t and the 64-bit
+# CUdeviceptr. Both of our wrappers declare the 64-bit form and the shared
+# trampoline tries the _v2 entry first, so a caller using the current types
+# gets the current behaviour whichever name it came in through. Checked, not
+# assumed: all forty were followed through their trampolines and every one
+# reaches a versioned entry first.
+#
+# What this costs is a caller built against CUDA 3.x headers, which would hand
+# 32-bit arguments to a 64-bit wrapper. Those headers predate 2011 and this
+# library needs far newer ones to build at all.
+#
+# The trampolines do still keep an `else` that calls the plain v1 entry with
+# the modern arguments if _v2 is missing - a rule 2 deviation that can only be
+# reached on a pre-CUDA-4.0 driver, i.e. never. Left alone rather than churning
+# forty hot-path functions for a branch nothing executes; recorded here so the
+# next reader does not have to re-derive it.
+#
+# Generated and verified by hack/check_abi_signatures.py --check-wrappers
+# against CUDA 13.4.2 (2026-10).
+MODERN_ONLY_FAMILIES: set = {
+    # cuTexRefSetAddress2D was in R7_ALLOWLIST as signature-stable on the
+    # strength of _v2 and _v3 agreeing, which they do - but the plain ELF
+    # symbol takes CUDA_ARRAY_DESCRIPTOR_v1, CUdeviceptr_v1 and unsigned int.
+    # All three wrappers declare the modern form and _cuTexRefSetAddress2D
+    # tries _v3, then _v2, then the plain entry, so this is the modern-only
+    # pattern and not an exemption. Texture references were removed in CUDA
+    # 12, which is why nobody noticed.
+    "cuTexRefSetAddress2D",
+    # Same shape, from cudaGL.h: the wrappers declare CUdeviceptr and size_t
+    # while the plain ELF symbols take CUdeviceptr_v1 and unsigned int, and
+    # both trampolines try the _v2 entry first. Read, not assumed.
+    "cuGLMapBufferObject",  "cuGLMapBufferObjectAsync",
+    "cuArray3DCreate",  "cuArray3DGetDescriptor",  "cuArrayCreate",
+    "cuArrayGetDescriptor",  "cuDeviceTotalMem",
+    "cuGraphicsResourceGetMappedPointer",  "cuMemAlloc",  "cuMemAllocHost",
+    "cuMemAllocPitch",  "cuMemFree",  "cuMemGetAddressRange",
+    "cuMemGetInfo",  "cuMemHostGetDevicePointer",  "cuMemcpy2D",
+    "cuMemcpy2DAsync",  "cuMemcpy2DUnaligned",  "cuMemcpy3D",
+    "cuMemcpy3DAsync",  "cuMemcpyAtoA",  "cuMemcpyAtoD",  "cuMemcpyAtoH",
+    "cuMemcpyAtoHAsync",  "cuMemcpyDtoA",  "cuMemcpyDtoD",
+    "cuMemcpyDtoDAsync",  "cuMemcpyDtoH",  "cuMemcpyDtoHAsync",
+    "cuMemcpyHtoA",  "cuMemcpyHtoAAsync",  "cuMemcpyHtoD",
+    "cuMemcpyHtoDAsync",  "cuMemsetD16",  "cuMemsetD2D16",  "cuMemsetD2D32",
+    "cuMemsetD2D8",  "cuMemsetD32",  "cuMemsetD8",  "cuModuleGetGlobal",
+    "cuTexRefGetAddress",  "cuTexRefSetAddress",
+}
+
+# Families no public header declares both forms of, so neither this checker
+# nor a reader can say whether their ABIs differ.
+#
+# cuda.h carries `#define cuLinkCreate cuLinkCreate_v2` and friends, and
+# declares the plain names only inside its __CUDA_API_VERSION_INTERNAL block;
+# the _v2 names appear nowhere as a prototype. JIT linking left the public API,
+# and the signature went with it. cudaGL.h and cudaVDPAU.h do not have them
+# either. Settling these needs headers NVIDIA does not ship, so they are
+# recorded as undecidable rather than guessed at or left to nag - a family that
+# is genuinely new and unclassified has to stay visible, which it cannot if the
+# report never empties.
+UNDECLARED_FAMILIES: set = {
+    "cuLinkCreate",  "cuLinkAddData",  "cuLinkAddFile",
+}
+
+# Wrapper parameters that differ from the ELF symbol's in spelling only.
+#
+# --check-wrappers compares type names, so a pointer written as void* reads as
+# a mismatch against a typed pointer even though the two are passed
+# identically. An entry here is a claim that the difference cannot change a
+# call frame.
+BIND_ALLOWLIST: dict = {
+    "cuGetProcAddress_v2":
+        "Declares void *symbolStatus where the ABI says "
+        "CUdriverProcAddressQueryResult *. Both are pointers and pass the "
+        "same way; the enum is not vendored in cuda-subset.h, and the wrapper "
+        "only forwards the argument.",
+}
+
+# R7 allowlist: base names whose versioned ELF exports all take the SAME C
+# parameter list, so no caller can be handed a frame it did not build.
+#
+# To audit, compare each wrapper against the ABI OF THE SYMBOL IT IS NAMED
+# AFTER. That is not the same question as whether the wrappers agree with
+# each other, and the older wording here asked the second one: the three
+# cuTexRefSetAddress2D wrappers do all take the same types, which is what
+# that entry below still claims, while the plain ELF symbol takes the
+# pre-CUDA-4.0 ones. hack/check_abi_signatures.py --check-wrappers asks the
+# first question against a real <cuda.h>; `make check-abi-signatures` runs it.
+#
+# The parameter lists quoted below were taken from CUDA 13.4.2 by that tool
+# rather than typed out, and each family's wrappers were confirmed to declare
+# the ABI of their own symbol.
 R7_ALLOWLIST: dict = {
-    # cuTexRefSetAddress2D / _v2 / _v3 — all take
-    #   (CUtexref, const CUDA_ARRAY_DESCRIPTOR *, CUdeviceptr, size_t)
-    # The v-bumps reflected internal CUDA_ARRAY_DESCRIPTOR struct format
-    # changes, not C ABI. Texture references have been deprecated since
-    # CUDA 5.0 and removed in CUDA 12.0, so there is no driver-595 risk.
-    # Verified against src/cuda_originals.c:977-1020 (2026-05).
-    "cuTexRefSetAddress2D":
-        "All _vN forms take 4 args (CUtexref, const CUDA_ARRAY_DESCRIPTOR *, "
-        "CUdeviceptr, size_t Pitch). Version bumps were internal descriptor "
-        "format only. Tex refs deprecated since CUDA 5.0, removed in CUDA 12.0.",
+    "cuCtxDestroy":
+        "cuCtxDestroy and cuCtxDestroy_v2 both take (CUcontext).",
+    "cuCtxPopCurrent":
+        "cuCtxPopCurrent and cuCtxPopCurrent_v2 both take (CUcontext*).",
+    "cuCtxPushCurrent":
+        "cuCtxPushCurrent and cuCtxPushCurrent_v2 both take (CUcontext).",
+    "cuDeviceGetUuid":
+        "cuDeviceGetUuid and cuDeviceGetUuid_v2 both take (CUuuid*, "
+        "CUdevice). The newer entry is not merely a rename: cuda.h says "
+        "it returns the MIG UUID when the device is in MIG mode. "
+        "Preferring it is a behaviour choice, which this entry does not "
+        "speak to - only the parameter list.",
+    "cuDevicePrimaryCtxRelease":
+        "cuDevicePrimaryCtxRelease and cuDevicePrimaryCtxRelease_v2 both "
+        "take (CUdevice).",
+    "cuDevicePrimaryCtxReset":
+        "cuDevicePrimaryCtxReset and cuDevicePrimaryCtxReset_v2 both take "
+        "(CUdevice).",
+    "cuDevicePrimaryCtxSetFlags":
+        "cuDevicePrimaryCtxSetFlags and cuDevicePrimaryCtxSetFlags_v2 "
+        "both take (CUdevice, unsigned int).",
+    "cuEventDestroy":
+        "cuEventDestroy and cuEventDestroy_v2 both take (CUevent).",
+    "cuGLCtxCreate":
+        "cuGLCtxCreate and cuGLCtxCreate_v2 both take (CUcontext*, unsigned "
+        "int, CUdevice). Declared in cudaGL.h, where the body prototype "
+        "carries a __CUDA_DEPRECATED prefix.",
+    "cuGLGetDevices":
+        "cuGLGetDevices and cuGLGetDevices_v2 both take (unsigned int*, "
+        "CUdevice*, unsigned int, CUGLDeviceList). From cudaGL.h.",
+    "cuVDPAUCtxCreate":
+        "cuVDPAUCtxCreate and cuVDPAUCtxCreate_v2 both take (CUcontext*, "
+        "unsigned int, CUdevice, VdpDevice, VdpGetProcAddress*). From "
+        "cudaVDPAU.h.",
+    "cuGraphicsResourceSetMapFlags":
+        "cuGraphicsResourceSetMapFlags and "
+        "cuGraphicsResourceSetMapFlags_v2 both take (CUgraphicsResource, "
+        "unsigned int).",
+    "cuIpcOpenMemHandle":
+        "cuIpcOpenMemHandle and cuIpcOpenMemHandle_v2 both take "
+        "(CUdeviceptr*, CUipcMemHandle, unsigned int).",
+    "cuMemHostRegister":
+        "cuMemHostRegister and cuMemHostRegister_v2 both take (void*, "
+        "size_t, unsigned int).",
+    "cuStreamBatchMemOp":
+        "cuStreamBatchMemOp and cuStreamBatchMemOp_v2 both take "
+        "(CUstream, unsigned int, CUstreamBatchMemOpParams*, unsigned "
+        "int).",
+    "cuStreamDestroy":
+        "cuStreamDestroy and cuStreamDestroy_v2 both take (CUstream).",
+    "cuStreamWaitValue32":
+        "cuStreamWaitValue32 and cuStreamWaitValue32_v2 both take "
+        "(CUstream, CUdeviceptr, cuuint32_t, unsigned int).",
+    "cuStreamWaitValue64":
+        "cuStreamWaitValue64 and cuStreamWaitValue64_v2 both take "
+        "(CUstream, CUdeviceptr, cuuint64_t, unsigned int).",
+    "cuStreamWriteValue32":
+        "cuStreamWriteValue32 and cuStreamWriteValue32_v2 both take "
+        "(CUstream, CUdeviceptr, cuuint32_t, unsigned int).",
+    "cuStreamWriteValue64":
+        "cuStreamWriteValue64 and cuStreamWriteValue64_v2 both take "
+        "(CUstream, CUdeviceptr, cuuint64_t, unsigned int).",
+    # cuGraphInstantiate and _v2 both take
+    #   (CUgraphExec*, CUgraph, CUgraphNode*, char*, size_t)
+    # - cuda.h declares both explicitly in its __CUDA_API_VERSION_INTERNAL
+    # block. The `#define cuGraphInstantiate cuGraphInstantiateWithFlags` at
+    # the top of cuda.h redirects CUDA 12+ source to a DIFFERENT function,
+    # which this library wraps separately; it says nothing about the ABI of
+    # the plain ELF symbol. Verified against CUDA 13.4.2 (2026-10).
+    "cuGraphInstantiate":
+        "Both ELF symbols take (CUgraphExec*, CUgraph, CUgraphNode*, char*, "
+        "size_t). The unversioned name is macro-redirected to "
+        "cuGraphInstantiateWithFlags in modern headers, which is a separate "
+        "function with its own wrapper, not a version of this one.",
+
 }
 
 
@@ -272,16 +469,28 @@ def main() -> int:
     # which would let cuGetProcAddress substitute the wrong-ABI wrapper
     # and produce the LD_PRELOAD frame-mismatch hang documented in
     # Issue #1834.
+    #
+    # The unversioned name counts as a version of its own. It is an ELF symbol
+    # with an ABI like any other, and requiring two _vN siblings before asking
+    # about a family left the commonest shape - plain plus _v2 - unexamined
+    # entirely. cuGraphKernelNodeGetParams was that shape, and both of its
+    # wrappers declared the newer struct while one of them was the plain
+    # symbol, so the driver wrote past a caller's frame. R7 never saw it.
     multi_ver_bases: dict[str, list[int]] = {}
     ver_re = re.compile(r"^(cu[A-Z][A-Za-z0-9_]*)_v(\d+)$")
+    loader_set_all = set(loader_entries)
     for entry in loader_entries:
         m = ver_re.match(entry)
         if m:
             base = m.group(1)
             ver = int(m.group(2))
             multi_ver_bases.setdefault(base, []).append(ver)
+    for base, vers in multi_ver_bases.items():
+        if base in loader_set_all:
+            vers.append(1)
     multi_ver = {b: sorted(v) for b, v in multi_ver_bases.items() if len(v) >= 2}
-    classified = set(ABI_CONFLICT_FAMILIES) | set(R7_ALLOWLIST)
+    classified = (set(ABI_CONFLICT_FAMILIES) | set(R7_ALLOWLIST)
+                  | set(MODERN_ONLY_FAMILIES) | set(UNDECLARED_FAMILIES))
     unclassified = {b: vs for b, vs in multi_ver.items() if b not in classified}
     if unclassified:
         lines = []
@@ -290,18 +499,20 @@ def main() -> int:
             lines.append(f"           - {base}  ({ver_str})")
         errors.append(
             f"[R7] {len(unclassified)} base name(s) have multiple _vN "
-            f"siblings in cuda_library_entry[] but are not classified:\n"
             + "\n".join(lines)
             + "\n         Each must go into ONE of:\n"
-            f"           ABI_CONFLICT_FAMILIES  (if signatures DIFFER across\n"
-            f"                                   versions — like cuCtxCreate\n"
-            f"                                   where _v2 has 3 args and _v4\n"
-            f"                                   has 4)\n"
-            f"           R7_ALLOWLIST           (if all versions take the\n"
-            f"                                   SAME C parameter list — only\n"
-            f"                                   internal driver bumps)\n"
-            f"         Verify each wrapper signature in cuda_originals.c\n"
-            f"         BEFORE deciding."
+            "           ABI_CONFLICT_FAMILIES  (parameter lists DIFFER between\n"
+            "                                   versions, and each exported\n"
+            "                                   wrapper binds its own entry)\n"
+            "           R7_ALLOWLIST           (every version takes the SAME\n"
+            "                                   parameter list)\n"
+            "           MODERN_ONLY_FAMILIES   (they differ upstream, and this\n"
+            "                                   library implements only the\n"
+            "                                   newer ABI under both names)\n"
+            "           UNDECLARED_FAMILIES    (no public header declares both\n"
+            "                                   forms, so it cannot be said)\n"
+            "         hack/check_abi_signatures.py decides which, from a real\n"
+            "         <cuda.h>. Do not classify one from the comments."
         )
 
     # Report
