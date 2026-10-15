@@ -20,7 +20,10 @@ ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 ARG DNF_MIRROR
 
-ARG GOLANG_VERSION=1.26.0
+# Overridden by the Makefile from go.mod's toolchain directive; this default
+# only applies to a bare `docker build`. Keep it on a patched release, never
+# on a .0 - see the note in versions.mk.
+ARG GOLANG_VERSION=1.26.9
 
 RUN echo "Asia/Shanghai" > /etc/timezone && ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 

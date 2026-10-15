@@ -97,7 +97,7 @@ spec:
         # 把 libvgpu-control.so / nvidia-cdi-hook 等文件从镜像落盘到节点 hostPath，
         # lupine-server 的 LD_PRELOAD 与 checkpoint provider 都指向它。
         - name: init-install
-          image: ghcr.io/coldzerofear/vgpu-managerlatest
+          image: ghcr.io/coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
           env:
@@ -115,7 +115,7 @@ spec:
               mountPropagation: Bidirectional
       containers:
         - name: remote-agent
-          image: ghcr.io/coldzerofear/vgpu-managerlatest      # ← 需含 remote-agent 二进制
+          image: ghcr.io/coldzerofear/vgpu-manager:latest      # ← 需含 remote-agent 二进制
           imagePullPolicy: IfNotPresent
           command:
             - remote-agent
@@ -145,6 +145,9 @@ spec:
             # 发布成节点注解 nvidia.com/remote-endpoints
             - name: REMOTE_SERVER_ENDPOINT
               value: ":$(LUPINE_PORT)"
+            # 控制agent->lupine-server探测客户端跳过证书校验
+            - name: PROBE_INSECURE_SKIP_VERIFY
+              value: "0"
             # 【按域名寻址时打开这一组】HOSTNAME 由 webhook 按节点名注入；两个 ADVERTISE_*
             # 让 agent 把域名（而不是 Pod IP）报给设备插件去发布。少了 agent 那条，消费侧
             # 会拿到 Pod IP：每次 Pod 重建后要等一轮（5s）注解刷新才恢复。
@@ -288,7 +291,7 @@ spec:
               mountPath: /run/vgpu
               readOnly: true
         - name: device-monitor
-          image: ghcr.io/coldzerofear/vgpu-managerlatest
+          image: ghcr.io/coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor

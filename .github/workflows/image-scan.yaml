@@ -58,9 +58,14 @@ jobs:
           format: sarif
           output: trivy-${{ matrix.image }}.sarif
           severity: 'CRITICAL,HIGH'
-          # Unfixed findings are reported but do not gate: the CUDA base image
-          # carries some that only NVIDIA can fix.
-          ignore-unfixed: false
+          # Only what can be acted on becomes an alert. Reporting unfixed
+          # findings here put several hundred permanently-open alerts in the
+          # security tab - CVEs in the CUDA image's own packages with no fixed
+          # version, duplicated because both images share that base - and a tab
+          # nobody can ever empty is a tab nobody reads. They are not hidden:
+          # the summary step below still renders every finding, fixed or not,
+          # into the run summary.
+          ignore-unfixed: true
       - name: Upload the results
         uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
         with:
@@ -74,6 +79,10 @@ jobs:
           image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ inputs.tag || 'latest' }}
           format: table
           severity: 'CRITICAL,HIGH'
+          # Deliberately not ignore-unfixed: this table is the full picture,
+          # including what only NVIDIA can fix. The SARIF step above is the
+          # one that has to stay actionable.
+          ignore-unfixed: false
           output: trivy-${{ matrix.image }}.txt
       - name: Write the summary
         run: |

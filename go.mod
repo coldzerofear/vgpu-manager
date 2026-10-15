@@ -2,6 +2,8 @@ module github.com/coldzerofear/vgpu-manager
 
 go 1.26.0
 
+toolchain go1.26.9
+
 require (
 	github.com/Masterminds/semver v1.5.0
 	github.com/NVIDIA/go-nvfm v0.1.0
