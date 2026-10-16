@@ -358,8 +358,13 @@ example pinning GPUs and CPUs to the same root complex together with
 The webhook converts a `nvidia.com/device-topology-mode: link` pod into a `matchAttribute`
 constraint on `nvlinkDomain`, and a `pcie` pod into one on `pcieDomain`, so **enable this gate on
 every node that should be able to satisfy either constraint**. A node without the attribute cannot
-satisfy one, and such pods stay Unschedulable there — which is the intended meaning of those modes,
-but it does mean a cluster using them has to roll the gate out before the pods can land.
+satisfy one, and such pods stay Unschedulable there, so a cluster using these modes has to roll the
+gate out before the pods can land.
+
+A `matchAttribute` constraint is always hard, so on the DRA path the non-strict modes behave like
+their `-strict` variants: there is no fallback to an unconstrained allocation as there is on the
+scheduler-extender path. The shipped manifests therefore default the webhook to
+`--default-topology-mode=numa`.
 
 The connectivity thresholds are the same ones the scheduler-extender's link tiers use, so a `link`
 or `pcie` pod means the same thing on both paths.

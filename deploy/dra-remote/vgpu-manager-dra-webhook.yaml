@@ -439,7 +439,7 @@ spec:
             - --kube-api-qps=20
             - --kube-api-burst=30
             - --server-bind-port=9443
-            - --default-topology-mode=link
+            - --default-topology-mode=numa
             - --vgpu-device-class-name=vgpu-manager
             - --dra-admission-enabled
             - --default-convert2-dra

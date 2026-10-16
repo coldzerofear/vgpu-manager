@@ -153,7 +153,7 @@ kubeletPlugin:
         # every node that should be able to satisfy a `nvidia.com/device-topology-mode: link` or
         # `pcie` pod, since the webhook converts those into matchAttribute constraints on those
         # attributes. A node without them cannot satisfy such a pod at all.
-        TopologyDeviceAttributes: false
+        TopologyDeviceAttributes: true
         # Publish list-valued DRA device attributes
         DRAListTypeAttributes: false
         # Publish consumable capacity and multi-allocation support for devices
@@ -316,8 +316,11 @@ webhook:
     defaultNodePolicy: ""
     # Default device scheduling policy. Empty uses the binary default. (supported values: binpack | spread)
     defaultDevicePolicy: ""
-    # Default device list topology mode. (supported values: numa | link)
-    defaultTopologyMode: link
+    # Default device list topology mode. Empty leaves pods without one.
+    # (supported values: numa | link | pcie, each also with a "-strict" variant)
+    # link / pcie need the kubelet-plugin's TopologyDeviceAttributes gate on every node that should
+    # host such pods; on the DRA path every mode is a hard constraint, strict or not.
+    defaultTopologyMode: numa
     # Default container runtimeClassName set on vGPU pods. Empty disables it. (code default: "")
     defaultRuntimeClass: ""
     # Name of the vGPU device class used for DRA conversion. (code default: "vgpu-manager")
