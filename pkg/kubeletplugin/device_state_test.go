@@ -19,6 +19,7 @@ package kubeletplugin
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -427,6 +428,7 @@ type testFMClient struct {
 	partitions     []fabricmanager.Partition
 	activatedIDs   []int
 	deactivatedIDs []int
+	activateErr    error
 }
 
 func (c *testFMClient) Init() error     { return nil }
@@ -435,6 +437,9 @@ func (c *testFMClient) GetSupportedFabricPartitions() ([]fabricmanager.Partition
 	return c.partitions, nil
 }
 func (c *testFMClient) ActivateFabricPartition(id int) error {
+	if c.activateErr != nil {
+		return c.activateErr
+	}
 	c.activatedIDs = append(c.activatedIDs, id)
 	return nil
 }
@@ -937,6 +942,18 @@ func TestNodeFabricPartitionUnderVGPUSupport(t *testing.T) {
 		state.nvdevlib.gpuInfosByUUID["GPU-2222"] = &GpuDeviceInfo{
 			GpuInfo: &nvidia.GpuInfo{UUID: "GPU-2222"}, gpuModuleID: 3,
 		}
+
+		require.NoError(t, state.activateNodeFabricPartition())
+		require.Empty(t, client.activatedIDs)
+	})
+
+	// FM refuses activation while an overlapping partition is active, e.g. one
+	// left by per-claim partitioning before VGPUSupport was turned on. That must
+	// not crash-loop the plugin.
+	t.Run("a refused activation is not a startup failure", func(t *testing.T) {
+		setVGPUSupport(t, true)
+		state, client := newState(t)
+		client.activateErr = errors.New("partition overlaps an active partition")
 
 		require.NoError(t, state.activateNodeFabricPartition())
 		require.Empty(t, client.activatedIDs)

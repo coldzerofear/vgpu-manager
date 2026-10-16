@@ -261,7 +261,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	// opt-in, and a node that silently published no topology attributes would
 	// make every link/pcie-topology pod unschedulable with nothing to point at.
 	if featuregates.Enabled(featuregates.TopologyDeviceAttributes) {
-		state.topologyDomains, err = nvdevlib.discoverTopologyDomains(config.Flags.NodeName)
+		state.topologyDomains, err = nvdevlib.discoverTopologyDomains(config.NodeName)
 		if err != nil {
 			return nil, fmt.Errorf("resolving interconnect topology: %w", err)
 		}
@@ -1780,7 +1780,15 @@ func (s *DeviceState) activateNodeFabricPartition() error {
 
 	klog.V(2).Infof("Fabric Manager: activating node partition %d covering %d GPUs (VGPUSupport)", partitionID, len(gpus))
 	if err := s.fmManager.ActivatePartition(partitionID); err != nil {
-		return fmt.Errorf("activating node fabric partition %d: %w", partitionID, err)
+		// Same reasoning as above: failing here would crash-loop the plugin
+		// over an optimisation. The likeliest cause is a partition that
+		// overlaps this one still being active -- left behind by per-claim
+		// partitioning from before VGPUSupport was turned on, which nothing
+		// under VGPUSupport deactivates any more -- and only an operator can
+		// clear that safely.
+		klog.Warningf("Fabric Manager: activating node partition %d failed: %v; leaving the NVSwitch fabric as it is. "+
+			"If a partition overlapping it is still active (e.g. left by per-claim partitioning), deactivate it with "+
+			"Fabric Manager and restart this plugin", partitionID, err)
 	}
 	return nil
 }
