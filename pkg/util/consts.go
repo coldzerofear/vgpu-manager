@@ -332,7 +332,8 @@ const (
 	LinkTopologyStrict TopologyMode = "link-strict"
 	// PCIeTopology finds the best device set among GPUs that can reach each
 	// other by peer-to-peer DMA without crossing a PCIe host bridge — the
-	// level below NVLink and above NUMA. It is the useful topology on servers
+	// link tier below NVLink (NVLink links count too, so a set can span CPU
+	// sockets; it is not a NUMA guarantee). It is the useful topology on servers
 	// with no NVLink at all, where `link` can only downgrade and `numa` is too
 	// coarse to promise P2P. Best-effort: allocation falls back to
 	// non-topology-aware selection when no such set exists.
@@ -346,12 +347,13 @@ const (
 // build constraints from. Named here so the publisher and the consumers cannot
 // drift apart.
 const (
-	// NVLinkDomainDeviceAttribute is equal exactly for GPUs that can reach
-	// each other over NVLink. Published only with the kubelet plugin's
+	// NVLinkDomainDeviceAttribute is equal for the GPUs of one NVLink-connected
+	// component on one node; never equal across nodes. Published only with the kubelet plugin's
 	// TopologyDeviceAttributes feature gate.
 	NVLinkDomainDeviceAttribute = "nvlinkDomain"
-	// PCIeDomainDeviceAttribute is equal exactly for GPUs that can reach each
-	// other by peer-to-peer DMA without crossing a PCIe host bridge. It is
+	// PCIeDomainDeviceAttribute is equal for the GPUs of one component
+	// connected by peer-to-peer DMA without crossing a PCIe host bridge
+	// (NVLink links included), on one node. It is
 	// NOT the standard pcieRoot attribute, which groups by root complex and
 	// so also pairs GPUs that have to cross the bridge to talk.
 	PCIeDomainDeviceAttribute = "pcieDomain"

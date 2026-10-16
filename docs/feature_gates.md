@@ -339,12 +339,19 @@ Publishes each device's interconnect as three attributes:
 
 * `clique` — the hardware fabric identity (`clique:<clusterUUID>.<cliqueID>`, from NVML). On MNNVL
   systems one clique spans several nodes.
-* `nvlinkDomain` — equal exactly for GPUs that can reach each other over NVLink. It falls back to a
-  node-local connected-component key when the hardware reports no fabric identity, so it also works
-  on NVLink hardware without NVSwitch.
-* `pcieDomain` — equal exactly for GPUs that can reach each other by peer-to-peer DMA **without
-  crossing a PCIe host bridge**. Always node-local. The tiers nest, so NVLink peers are included
+* `nvlinkDomain` — equal for the GPUs of one NVLink-connected component **on this node**. Always
+  node-local, also on MNNVL: a claim can draw devices from several nodes (remote-GPU pools), and a
+  plain claim cannot use a cross-node NVLink path. The fabric identity is still used — it keeps two
+  independent NVSwitch fabrics in one chassis apart — but it never becomes the key. Match on
+  `clique` instead when cross-node fabric membership is what a claim means. Works on NVLink hardware
+  without NVSwitch too.
+* `pcieDomain` — equal for the GPUs of one component connected by peer-to-peer DMA **without
+  crossing a PCIe host bridge**. Always node-local. The tiers nest, so NVLink links count as well
   and a GPU normally carries both domains.
+
+Both domains are connected components, so two GPUs share one when a chain of qualifying links joins
+them. Neither says anything about NUMA: NVLink crosses CPU sockets, so one `nvlinkDomain` or
+`pcieDomain` routinely spans two NUMA nodes.
 
 A GPU with no peer at a level publishes no attribute for that level, so a `matchAttribute`
 constraint correctly refuses it.

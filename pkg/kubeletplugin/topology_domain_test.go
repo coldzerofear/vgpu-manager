@@ -213,14 +213,14 @@ func TestAddTopologyDeviceAttributes(t *testing.T) {
 	t.Run("a fabric-attached GPU publishes all three attributes", func(t *testing.T) {
 		attrs := attrsFor(deviceTopology{
 			Clique:       "clique:aa.1",
-			NVLinkDomain: "clique:aa.1",
+			NVLinkDomain: "nvlink:8899aabbccddeeff",
 			PCIeDomain:   "pcie:0011223344556677",
 		})
 		if got := value(attrs, util.CliqueDeviceAttribute); got != "clique:aa.1" {
 			t.Fatalf("clique = %q, want clique:aa.1", got)
 		}
-		if got := value(attrs, util.NVLinkDomainDeviceAttribute); got != "clique:aa.1" {
-			t.Fatalf("nvlinkDomain = %q, want clique:aa.1", got)
+		if got := value(attrs, util.NVLinkDomainDeviceAttribute); got != "nvlink:8899aabbccddeeff" {
+			t.Fatalf("nvlinkDomain = %q, want nvlink:8899aabbccddeeff", got)
 		}
 		if got := value(attrs, util.PCIeDomainDeviceAttribute); got != "pcie:0011223344556677" {
 			t.Fatalf("pcieDomain = %q, want pcie:0011223344556677", got)
@@ -258,6 +258,98 @@ func TestAddTopologyDeviceAttributes(t *testing.T) {
 	t.Run("a GPU with no peer at any level publishes nothing", func(t *testing.T) {
 		if attrs := attrsFor(deviceTopology{}); len(attrs) != 0 {
 			t.Fatalf("attrs = %v, want none", attrs)
+		}
+	})
+}
+
+func TestAssembleTopologies(t *testing.T) {
+	uuids := []string{"GPU-0", "GPU-1", "GPU-2", "GPU-3"}
+	// GPUs 0-1 are NVLink peers, as are 2-3; the two pairs share a PCIe switch
+	// only within a pair, so each pair is also its own PCIe domain.
+	matrix := func() [][]links.P2PLinkType {
+		m := make([][]links.P2PLinkType, len(uuids))
+		for i := range m {
+			m[i] = make([]links.P2PLinkType, len(uuids))
+		}
+		link := func(i, j int, t links.P2PLinkType) { m[i][j], m[j][i] = t, t }
+		link(0, 1, links.SingleNVLINKLink)
+		link(2, 3, links.SingleNVLINKLink)
+		link(0, 2, links.P2PLinkCrossCPU)
+		link(0, 3, links.P2PLinkCrossCPU)
+		link(1, 2, links.P2PLinkCrossCPU)
+		link(1, 3, links.P2PLinkCrossCPU)
+		return m
+	}
+	assemble := func(t *testing.T, nodeName string, cliques []string) map[string]deviceTopology {
+		t.Helper()
+		topos, err := assembleTopologies(nodeName, uuids, cliques, matrix())
+		if err != nil {
+			t.Fatalf("assembleTopologies: %v", err)
+		}
+		return topos
+	}
+	noCliques := make([]string, len(uuids))
+
+	t.Run("the clique is published but does not become the NVLink domain", func(t *testing.T) {
+		cliques := []string{"aa.1", "aa.1", "aa.1", "aa.1"}
+		topos := assemble(t, "node-a", cliques)
+		for _, uuid := range uuids {
+			if got := topos[uuid].Clique; got != "clique:aa.1" {
+				t.Fatalf("%s clique = %q, want clique:aa.1", uuid, got)
+			}
+			if !strings.HasPrefix(topos[uuid].NVLinkDomain, topologyNVLinkPrefix) {
+				t.Fatalf("%s nvlinkDomain = %q, want a node-local component key", uuid, topos[uuid].NVLinkDomain)
+			}
+		}
+		if topos["GPU-0"].NVLinkDomain != topos["GPU-1"].NVLinkDomain {
+			t.Fatal("NVLink peers must share a domain")
+		}
+		if topos["GPU-0"].NVLinkDomain == topos["GPU-2"].NVLinkDomain {
+			t.Fatal("two NVLink islands must not share a domain just because they share a clique")
+		}
+	})
+
+	// A claim can draw from several nodes (remote-GPU pools), and a plain
+	// claim cannot use a cross-node NVLink path.
+	t.Run("one clique on two nodes is two NVLink domains", func(t *testing.T) {
+		cliques := []string{"aa.1", "aa.1", "aa.1", "aa.1"}
+		a, b := assemble(t, "node-a", cliques), assemble(t, "node-b", cliques)
+		if a["GPU-0"].Clique != b["GPU-0"].Clique {
+			t.Fatal("the clique is the cross-node identity and must stay equal")
+		}
+		if a["GPU-0"].NVLinkDomain == b["GPU-0"].NVLinkDomain {
+			t.Fatal("nvlinkDomain must never compare equal across nodes")
+		}
+	})
+
+	t.Run("a partially reported clique does not split a component", func(t *testing.T) {
+		topos := assemble(t, "node-a", []string{"aa.1", "", "", ""})
+		if topos["GPU-0"].NVLinkDomain != topos["GPU-1"].NVLinkDomain {
+			t.Fatalf("NVLink peers split by a missing clique: %q vs %q",
+				topos["GPU-0"].NVLinkDomain, topos["GPU-1"].NVLinkDomain)
+		}
+		if topos["GPU-1"].Clique != "" {
+			t.Fatal("an unreported clique must not be invented")
+		}
+	})
+
+	t.Run("without cliques the domains are the components", func(t *testing.T) {
+		topos := assemble(t, "node-a", noCliques)
+		if topos["GPU-0"].NVLinkDomain == "" || topos["GPU-0"].NVLinkDomain != topos["GPU-1"].NVLinkDomain {
+			t.Fatal("NVLink peers must share a non-empty domain")
+		}
+		if topos["GPU-0"].PCIeDomain != topos["GPU-1"].PCIeDomain || topos["GPU-0"].PCIeDomain == topos["GPU-2"].PCIeDomain {
+			t.Fatal("PCIe domains must follow the components, NVLink edges included")
+		}
+	})
+
+	t.Run("a clique with no local NVLink peer gives no NVLink domain", func(t *testing.T) {
+		topos, err := assembleTopologies("node-a", []string{"GPU-0"}, []string{"aa.1"}, [][]links.P2PLinkType{{0}})
+		if err != nil {
+			t.Fatalf("assembleTopologies: %v", err)
+		}
+		if got := topos["GPU-0"]; got.Clique != "clique:aa.1" || got.NVLinkDomain != "" || got.PCIeDomain != "" {
+			t.Fatalf("topology = %+v, want only the clique", got)
 		}
 	})
 }

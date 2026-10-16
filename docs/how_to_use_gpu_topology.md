@@ -11,16 +11,31 @@ Annotation `nvidia.com/device-topology-mode` supports values:
 * numa: Recognize the affinity of numa and try to allocate GPUs on numa nodes of the same side.
 * link: Identify nvlinks and try to allocate to the optimal nvlink topology to improve multi card performance.
 * pcie: Allocate GPUs that can reach each other by peer-to-peer DMA **without crossing a PCIe host
-  bridge**. This is the level between `link` and `numa`, and it is the useful mode on servers with
-  no NVLink at all — there `link` can only downgrade, and `numa` is too coarse to promise P2P at
+  bridge**. This is the connectivity level below `link`, and it is the useful mode on servers with
+  no NVLink at all — there `link` can only downgrade, and `numa` promises nothing about P2P at
   all. On an NVSwitch node `link` is strictly better, so use `pcie` only where NVLink is absent or
   not required.
 * numa-strict / link-strict / pcie-strict: same as above, but a node that cannot satisfy the
   topology is **rejected** instead of falling back to plain resource ordering.
 
-The three modes nest: a set connected over NVLink also satisfies `pcie`, and a set satisfying
-`pcie` also sits within one NUMA node. A mode therefore accepts anything **tighter** than what it
-asked for — `pcie-strict` is happy with an NVLink group — and only rejects what is looser.
+`link` and `pcie` nest: a set connected over NVLink also satisfies `pcie`, so `pcie` accepts
+anything **tighter** than what it asked for — `pcie-strict` is happy with an NVLink group — and only
+rejects what is looser.
+
+`numa` is a different axis, not the next level down. It groups GPUs by the NUMA node they are
+attached to, while `link` and `pcie` group by connectivity, and NVLink is not bounded by a CPU
+socket: on a typical 8-GPU HGX board GPUs 0-3 hang off one socket and 4-7 off the other, yet all
+eight are NVLink peers, so one `link` or `pcie` group spans both NUMA nodes. Do not read a `pcie`
+placement as NUMA-local; use `numa` when CPU/memory locality is what you need.
+
+Groups are connected components: two GPUs are in one group when a chain of qualifying links joins
+them, not only when they are linked directly. For `pcie` that means a group joined by NVLink can
+contain two GPUs whose own PCIe path crosses the host bridge — they still reach each other without
+it, over NVLink.
+
+> On the DRA path every topology mode becomes a `matchAttribute` constraint, which is always hard:
+> `link` behaves like `link-strict` there (and likewise for `pcie` and `numa`). See
+> [TopologyDeviceAttributes](./feature_gates.md#topologydeviceattributes).
 
 > Cross-pod topology affinity (`nvidia.com/cross-pod-topology`) applies to `link` only: its
 > alignment keys are defined over NVLink components, so a `pcie` pod never anchors to a gang

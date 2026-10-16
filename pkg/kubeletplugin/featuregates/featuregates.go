@@ -88,9 +88,10 @@ const (
 	// TopologyDeviceAttributes makes the kubelet plugin publish each device's
 	// interconnect as the `clique`, `nvlinkDomain` and `pcieDomain` attributes.
 	// `clique` is the hardware fabric identity (MNNVL cliques span nodes);
-	// `nvlinkDomain` is equal exactly for GPUs that can reach each other over
-	// NVLink; `pcieDomain` is equal exactly for GPUs that can reach each other
-	// by peer-to-peer DMA without crossing a PCIe host bridge. The latter two
+	// `nvlinkDomain` names one NVLink-connected component on this node;
+	// `pcieDomain` names one component connected by peer-to-peer DMA without
+	// crossing a PCIe host bridge (NVLink included). Both are node-local and
+	// neither implies NUMA locality. The latter two
 	// are what the `link` and `pcie` topology modes constrain on. A GPU with no
 	// peer at a level publishes no attribute for it, so the constraint
 	// correctly refuses it. Independent of FabricManagerPartitioning: it reads

@@ -42,12 +42,20 @@ type deviceTopology struct {
 	// Equal values across NODES are meaningful: on MNNVL systems one clique
 	// spans several hosts.
 	Clique string
-	// NVLinkDomain is equal exactly for GPUs that can reach each other over
-	// NVLink. Empty when the GPU has no NVLink peer on this node.
+	// NVLinkDomain is equal exactly for GPUs on THIS node that can reach each
+	// other over NVLink. Empty when the GPU has no NVLink peer on this node.
+	//
+	// It is node-local even where Clique is not. A claim may draw devices from
+	// several nodes (remote-GPU pools are published with a NodeSelector), and
+	// a cross-node NVLink path is not something a plain claim can use: it
+	// needs IMEX / ComputeDomain set up, and remote GPUs are reached over TCP
+	// anyway. Matching on Clique across nodes stays possible for claims that
+	// mean it.
 	NVLinkDomain string
-	// PCIeDomain is equal exactly for GPUs that can reach each other by
-	// peer-to-peer DMA without traversing a PCIe host bridge. Empty when the
-	// GPU has no such peer on this node.
+	// PCIeDomain is equal for the GPUs of one component connected by
+	// peer-to-peer DMA without traversing a PCIe host bridge -- NVLink links
+	// included, so it can span CPU sockets and says nothing about NUMA. Empty
+	// when the GPU has no such peer on this node.
 	//
 	// It is NOT the PCIe root complex: two GPUs under one root can still have
 	// to cross the host bridge to talk, and the standard pcieRoot attribute
@@ -117,33 +125,40 @@ func (l *deviceLib) discoverTopologyDomains(nodeName string) (map[string]deviceT
 	if err != nil {
 		return nil, err
 	}
+	return assembleTopologies(nodeName, uuids, cliques, strongest)
+}
 
-	nvlinkPeers, err := peerSets(len(devs), func(i, j int) (bool, error) {
+// assembleTopologies turns the node's link matrix into per-GPU topology,
+// keyed by UUID. Split out from the NVML walk so the key derivation can be
+// tested without hardware.
+//
+// Both domains are derived from the connected components alone. Fabric
+// identities have already done their part by then -- they split the NVLink
+// edges between two fabrics inside strongestLinks -- so deriving the key
+// from the component rather than from each GPU's own clique keeps the
+// members of one component on one key even when only some of them reported
+// a clique (a fabric still coming up, or one GPU's fabric probe failing).
+func assembleTopologies(nodeName string, uuids, cliques []string, strongest [][]links.P2PLinkType) (map[string]deviceTopology, error) {
+	nvlinkPeers, err := peerSets(len(uuids), func(i, j int) (bool, error) {
 		return strongest[i][j] >= nvlinkConnectedThreshold, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	pciePeers, err := peerSets(len(devs), func(i, j int) (bool, error) {
+	pciePeers, err := peerSets(len(uuids), func(i, j int) (bool, error) {
 		return strongest[i][j] >= pcieConnectedThreshold, nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	topologies := make(map[string]deviceTopology, len(devs))
+	topologies := make(map[string]deviceTopology, len(uuids))
 	for i, uuid := range uuids {
 		topo := deviceTopology{}
 		if cliques[i] != "" {
 			topo.Clique = topologyCliquePrefix + cliques[i]
 		}
-		switch {
-		case topo.Clique != "":
-			// The fabric already names the reachable set, and names it in a
-			// way that stays valid across nodes. Prefer it over the local
-			// component, which cannot see peers on other hosts.
-			topo.NVLinkDomain = topo.Clique
-		case len(nvlinkPeers[i]) > 0:
+		if len(nvlinkPeers[i]) > 0 {
 			topo.NVLinkDomain = componentKey(topologyNVLinkPrefix, nodeName, nvlinkPeers[i], uuids)
 		}
 		if len(pciePeers[i]) > 0 {
@@ -200,8 +215,7 @@ func peerSets(n int, connected func(i, j int) (bool, error)) ([][]int, error) {
 	for i := range parent {
 		parent[i] = i
 	}
-	var find func(int) int
-	find = func(i int) int {
+	find := func(i int) int {
 		for parent[i] != i {
 			parent[i] = parent[parent[i]]
 			i = parent[i]
