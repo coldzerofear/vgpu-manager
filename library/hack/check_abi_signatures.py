@@ -215,6 +215,24 @@ def versioned_families(loader_text: str) -> dict[str, list[str]]:
     return {b: sorted(v) for b, v in sorted(fams.items())}
 
 
+PTS_SUFFIX_RE = re.compile(r"_pt[ds][sz]$")
+
+
+def per_thread_variants(name: str, wrappers: dict) -> list[str]:
+    """`name` plus the per-thread-default-stream forms this library exports.
+
+    These share their family's classification and their counterpart's
+    parameter list, but the family regex only matches cuFoo_vN, so without
+    this they are never looked at - including the _ptsz pair of a family whose
+    non-ptsz pair had its calls crossed.
+    """
+    out = [name]
+    for suffix in ("_ptsz", "_ptds"):
+        if name + suffix in wrappers:
+            out.append(name + suffix)
+    return out
+
+
 def elf_signature(name: str, base: str, body: dict, legacy: dict,
                   redirects: dict[str, str]) -> list[str] | None:
     """Parameter list of the ELF symbol `name`, or None if the header does not
@@ -224,6 +242,12 @@ def elf_signature(name: str, base: str, body: dict, legacy: dict,
     under the base name describes whatever the macro redirects the base to -
     useful for exactly one name, the redirect target.
     """
+    # cuda.h prototypes cuFoo and sometimes cuFoo_ptsz, but never
+    # cuFoo_vN_ptsz. The per-thread forms take the same arguments as the ones
+    # they are named after - the suffix only changes which stream 0 means - so
+    # resolve them through the plain name.
+    name = PTS_SUFFIX_RE.sub("", name) if PTS_SUFFIX_RE.sub("", name) in (
+        set(body) | set(legacy) | {base}) and name not in legacy and name not in body else name
     if name in legacy:
         return legacy[name]
     if name in body and redirects.get(name) in (None, name):
@@ -303,7 +327,8 @@ def check_wrapper_bindings(families: dict[str, list[str]], body: dict, legacy: d
     expected: list[str] = []
     skipped: list[str] = []
     for base, siblings in families.items():
-        for name in (base, *siblings):
+        for family_name in (base, *siblings):
+          for name in per_thread_variants(family_name, wrappers):
             have = wrappers.get(name)
             want = elf_signature(name, base, body, legacy, redirects)
             if have is None or want is None:
@@ -367,22 +392,24 @@ def check_dispatch_targets(families: dict[str, list[str]], body: dict, legacy: d
     """
     source = "\n".join((ROOT / rel).read_text(errors="replace")
                         for rel in WRAPPER_FILES if (ROOT / rel).is_file())
+    all_wrappers = collect_wrapper_signatures()
     errors: list[str] = []
     skipped: list[str] = []
     for base, siblings in families.items():
         if base not in ABI_CONFLICT_FAMILIES:
             continue
-        for name in (base, *siblings):
-            body = wrapper_body(name, source)
-            if body is None:
+        for family_name in (base, *siblings):
+          for name in per_thread_variants(family_name, all_wrappers):
+            wrapper_src = wrapper_body(name, source)
+            if wrapper_src is None:
                 skipped.append(name)
                 continue
-            trampoline = re.search(r"return (_cu\w+)\(", body)
+            trampoline = re.search(r"return (_cu\w+)\(", wrapper_src)
             if trampoline:
                 inner = wrapper_body(trampoline.group(1), source)
                 if inner is not None:
-                    body = inner
-            targets = ENTRY_CALL_RE.findall(body)
+                    wrapper_src = inner
+            targets = ENTRY_CALL_RE.findall(wrapper_src)
             if not targets:
                 skipped.append(name)
                 continue
