@@ -716,9 +716,11 @@ func linkResult(plan *linkPlan) string {
 }
 
 // alignmentOf reports which cross-pod alignment key steered this placement.
-// Empty for pods that did not opt in, so they contribute no series at all.
+// Empty for pods that did not opt in, so they contribute no series at all --
+// and for non-link modes, which never align (see allocateByTopologyMode), so a
+// pcie pod carrying the annotation does not inflate the "none" series.
 func alignmentOf(req *AllocationRequest, anchorRoot int) string {
-	if !req.CrossPodTopology {
+	if !req.CrossPodTopology || req.Topology.BaseTopology() != util.LinkTopology {
 		return ""
 	}
 	switch {

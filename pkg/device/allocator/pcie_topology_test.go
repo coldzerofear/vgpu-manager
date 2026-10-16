@@ -145,3 +145,14 @@ func uuidSet(uuids ...string) map[string]bool {
 	}
 	return out
 }
+
+// A pcie pod never aligns, so carrying the cross-pod annotation must not put
+// it in the alignment series at all, not even as "none".
+func Test_PCIeTopology_NoAlignmentSeries(t *testing.T) {
+	req := &AllocationRequest{CrossPodTopology: true, Topology: util.PCIeTopologyStrict}
+	assert.Empty(t, alignmentOf(req, -1))
+	assert.Empty(t, alignmentOf(req, 0))
+
+	req.Topology = util.LinkTopology
+	assert.NotEmpty(t, alignmentOf(req, -1), "link pods that opted in keep their series")
+}
