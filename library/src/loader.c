@@ -1475,11 +1475,16 @@ device_t get_device_snapshot(int host_index) {
 
 int mmap_file_to_util_path(device_util_t** data) {
   int ret = 1;
-  if (unlikely(file_exist(CONTROLLER_SM_UTIL_FILE_PATH) != 0)) {
-    return 0;
-  }
+  /* No file_exist() pre-check: it only duplicated what open already reports,
+   * and the gap between the two was a time-of-check/time-of-use window. */
   int fd = open(CONTROLLER_SM_UTIL_FILE_PATH, O_RDONLY | O_CLOEXEC);
   if (unlikely(fd == -1)) {
+    /* An absent file means the external SM watcher is simply not deployed,
+     * which is a supported configuration rather than an error. Keep the 0
+     * the file_exist() pre-check returned for it, and keep it unlogged. */
+    if (errno == ENOENT) {
+      return 0;
+    }
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_SM_UTIL_FILE_PATH, strerror(errno));
     return ret;
   }

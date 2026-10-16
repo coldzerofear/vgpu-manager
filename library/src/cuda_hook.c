@@ -2161,7 +2161,18 @@ int check_device_pid_in_cgroupv1_container(unsigned int device_pid) {
       !read_cgroup(host_pid_path, "memory", host_process_cg,
                    sizeof(host_process_cg))) {
     LOGGER(DETAIL, "\ncontainer process cgroup: %s\nhost process cgroup: %s", cont_process_cg, host_process_cg);
-    if (strstr(host_process_cg, cont_process_cg) != NULL) {
+    /* Our own path has to be specific enough to identify us. A container in
+     * its own cgroup namespace reads "/" here, and "/" is a substring of
+     * every absolute host path -- the test below would then claim every
+     * process on the device. This mode needs the host's view of our cgroup
+     * (cgroupns=host, which is what Kubernetes uses on cgroup v1), so when
+     * we cannot see it, report "not ours" rather than "all of them". */
+    if (cont_process_cg[0] != '/' || cont_process_cg[1] == '\0') {
+      LOGGER(VERBOSE, "own cgroup path %s is not specific enough to match against "
+                      "the host's view -- cgroup v1 matching needs cgroupns=host; "
+                      "not claiming pid %u",
+             cont_process_cg, device_pid);
+    } else if (strstr(host_process_cg, cont_process_cg) != NULL) {
       ret = 0;
     }
   }
@@ -2177,13 +2188,16 @@ int check_device_pid_in_cgroupv2_container(unsigned int device_pid) {
   // TODO May I need to check if there are zombie processes?
   char host_pid_path[PATH_MAX];
   snprintf(host_pid_path, sizeof(host_pid_path), HOST_PROC_CGROUP_PID_PATH, device_pid);
-  if (file_exist(host_pid_path) != 0) {
-    return ret;
-  }
-
+  /* No file_exist() pre-check: it only duplicated what fopen already reports,
+   * and the gap between the two was a time-of-check/time-of-use window. */
   FILE *fp = fopen(host_pid_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
   if (!fp) {
-    LOGGER(VERBOSE, "read host pid path %s failed: %s", host_pid_path, strerror(errno));
+    /* A PID that exited between being sampled and being read here is the
+     * common case on this per-PID path, not something worth a log line --
+     * which is exactly what the file_exist() pre-check used to filter. */
+    if (errno != ENOENT) {
+      LOGGER(VERBOSE, "read host pid path %s failed: %s", host_pid_path, strerror(errno));
+    }
     return ret;
   }
 

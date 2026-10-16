@@ -40,12 +40,15 @@ extern int file_exist(const char *file_path);
 extern int ofd_fcntl(int fd, int wait, struct flock *fl);
 int mmap_file_to_config_path(resource_data_t** data) {
   int ret = 1;
-  if (unlikely(file_exist(CONTROLLER_CONFIG_FILE_PATH) != 0)) {
-    return ret;
-  }
+  /* No file_exist() pre-check: it only duplicated what open already reports,
+   * and the gap between the two was a time-of-check/time-of-use window. */
   int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_RDONLY | O_CLOEXEC);
   if (unlikely(fd == -1)) {
-    LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
+    /* An absent config is the ordinary "not configured" case and was silent
+     * while file_exist() screened it out. Only a real error gets logged. */
+    if (errno != ENOENT) {
+      LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
+    }
     return ret;
   }
   /* Read-lock byte 0 so we never validate a file a concurrent writer is
