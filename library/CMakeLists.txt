@@ -287,6 +287,13 @@ if(BUILD_SM_NODE_TESTS)
     target_include_directories(test_session_paths PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+    # Bounds checks for the cgroup line parser. It lives in util.c precisely so
+    # it can be reached without the driver: the overflow it pins down survived
+    # because the parser was buried in cuda_hook.c where nothing could test it.
+    add_executable(test_cgroup_parse test/nogpu/test_cgroup_parse.c ${VGPU_NODRIVER_SRCS})
+    target_include_directories(test_cgroup_parse PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
     # Drives the provider ABI against a concurrent reader, so it needs the
     # provider too -- the rewrite it checks is the provider.s.
     add_executable(test_session_pids_concurrency
@@ -367,6 +374,7 @@ foreach(vgpu_nogpu_test
         test_vmem_region_concurrency
         test_session_paths
         test_session_pids_concurrency
+        test_cgroup_parse
         test_delta_step
         test_delta_campaign
         test_dlsym_entry)

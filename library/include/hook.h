@@ -115,6 +115,12 @@ extern "C" {
 
 #define HOST_PROC_CGROUP_PID_PATH (VGPU_MANAGER_PATH "/.host_proc/%u/cgroup")
 
+/* A systemd+containerd cgroup path is ~190 bytes on its own and may nest
+ * deeper, so buffers holding one are sized for a path rather than a guess.
+ * The old 128-byte guess overflowed by 64 bytes on a stock Kubernetes node. */
+#define CGROUP_LINE_MAX 4096
+#define CGROUP_KEY_MAX  256
+
 #define TMP_DIR "/tmp"
 
 #define VGPU_LOCK_DIR "/.vgpu_lock"

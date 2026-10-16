@@ -59,6 +59,10 @@ extern int file_exist(const char *);
 extern int device_pid_in_same_container(unsigned int pid);
 extern int library_exists_in_process_maps(char const *libName, unsigned int pid);
 extern int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids);
+extern int split_str(const char *line, char *key, size_t key_size,
+                     char *value, size_t value_size, char d);
+extern int read_cgroup(const char *pid_path, const char *cgroup_key,
+                       char *cgroup_value, size_t value_size);
 
 /* SM throttle controller selection (see util.c). Defaults preserve stock
  * behaviour when env is unset. */
@@ -1970,8 +1974,13 @@ static void active_utilization_notifier(int batch_code) {
                   batches[batch_code].batch_code, strerror(rc));
     return;
   }
-  char thread_name[32] = {0};
-  sprintf(thread_name, "watch_util_bt_%d", batches[batch_code].batch_code);
+  /* The kernel caps a thread name at 16 bytes including the NUL, and the old
+   * "watch_util_bt_" prefix alone was 14 -- any batch >= 10 pushed the name to
+   * the limit and setname failed with ERANGE, silently leaving the watchers
+   * unnamed in exactly the multi-batch case where telling them apart matters. */
+  char thread_name[16] = {0};
+  snprintf(thread_name, sizeof(thread_name), "watch_bt_%d",
+           batches[batch_code].batch_code);
 #ifdef __APPLE__
   pthread_setname_np(thread_name);
 #else
@@ -2137,83 +2146,20 @@ static void initialization() {
   balance_batches(device_count);
 }
 
-int split_str(char *line, char *key, char *value, char d) {
-  int index = 0;
-  for (index = 0; index < strlen(line) && line[index] != d; index++) {}
-
-  if (index == strlen(line)){
-    key[0] = '\0';
-    value[0] = '\0';
-    return 1;
-  }
-
-  int start = 0, i = 0;
-  // trim head
-  for (; start < index && (line[start] == ' ' || line[start] == '\t'); start++) {}
-
-  for (i = 0; start < index; i++, start++) {
-    key[i] = line[start];
-  }
-  // trim tail
-  for (; i > 0 && (key[i - 1] == '\0' || key[i - 1] == '\n' || key[i - 1] == '\t'); i--) {}
-
-  key[i] = '\0';
-
-  start = index + 1;
-  i = 0;
-
-  // trim head
-  for (; start < strlen(line) && (line[start] == ' ' || line[start] == '\t'); start++) {}
-
-  for (i = 0; start < strlen(line); i++, start++) {
-    value[i] = line[start];
-  }
-  // trim tail
-  for (; i > 0 && (value[i - 1] == '\0' || value[i - 1] == '\n' || value[i - 1] == '\t'); i--) {}
-
-  value[i] = '\0';
-  return 0;
-}
-
-int read_cgroup(char *pid_path, char *cgroup_key, char *cgroup_value) {
-  int ret = -1;
-  FILE *f = fopen(pid_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
-  if (f == NULL) {
-    return ret;
-  }
-  char buff[256];
-  while (fgets(buff, 256, f)) {
-    int index = 0;
-    for (; index < strlen(buff) && buff[index] != ':'; index++) {}
-    if (index == strlen(buff)) {
-      continue;
-    }
-    char key[128], value[128];
-    if (split_str(&buff[index + 1], key, value, ':') != 0) {
-      continue;
-    }
-    if (strcmp(key, cgroup_key) == 0) {
-      strcpy(cgroup_value, value);
-      ret = 0;
-      break;
-    }
-  }
-  fclose(f);
-  return ret;
-}
-
 // Container PID matching method in cgroupv1 mode
 int check_device_pid_in_cgroupv1_container(unsigned int device_pid) {
   int ret = -1;
   if (device_pid == 0) {
     return ret;
   }
-  char host_pid_path[128];
-  char cont_process_cg[256];
-  char host_process_cg[256];
-  sprintf(host_pid_path, HOST_PROC_CGROUP_PID_PATH, device_pid);
-  if (!read_cgroup(PID_SELF_CGROUP_PATH, "memory", cont_process_cg) &&
-      !read_cgroup(host_pid_path, "memory", host_process_cg)) {
+  char host_pid_path[PATH_MAX];
+  char cont_process_cg[CGROUP_LINE_MAX];
+  char host_process_cg[CGROUP_LINE_MAX];
+  snprintf(host_pid_path, sizeof(host_pid_path), HOST_PROC_CGROUP_PID_PATH, device_pid);
+  if (!read_cgroup(PID_SELF_CGROUP_PATH, "memory", cont_process_cg,
+                   sizeof(cont_process_cg)) &&
+      !read_cgroup(host_pid_path, "memory", host_process_cg,
+                   sizeof(host_process_cg))) {
     LOGGER(DETAIL, "\ncontainer process cgroup: %s\nhost process cgroup: %s", cont_process_cg, host_process_cg);
     if (strstr(host_process_cg, cont_process_cg) != NULL) {
       ret = 0;
@@ -2229,8 +2175,8 @@ int check_device_pid_in_cgroupv2_container(unsigned int device_pid) {
     return ret;
   }
   // TODO May I need to check if there are zombie processes?
-  char host_pid_path[128];
-  sprintf(host_pid_path, HOST_PROC_CGROUP_PID_PATH, device_pid);
+  char host_pid_path[PATH_MAX];
+  snprintf(host_pid_path, sizeof(host_pid_path), HOST_PROC_CGROUP_PID_PATH, device_pid);
   if (file_exist(host_pid_path) != 0) {
     return ret;
   }

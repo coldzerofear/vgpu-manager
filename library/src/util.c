@@ -664,6 +664,83 @@ static int lock_pids_config_shared(int fd) {
   return -1;
 }
 
+/* Copies line[start,end) into out, trimming leading blanks and the same
+ * trailing junk this parser has always trimmed. Returns -1 when the field
+ * would not fit, so no caller ever compares a silently truncated path. */
+static int copy_trimmed_field(const char *line, size_t start, size_t end,
+                              char *out, size_t out_size) {
+  if (out_size == 0) {
+    return -1;
+  }
+  for (; start < end && (line[start] == ' ' || line[start] == '\t'); start++) {}
+  size_t len = end - start;
+  if (len >= out_size) {
+    return -1;
+  }
+  memcpy(out, line + start, len);
+  for (; len > 0 && (out[len - 1] == '\0' || out[len - 1] == '\n' ||
+                     out[len - 1] == '\t'); len--) {}
+  out[len] = '\0';
+  return 0;
+}
+
+/* Splits "<key><d><value>" out of line. Both out-params carry their own size:
+ * these used to be written with no bound at all, and a real container cgroup
+ * path (191 bytes) overflowed the caller's 128-byte buffers by 64 bytes.
+ * Returns 0 on success, 1 when the delimiter is absent, -1 on overflow. */
+int split_str(const char *line, char *key, size_t key_size,
+              char *value, size_t value_size, char d) {
+  size_t len = strlen(line);
+  size_t index = 0;
+  for (; index < len && line[index] != d; index++) {}
+
+  if (index == len) {
+    if (key_size) key[0] = '\0';
+    if (value_size) value[0] = '\0';
+    return 1;
+  }
+
+  if (copy_trimmed_field(line, 0, index, key, key_size) != 0 ||
+      copy_trimmed_field(line, index + 1, len, value, value_size) != 0) {
+    if (key_size) key[0] = '\0';
+    if (value_size) value[0] = '\0';
+    return -1;
+  }
+  return 0;
+}
+
+/* Reads the cgroup path for cgroup_key out of a /proc/<pid>/cgroup file.
+ * cgroup_value is written in place by split_str -- its contents are only
+ * meaningful when this returns 0. */
+int read_cgroup(const char *pid_path, const char *cgroup_key,
+                char *cgroup_value, size_t value_size) {
+  int ret = -1;
+  FILE *f = fopen(pid_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
+  if (f == NULL) {
+    return ret;
+  }
+  char buff[CGROUP_LINE_MAX];
+  while (fgets(buff, sizeof(buff), f)) {
+    size_t len = strlen(buff);
+    size_t index = 0;
+    for (; index < len && buff[index] != ':'; index++) {}
+    if (index == len) {
+      continue;
+    }
+    char key[CGROUP_KEY_MAX];
+    if (split_str(&buff[index + 1], key, sizeof(key),
+                  cgroup_value, value_size, ':') != 0) {
+      continue;
+    }
+    if (strcmp(key, cgroup_key) == 0) {
+      ret = 0;
+      break;
+    }
+  }
+  fclose(f);
+  return ret;
+}
+
 int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids) {
   if (!file_path || !pids || !pids_size) {
     LOGGER(ERROR, "invalid NULL parameter");
@@ -671,15 +748,15 @@ int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_s
     return -1;
   }
 
-  if (access(file_path, F_OK) != 0) {
-    *pids_size = 0;
-    return -1;
-  }
-
+  /* No access(F_OK) pre-check: it only duplicated what fopen already reports,
+   * and the gap between the two was a time-of-check/time-of-use window. A
+   * missing file stays quiet, as it did when access() screened it out. */
   /* "e" = O_CLOEXEC, prevent fork inheritance */
   FILE *fp = fopen(file_path, "re");
   if (!fp) {
-    LOGGER(WARNING, "error opening %s: %s", file_path, strerror(errno));
+    if (errno != ENOENT) {
+      LOGGER(WARNING, "error opening %s: %s", file_path, strerror(errno));
+    }
     *pids_size = 0;
     return -1;
   }
