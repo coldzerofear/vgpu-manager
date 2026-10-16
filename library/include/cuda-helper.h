@@ -985,10 +985,10 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuSignalExternalSemaphoresAsync),
   /** cuSignalExternalSemaphoresAsync_ptsz */
   CUDA_ENTRY_ENUM(cuSignalExternalSemaphoresAsync_ptsz),
-//  /** cuStreamBeginCapture */
-//  CUDA_ENTRY_ENUM(cuStreamBeginCapture),
-//  /** cuStreamBeginCapture_ptsz */
-//  CUDA_ENTRY_ENUM(cuStreamBeginCapture_ptsz),
+  /** cuStreamBeginCapture */
+  CUDA_ENTRY_ENUM(cuStreamBeginCapture),
+  /** cuStreamBeginCapture_ptsz */
+  CUDA_ENTRY_ENUM(cuStreamBeginCapture_ptsz),
   /** cuStreamEndCapture */
   CUDA_ENTRY_ENUM(cuStreamEndCapture),
   /** cuStreamEndCapture_ptsz */
@@ -1011,9 +1011,9 @@ typedef enum {
   /** cuGraphExecKernelNodeSetParams */
   CUDA_ENTRY_ENUM(cuGraphExecKernelNodeSetParams),
   /** cuStreamBeginCapture_v2 */
-//  CUDA_ENTRY_ENUM(cuStreamBeginCapture_v2),
+  CUDA_ENTRY_ENUM(cuStreamBeginCapture_v2),
   /** cuStreamBeginCapture_v2_ptsz */
-//  CUDA_ENTRY_ENUM(cuStreamBeginCapture_v2_ptsz),
+  CUDA_ENTRY_ENUM(cuStreamBeginCapture_v2_ptsz),
   /** cuStreamGetCaptureInfo */
   CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo),
   /** cuStreamGetCaptureInfo_ptsz */
@@ -1219,6 +1219,8 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v3_ptsz),
   CUDA_ENTRY_ENUM(cuStreamUpdateCaptureDependencies),
   CUDA_ENTRY_ENUM(cuStreamUpdateCaptureDependencies_ptsz),
+  CUDA_ENTRY_ENUM(cuStreamUpdateCaptureDependencies_v2),
+  CUDA_ENTRY_ENUM(cuStreamUpdateCaptureDependencies_v2_ptsz),
   CUDA_ENTRY_ENUM(cuUserObjectCreate),
   CUDA_ENTRY_ENUM(cuUserObjectRelease),
   CUDA_ENTRY_ENUM(cuUserObjectRetain),
@@ -1242,7 +1244,6 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphNodeSetEnabled),
 //  CUDA_ENTRY_ENUM(cuModuleGetLoadingMode),
   CUDA_ENTRY_ENUM(cuMemGetHandleForAddressRange),
-
   CUDA_ENTRY_ENUM(cuGraphAddNode),
   CUDA_ENTRY_ENUM(cuGraphAddNode_v2),
   CUDA_ENTRY_ENUM(cuGraphExecGetFlags),
@@ -1279,6 +1280,8 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuTensorMapEncodeIm2col),
   CUDA_ENTRY_ENUM(cuTensorMapEncodeTiled),
   CUDA_ENTRY_ENUM(cuTensorMapReplaceAddress),
+  CUDA_ENTRY_ENUM(cuStreamBeginCaptureToCig),
+  CUDA_ENTRY_ENUM(cuStreamEndCaptureToCig),
   CUDA_ENTRY_END
 } cuda_entry_enum_t;
 
@@ -1337,6 +1340,8 @@ static inline int is_abi_conflict_base(const char *sym) {
     "cuGraphAddKernelNode",        /* _v2 appends kern+ctx to the params   */
     "cuGraphKernelNodeSetParams",  /* 56-byte v1 struct -> 72-byte _v2     */
     "cuGraphKernelNodeGetParams",  /* ditto, and this one is an out-param  */
+    "cuStreamBeginCapture",
+    "cuStreamUpdateCaptureDependencies",
     /*
      * Note: cuGetProcAddress is intentionally NOT listed here even though
      * its unversioned form also has cross-major ABI drift (v1 4-arg vs _v2

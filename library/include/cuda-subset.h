@@ -1577,11 +1577,34 @@ typedef struct CUDA_BATCH_MEM_OP_NODE_PARAMS_v2_st {
     unsigned int flags;
 } CUDA_BATCH_MEM_OP_NODE_PARAMS_v2;
 
+/**
+ * Optional annotation for edges in a CUDA graph. Note, all edges implicitly have annotations and
+ * default to a zero-initialized value if not specified. A zero-initialized struct indicates a
+ * standard full serialization of two nodes with memory visibility.
+ */
 typedef struct CUgraphEdgeData_st {
-    unsigned char  from_port;
-    unsigned char  reserved[5];
-    unsigned char  to_port;
-    unsigned char  type;
+    unsigned char from_port; /**< This indicates when the dependency is triggered from the upstream
+                                  node on the edge. The meaning is specfic to the node type. A value
+                                  of 0 in all cases means full completion of the upstream node, with
+                                  memory visibility to the downstream node or portion thereof
+                                  (indicated by \c to_port).
+                                  <br>
+                                  Only kernel nodes define non-zero ports. A kernel node
+                                  can use the following output port types:
+                                  ::CU_GRAPH_KERNEL_NODE_PORT_DEFAULT, ::CU_GRAPH_KERNEL_NODE_PORT_PROGRAMMATIC,
+                                  or ::CU_GRAPH_KERNEL_NODE_PORT_LAUNCH_ORDER. */
+    unsigned char to_port; /**< This indicates what portion of the downstream node is dependent on
+                                the upstream node or portion thereof (indicated by \c from_port). The
+                                meaning is specific to the node type. A value of 0 in all cases means
+                                the entirety of the downstream node is dependent on the upstream work.
+                                <br>
+                                Currently no node types define non-zero ports. Accordingly, this field
+                                must be set to zero. */
+    unsigned char type; /**< This should be populated with a value from ::CUgraphDependencyType. (It
+                             is typed as char due to compiler-specific layout of bitfields.) See
+                             ::CUgraphDependencyType. */
+    unsigned char reserved[5]; /**< These bytes are unused and must be zeroed. This ensures
+                                    compatibility if additional fields are added in the future. */
 } CUgraphEdgeData;
 
 /**
@@ -1737,6 +1760,26 @@ typedef struct CUctxCreateParams_st {
     int                  numExecAffinityParams;
     CUctxCigParam       *cigParams;
 } CUctxCreateParams;
+
+typedef enum CUstreamCigDataType_enum {
+    STREAM_CIG_DATA_TYPE_D3D12_COMMAND_LIST = 0x1,              /**< D3D12 Command List Handle */
+} CUstreamCigDataType;
+
+/**
+* CIG Stream Capture Params
+*/
+typedef struct CUstreamCigParam_st {
+    CUstreamCigDataType streamSharedDataType;  /**< Type of shared data from graphics client (D3D12). */
+    void* streamSharedData;                    /**< Graphics client data handle (ID3D12CommandList/ID3D12GraphicsCommandList). */
+} CUstreamCigParam;
+
+/**
+* Params for capturing CUDA stream to CIG
+* streamCigParams must be non-NULL.
+*/
+ typedef struct CUstreamCigCaptureParams_st {
+    CUstreamCigParam * streamCigParams;  /**< CIG (CUDA in Graphics) parameters for sharing command list data from D3D12 graphics clients. */
+} CUstreamCigCaptureParams;
 
 /**
  * Error codes

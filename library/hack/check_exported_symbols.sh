@@ -50,6 +50,8 @@ FAMILIES=(
   "cuGraphKernelNodeGetParams    cuGraphKernelNodeGetParams     cuGraphKernelNodeGetParams_v2"
   "cuGraphExecUpdate             cuGraphExecUpdate              cuGraphExecUpdate_v2"
   "cuStreamGetCtx                cuStreamGetCtx                 cuStreamGetCtx_v2"
+  "cuStreamBeginCapture          cuStreamBeginCapture           cuStreamBeginCapture_v2"
+  "cuStreamUpdateCaptureDependencies cuStreamUpdateCaptureDependencies cuStreamUpdateCaptureDependencies_v2"
   # cuGetProcAddress above is listed for export-completeness (we must
   # export both ABI versions of this symbol) even though its substitution
   # logic is handled specially inside cuGetProcAddress() / _v2() in

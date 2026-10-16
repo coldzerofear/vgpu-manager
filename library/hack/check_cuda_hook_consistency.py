@@ -101,6 +101,8 @@ ABI_CONFLICT_FAMILIES = {
     # for the opposite reason - handing back the driver's own resolver would
     # let every later lookup bypass cuda_hooks_entry[] entirely.
     "cuGetProcAddress":              ("cuGetProcAddress",                "cuGetProcAddress_v2"),
+    "cuStreamBeginCapture":          ("cuStreamBeginCapture",            "cuStreamBeginCapture_v2"),
+    "cuStreamUpdateCaptureDependencies": ("cuStreamUpdateCaptureDependencies", "cuStreamUpdateCaptureDependencies_v2"),
 }
 
 # R5 allowlist: conflict-family base names that MAY appear in

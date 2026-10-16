@@ -2435,24 +2435,42 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
 
 nvmlReturn_t _nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
   nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses, device, infoCount, infos);
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3, device, infoCount, infos);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2, device, infoCount, infos);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3, device, infoCount, infos);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
+    nvmlProcessInfo_v1_t infoTemps[*infoCount];
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses, device, infoCount, infoTemps);
+    if (likely(ret == NVML_SUCCESS)) {
+      for (unsigned int i = 0; i < *infoCount; i++) {
+        infos[i].pid = infoTemps[i].pid;
+        infos[i].usedGpuMemory = infoTemps[i].usedGpuMemory;
+        infos[i].gpuInstanceId = 0;
+        infos[i].computeInstanceId = 0;
+      }
+    }
   }
   return ret;
 }
 
 nvmlReturn_t _nvmlDeviceGetGraphicsRunningProcesses(nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
   nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses, device, infoCount, infos);
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3, device, infoCount, infos);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2, device, infoCount, infos);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3, device, infoCount, infos);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
+    nvmlProcessInfo_v1_t infoTemps[*infoCount];
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses, device, infoCount, infoTemps);
+    if (likely(ret == NVML_SUCCESS)) {
+      for (unsigned int i = 0; i < *infoCount; i++) {
+        infos[i].pid = infoTemps[i].pid;
+        infos[i].usedGpuMemory = infoTemps[i].usedGpuMemory;
+        infos[i].gpuInstanceId = 0;
+        infos[i].computeInstanceId = 0;
+      }
+    }
   }
   return ret;
 }
