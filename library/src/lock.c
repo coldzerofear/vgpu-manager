@@ -159,7 +159,12 @@ static void backoff_spin(long *interval_us, int attempt, long elapsed_ms,
  * a mutex there would carry. Any other errno is left to surface naturally
  * from lock_gpu_device()'s own open() call below. */
 static void ensure_create_lock_dir(void) {
-  if (mkdir(VGPU_LOCK_PATH, 0755) == 0) return;
+  if (mkdir(VGPU_LOCK_PATH, 0755) == 0) {
+    /* Only on the branch that created it: an existing directory is either the
+     * plugin's (already 0777) or someone else's, and neither is ours to widen. */
+    relax_shared_dir_mode(VGPU_LOCK_PATH);
+    return;
+  }
   if (errno == EEXIST) return;
   /* fall through; lock_gpu_device's open() will surface the real error */
 }
@@ -216,6 +221,10 @@ int lock_gpu_device(int device_index) {
     LOGGER(ERROR, "cannot open lock file for device %d: %s", device_index, strerror(errno));
     return -1;
   }
+  /* Best effort, and only on this process's first open of this file:
+   * this path runs per allocation, not once at startup. */
+  static unsigned char relaxed[MAX_DEVICE_COUNT];
+  relax_shared_file_mode_once(fd, lock_path, &relaxed[device_index]);
 
   struct timespec start, now;
   clock_gettime(CLOCK_MONOTONIC, &start);
@@ -300,6 +309,10 @@ int device_util_write_lock(int device_index) {
     LOGGER(ERROR, "(SMWatcher) failed to open shared file: %s", strerror(errno));
     return -1;
   }
+  /* Best effort, and only on this process's first open of this file:
+   * this path runs per allocation, not once at startup. */
+  static unsigned char relaxed[MAX_DEVICE_COUNT];
+  relax_shared_file_mode_once(fd, CONTROLLER_SM_UTIL_FILE_PATH, &relaxed[device_index]);
   struct flock lock;
   lock.l_type = F_WRLCK;
   lock.l_whence = SEEK_SET;
@@ -405,6 +418,10 @@ int device_vmem_write_lock(int device_index) {
     LOGGER(ERROR, "(VMemNode) failed to open shared file: %s", strerror(errno));
     return -1;
   }
+  /* Best effort, and only on this process's first open of this file:
+   * this path runs per allocation, not once at startup. */
+  static unsigned char relaxed[MAX_DEVICE_COUNT];
+  relax_shared_file_mode_once(fd, VMEMORY_NODE_FILE_PATH, &relaxed[device_index]);
   struct flock lock;
   lock.l_type = F_WRLCK;
   lock.l_whence = SEEK_SET;

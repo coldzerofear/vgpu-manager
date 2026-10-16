@@ -1475,11 +1475,16 @@ device_t get_device_snapshot(int host_index) {
 
 int mmap_file_to_util_path(device_util_t** data) {
   int ret = 1;
-  if (unlikely(file_exist(CONTROLLER_SM_UTIL_FILE_PATH) != 0)) {
-    return 0;
-  }
+  /* No file_exist() pre-check: it only duplicated what open already reports,
+   * and the gap between the two was a time-of-check/time-of-use window. */
   int fd = open(CONTROLLER_SM_UTIL_FILE_PATH, O_RDONLY | O_CLOEXEC);
   if (unlikely(fd == -1)) {
+    /* An absent file means the external SM watcher is simply not deployed,
+     * which is a supported configuration rather than an error. Keep the 0
+     * the file_exist() pre-check returned for it, and keep it unlogged. */
+    if (errno == ENOENT) {
+      return 0;
+    }
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_SM_UTIL_FILE_PATH, strerror(errno));
     return ret;
   }
@@ -1603,7 +1608,10 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
   }
 
   if (unlikely(file_exist(VMEMORY_NODE_PATH) != 0)) {
-    mkdir(VMEMORY_NODE_PATH, 0755);
+    if (mkdir(VMEMORY_NODE_PATH, 0755) == 0) {
+      /* Only when we created it; the plugin's own mount is already 0777. */
+      relax_shared_dir_mode(VMEMORY_NODE_PATH);
+    }
   }
 
   /* Unconditional O_CREAT, no file_exist() pre-check -- checking first would
@@ -1614,6 +1622,8 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
     LOGGER(WARNING, "can't open %s: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
     return ret;
   }
+  /* Best effort, after the guard: the fd is usable either way. */
+  relax_shared_file_mode(fd, VMEMORY_NODE_FILE_PATH);
 
   /* Lock only byte 0 of the header, not the whole file -- the per-device
    * locks live at higher offsets, so a whole-file lock would needlessly
@@ -1720,7 +1730,10 @@ static void sm_node_rebuild_locked(sm_node_region_t *r) {
 
 int open_sm_node_lock(void) {
   if (unlikely(file_exist(SM_NODE_PATH) != 0)) {
-    mkdir(SM_NODE_PATH, 0755);
+    if (mkdir(SM_NODE_PATH, 0755) == 0) {
+      /* Only when we created it; the plugin's own mount is already 0777. */
+      relax_shared_dir_mode(SM_NODE_PATH);
+    }
   }
   /* Zero-length file: it carries no data, only byte-range locks (one byte per
    * device, so devices are independent). Never ftruncate'd -- fcntl ranges do
@@ -1731,6 +1744,8 @@ int open_sm_node_lock(void) {
            SM_NODE_LOCK_PATH, strerror(errno));
     return -1;
   }
+  /* Best effort, after the guard: the fd is usable either way. */
+  relax_shared_file_mode(fd, SM_NODE_LOCK_PATH);
   return fd;
 }
 
@@ -1763,7 +1778,10 @@ int map_sm_node_region(sm_node_region_t **data) {
   }
 
   if (unlikely(file_exist(SM_NODE_PATH) != 0)) {
-    mkdir(SM_NODE_PATH, 0755);
+    if (mkdir(SM_NODE_PATH, 0755) == 0) {
+      /* Only when we created it; the plugin's own mount is already 0777. */
+      relax_shared_dir_mode(SM_NODE_PATH);
+    }
   }
 
   /* open(O_CREAT) unconditionally, no file_exist() pre-check -- that check is
@@ -1775,6 +1793,8 @@ int map_sm_node_region(sm_node_region_t **data) {
     LOGGER(WARNING, "can't open %s: %s", SM_NODE_FILE_PATH, strerror(errno));
     return 1;
   }
+  /* Best effort, after the guard: the fd is usable either way. */
+  relax_shared_file_mode(fd, SM_NODE_FILE_PATH);
 
   /* Blocking lock, no timeout, deliberately: a late arriver just sleeps in
    * the kernel until the region is built, burning no CPU. Safe here (unlike
