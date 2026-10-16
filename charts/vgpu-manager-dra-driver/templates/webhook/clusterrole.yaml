@@ -17,6 +17,9 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get"]
+  - apiGroups: ["","events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch", "update"]
 {{- end }}

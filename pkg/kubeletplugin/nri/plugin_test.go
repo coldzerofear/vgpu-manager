@@ -18,9 +18,10 @@ package nri
 
 import (
 	"context"
-	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"testing"
 	"time"
+
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 
 	"github.com/containerd/nri/pkg/api"
 )

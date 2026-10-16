@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
@@ -40,6 +39,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
+	listerv1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/component-base/featuregate"
 )
 
@@ -131,13 +132,18 @@ func TestContainerListerRemoteSessions(t *testing.T) {
 		},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	kubeClient := fake.NewClientset(pod)
-	factory := informers.NewSharedInformerFactory(kubeClient, 0)
-	podLister := factory.Core().V1().Pods().Lister()
-	factory.Start(ctx.Done())
-	factory.WaitForCacheSync(ctx.Done())
+	// The lister only reads pods, so this drives it from an indexer the test
+	// owns rather than a fake clientset behind an informer. client-go's fake
+	// watch can drop an event between the reflector's initial List and its
+	// Watch, and with no resync period the informer then holds the deleted pod
+	// for good - the deletion below would never be seen and no timeout would
+	// help, which is how this failed in CI at a 2s budget and again at 30s.
+	// Nothing is lost by it: what is under test is how ContainerLister reacts
+	// to the pod list, not client-go's test double.
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	require.NoError(t, indexer.Add(pod))
+	podLister := listerv1.NewPodLister(indexer)
 
 	// The session as the agent materializes it.
 	token := remotegpu.SessionToken(string(pod.UID), containerName)
@@ -159,13 +165,12 @@ func TestContainerListerRemoteSessions(t *testing.T) {
 	require.NotNil(t, snapshot)
 	assert.Equal(t, gpuUUID, string(snapshot.UUID[0:40]))
 
-	// The pod is gone: the mapping goes, the agent's directory stays.
-	require.NoError(t, kubeClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}))
-	require.Eventually(t, func() bool {
-		_ = contLister.update()
-		_, ok := contLister.GetResourceData(key)
-		return !ok
-	}, 2*time.Second, 50*time.Millisecond)
+	// The pod is gone: the mapping goes, the agent's directory stays. One
+	// update() settles it now that the pod list is not racing a watch.
+	require.NoError(t, indexer.Delete(pod))
+	require.NoError(t, contLister.update())
+	_, ok = contLister.GetResourceData(key)
+	require.False(t, ok, "the mapping must go once the pod is gone")
 	assert.FileExists(t, quotaFile, "the session belongs to the agent, not to this lister")
 }
 

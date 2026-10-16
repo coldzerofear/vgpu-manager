@@ -25,6 +25,7 @@ import (
 
 	"github.com/Masterminds/semver"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 )
 
 // ServerCUDAVersionHeader is the response header lupine-server puts on every
@@ -43,7 +44,7 @@ var probeClient = &http.Client{
 	Transport: &http.Transport{
 		Proxy: nil,
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: util.GetEnvEnabled("PROBE_INSECURE_SKIP_VERIFY"),
 		},
 		DisableKeepAlives: true,
 	},

@@ -15,7 +15,7 @@ kind: ClusterRole
 metadata:
   name: vgpu-manager-dra-gpu-server:role
 rules:
-  # remote-agent: watch 本驱动 slice（节点设备快照）与 claim（会话生命周期）
+  # remote-agent: watch nodes/本驱动 slice（节点设备快照）/claim（会话生命周期）
   # device-monitor: dra 采集需要 nodes/pods/slices/claims
   - apiGroups:
       - resource.k8s.io
@@ -59,11 +59,19 @@ spec:
   selector:
     matchLabels:
       app: vgpu-manager-dra-gpu-server
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "100%"
   template:
     metadata:
       labels:
         app: vgpu-manager-dra-gpu-server
         vgpu-manager.io/ignore-webhook: "true"
+        # 【按域名寻址时打开】让 webhook 按本 Pod 所在节点名生成 spec.hostname 并注入
+        # HOSTNAME 环境变量，配合 subdomain 与本文件末尾的 headless Service 得到每节点
+        # 一个稳定域名（见本目录 README 的"按域名寻址"一节）。
+#        vgpu-manager.io/node-hostname: "true"
     spec:
       tolerations:
         - key: CriticalAddonsOnly
@@ -79,6 +87,13 @@ spec:
       # 无 hostPID 两者对不上，限额静默失效（设计 D9/§1.6.6）。
       hostPID: true
       # endpoint = 节点 IP:14833；lupine-server/agent 直接监听 underlay 网卡。
+      # 推荐形态：数据面不经 CNI 封装，且节点 IP 天然稳定。
+      #
+      # 【集群禁止 hostNetwork 时】改成下面这套按域名寻址（见 README"按域名寻址"一节）：
+      #   hostNetwork: false
+      #   dnsPolicy: ClusterFirst
+      #   subdomain: vgpu-manager-dra-gpu-server-headless   # = 本文件末尾 headless Service 名
+      # 并打开上面的 node-hostname 标签与下面的两个 ADVERTISE_* 环境变量。
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       priorityClassName: system-node-critical
@@ -89,7 +104,7 @@ spec:
       serviceAccountName: vgpu-manager-dra-gpu-server
       initContainers:
         - name: init-install
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c, /usr/bin/install_files.sh]
           env:
@@ -107,10 +122,11 @@ spec:
               mountPropagation: Bidirectional
       containers:
         - name: remote-agent
-          image: coldzerofear/vgpu-manager-dra:latest      # ← 需含 remote-agent 二进制
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest      # ← 需含 remote-agent 二进制
           imagePullPolicy: IfNotPresent
           command:
             - remote-agent
+            - --domain=nvidia.com
             - --kube-api-qps=20
             - --kube-api-burst=30
             - --v=4
@@ -123,26 +139,45 @@ spec:
             # 的排序语义（新 pod 里 server 不该被上一个 pod 的文件放行）。
             - name: READY_FILE
               value: /run/vgpu/ready
+            - name: LISTEN_PORT
+              value: "14834"
+            - name: LUPINE_PORT
+              value: "14833"         # ← 与lupine-server的 LUPINE_PORT 保持一致
             # agent 探测 server 的地址（同 pod，host 留空 = 127.0.0.1）。host 是回环时，agent 会
             # 在本机地址里找一个 server 同样应答的（优先节点 InternalIP），作为对外 endpoint 经
             # ServerInfo 报给 dra-server，dra-server 再发布为设备属性——因此 dra-server 不再需要
-            # 知道 lupine-server 的地址；改端口只改这里与 LUPINE_PORT。
+            # 知道 lupine-server 的地址。端口从上面的 LUPINE_PORT 展开，改端口只改那一处（和 lupine-server 容器里的同名变量）。
             - name: REMOTE_SERVER_ENDPOINT
-              value: ":14833"                     # ← 与 LUPINE_PORT 保持一致
-            # 可选：对外 endpoint 由运维指定（DNS/网关，URL 形态），跳过自动发现、不做探测。
-            # - name: ADVERTISE_SERVER_ENDPOINT
-            #   value: "https://gpu-a.corp/pool-a"
+              value: ":$(LUPINE_PORT)"
+            # 控制agent->lupine-server探测客户端跳过证书校验
+            - name: PROBE_INSECURE_SKIP_VERIFY
+              value: "0"
+            # 【按域名寻址时打开这一组】HOSTNAME 由 webhook 按节点名注入；两个 ADVERTISE_*
+            # 让 agent 把域名（而不是 Pod IP）报出去，dra-server 再发布成设备属性
+            # serverEndpoint / agentEndpoint。少了 agent 那条，inject 侧会拿到 Pod IP。
+#            - name: POD_NAMESPACE
+#              valueFrom:
+#                fieldRef:
+#                  fieldPath: metadata.namespace
+#            - name: HEADLESS_SERVICE_NAME
+#              value: "vgpu-manager-dra-gpu-server-headless"
+#            - name: CLUSTER_DOMAIN
+#              value: "cluster.local"
+#            - name: ADVERTISE_SERVER_ENDPOINT
+#              value: "http://$(HOSTNAME).$(HEADLESS_SERVICE_NAME).$(POD_NAMESPACE).svc.$(CLUSTER_DOMAIN):$(LUPINE_PORT)"
+#            - name: ADVERTISE_AGENT_ENDPOINT
+#              value: "grpc://$(HOSTNAME).$(HEADLESS_SERVICE_NAME).$(POD_NAMESPACE).svc.$(CLUSTER_DOMAIN):$(LISTEN_PORT)"
             # gRPC 监听，逗号分隔可多个：grpc://:14834 供其他节点的 dra-inject 调 EnsureSession；
             # 追加 unix:///etc/vgpu-manager/agent.sock 可让同节点的 dra-server 走套接字
             - name: LISTEN_SERVER_ENDPOINT        # ← EnsureSession gRPC 端口(hostNetwork)
-              value: "grpc://:14834,unix:///etc/vgpu-manager/agent.sock"
+              value: "grpc://:$(LISTEN_PORT),unix:///etc/vgpu-manager/agent.sock"
             - name: CONTAINER_MANAGER_DIR
               value: /etc/vgpu-manager
             - name: FEATURE_GATES
               value: SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
             # 会话目录在 manager-root hostPath 下（与 lupine-server、monitor 共享）
             - name: VGPU_CONFIG_SESSION_BASE
-              value: /etc/vgpu-manager/remote-sessions
+              value: $(CONTAINER_MANAGER_DIR)/remote-sessions
             - name: SESSION_OWNER
               value: "claim"
           ports:
@@ -209,15 +244,17 @@ spec:
           env:
             - name: LUPINE_PORT
               value: "14833"                               # ← 服务端监听端口(hostNetwork)
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
             - name: VGPU_CONFIG_SESSION_BASE
-              value: /etc/vgpu-manager/remote-sessions
+              value: $(CONTAINER_MANAGER_DIR)/remote-sessions
             - name: VGPU_REMOTE_MODE
               value: "1"
             # 隔离库既是 LD_PRELOAD hook 库又是 lupine checkpoint provider，两个变量指向同一个 .so。
             # 它由 init-install 从 vgpu-manager 镜像落盘到节点 /etc/vgpu-manager/driver/，
             # 经 manager-root hostPath 挂进来，server 镜像里不需要自带。
             - name: LUPINE_CHECKPOINT_LIBRARY
-              value: /etc/vgpu-manager/driver/libvgpu-control.so
+              value: $(CONTAINER_MANAGER_DIR)/driver/libvgpu-control.so
             - name: CUDA_VISIBLE_DEVICES
               value: all
             - name: NVIDIA_VISIBLE_DEVICES
@@ -263,7 +300,7 @@ spec:
               mountPath: /run/vgpu
               readOnly: true
         - name: device-monitor
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor
@@ -295,8 +332,10 @@ spec:
               value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
             - name: VGPU_CONFIG_SESSION_BASE
-              value: /etc/vgpu-manager/remote-sessions
+              value: $(CONTAINER_MANAGER_DIR)/remote-sessions
           securityContext:
             privileged: true
           resources: {}
@@ -381,3 +420,31 @@ spec:
   selector:
     app: vgpu-manager-dra-gpu-server
   type: ClusterIP
+---
+# 每节点一个稳定域名：<spec.hostname>.<本 Service 名>.<namespace>.svc.<cluster domain>
+# spec.hostname 由 webhook 按节点名生成（标签 vgpu-manager.io/node-hostname=true），
+# Pod 的 subdomain 必须等于本 Service 名。inject 注入给消费容器的 LUPINE_SERVER 是这个
+# 域名，所以服务端 Pod 重建换 IP 后，容器重启即可恢复。
+#
+# publishNotReadyAddresses: true 是刻意的：记录只要 Pod 有 IP 就存在，不随就绪状态抖动
+# （服务端健康与否由设备属性/污点告诉调度器，不靠 DNS 表达），也避免重建期间 NXDOMAIN
+# 被 CoreDNS 否定缓存住。hostNetwork 模式下部署它同样有效：记录解析到节点 IP。
+apiVersion: v1
+kind: Service
+metadata:
+  name: vgpu-manager-dra-gpu-server-headless
+  namespace: kube-system
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: vgpu-manager-dra-gpu-server
+  ports:
+    - name: http
+      port: 14833
+      protocol: TCP
+      targetPort: http
+    - name: grpc
+      port: 14834
+      protocol: TCP
+      targetPort: grpc

@@ -39,10 +39,8 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/kubernetes/scheme"
-	typedv1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	testing2 "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
@@ -93,13 +91,9 @@ func Test_Parallel_Scheduling(t *testing.T) {
 		newPod.DeepCopyInto(pod)
 		return true, pod, nil
 	})
-	broadcaster := record.NewBroadcaster()
-	broadcaster.StartRecordingToSink(&typedv1.EventSinkImpl{Interface: k8sClient.CoreV1().Events("")})
-	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
-	defer broadcaster.Shutdown()
 
 	factory := informers.NewSharedInformerFactory(k8sClient, 0)
-	filterPredicate, err := New(k8sClient, factory, recorder, true, true)
+	filterPredicate, err := New(k8sClient, factory, events.NewFakeRecorder(100), true, true)
 	if err != nil {
 		t.Fatalf("failed to create new filterPredicate due to %v", err)
 	}
@@ -285,12 +279,7 @@ func buildNodeList() ([]corev1.Node, map[string]device.NodeDeviceInfo) {
 func Test_DeviceFilter(t *testing.T) {
 	k8sClient := fake.NewClientset()
 	factory := informers.NewSharedInformerFactory(k8sClient, 0)
-	broadcaster := record.NewBroadcaster()
-	broadcaster.StartRecordingToSink(&typedv1.EventSinkImpl{Interface: k8sClient.CoreV1().Events("")})
-	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
-	defer broadcaster.Shutdown()
-
-	filterPredicate, err := New(k8sClient, factory, recorder, false, true)
+	filterPredicate, err := New(k8sClient, factory, events.NewFakeRecorder(10), false, true)
 	if err != nil {
 		t.Fatalf("failed to create new filterPredicate due to %v", err)
 	}
@@ -903,10 +892,7 @@ func Test_DeviceFilter_InitContainers(t *testing.T) {
 		newPod.DeepCopyInto(pod)
 		return true, pod, nil
 	})
-	broadcaster := record.NewBroadcaster()
-	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
-	defer broadcaster.Shutdown()
-	filterPredicate, err := New(k8sClient, factory(k8sClient), recorder, false, true)
+	filterPredicate, err := New(k8sClient, factory(k8sClient), events.NewFakeRecorder(10), false, true)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
+	podhostname "github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/hostname"
 	podmutate "github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/mutate"
 	podvalidate "github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/validate"
 	resvalidate "github.com/coldzerofear/vgpu-manager/pkg/webhook/resourceclaim/validate"
@@ -28,7 +29,6 @@ import (
 	vcjobmutate "github.com/coldzerofear/vgpu-manager/pkg/webhook/volcanojob/mutate"
 	vcjobvalidate "github.com/coldzerofear/vgpu-manager/pkg/webhook/volcanojob/validate"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/controller-manager/pkg/healthz"
 	"k8s.io/klog/v2"
 	rtclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -46,32 +46,23 @@ var (
 func init() {
 	handlerRegistry = make(map[string]NewHandlerFunc)
 	handlerRegistry[podmutate.Path] = podmutate.NewMutateWebhook
+	handlerRegistry[podhostname.Path] = podhostname.NewMutateWebhook
 	handlerRegistry[podvalidate.Path] = podvalidate.NewValidateWebhook
 	handlerRegistry[resvalidate.Path] = resvalidate.NewValidateWebhook
 	handlerRegistry[vcjobmutate.Path] = vcjobmutate.NewMutateWebhook
 	handlerRegistry[vcjobvalidate.Path] = vcjobvalidate.NewValidateWebhook
 }
 
-func healthCheckMiddleware(healthChecker healthz.UnnamedHealthChecker, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := healthChecker.Check(r); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func RegisterWebhookToServer(
-	server webhook.Server, checker healthz.UnnamedHealthChecker,
-	client rtclient.Client, opt *options.Options,
+func RegisterWebhookToServer(opt *options.Options,
+	server webhook.Server, client rtclient.Client,
 	reader resourcereader.ResourceAPIReader,
-	recorder events.EventRecorderLogger,
+	eventRecorder events.EventRecorderLogger,
+	handlerFn func(http.Handler) http.Handler,
 ) error {
 	registerOnce.Do(func() {
 		var webhookHandler http.Handler
 		for path, newHandler := range handlerRegistry {
-			webhookHandler, registerErr = newHandler(client, opt, reader, recorder)
+			webhookHandler, registerErr = newHandler(client, opt, reader, eventRecorder)
 			if registerErr != nil {
 				klog.ErrorS(registerErr, "unable to create webhook", "path", path)
 				return
@@ -79,8 +70,8 @@ func RegisterWebhookToServer(
 			if webhookHandler == nil {
 				continue
 			}
-			if checker != nil {
-				webhookHandler = healthCheckMiddleware(checker, webhookHandler)
+			if handlerFn != nil {
+				webhookHandler = handlerFn(webhookHandler)
 			}
 			klog.V(4).InfoS("Register webhook to server", "path", path)
 			server.Register(path, webhookHandler)

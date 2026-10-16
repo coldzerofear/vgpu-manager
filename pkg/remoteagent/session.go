@@ -33,6 +33,8 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 )
@@ -202,10 +204,26 @@ type sessionRef struct {
 // keeps an in-memory index (token <-> owner) so owner events never need a
 // directory scan; the periodic sweep still walks the disk to catch orphans.
 type SessionStore struct {
-	cfg     Config
-	mu      sync.Mutex
-	refOf   map[string]sessionRef       // token -> owner
-	byOwner map[string]sets.Set[string] // owner UID -> tokens
+	cfg       Config
+	mu        sync.Mutex
+	refOf     map[string]sessionRef       // token -> owner
+	byOwner   map[string]sets.Set[string] // owner UID -> tokens
+	GetNodeFn func() (*corev1.Node, error)
+}
+
+// nodeObject returns the node whose annotations carry this node's defaults, or
+// a nil interface when it cannot be read. A typed nil *corev1.Node would
+// reach the annotation lookup as a non-nil metav1.Object and panic there.
+func (s *SessionStore) nodeObject() metav1.Object {
+	if s.GetNodeFn == nil {
+		return nil
+	}
+	node, err := s.GetNodeFn()
+	if err != nil || node == nil {
+		klog.V(5).Infof("Node %s unavailable, node-level defaults are skipped: %v", s.cfg.NodeName, err)
+		return nil
+	}
+	return node
 }
 
 func NewSessionStore(cfg Config) *SessionStore {
@@ -365,7 +383,7 @@ func (s *SessionStore) dir(token string) string {
 // Materialize writes the session directory for spec. It is idempotent: an
 // already complete session of the same owner is left untouched (the library
 // may have live state in it), so retries are safe.
-func (s *SessionStore) Materialize(token string, spec SessionSpec, nd *NodeDevices) error {
+func (s *SessionStore) Materialize(token string, spec SessionSpec, nd *NodeDevices, policy util.ComputePolicy) error {
 	if err := validateToken(token); err != nil {
 		return err
 	}
@@ -391,11 +409,10 @@ func (s *SessionStore) Materialize(token string, spec SessionSpec, nd *NodeDevic
 	},
 		vgpuconfig.WithDeviceInfos(spec.Infos),
 		vgpuconfig.WithDeviceClaims(spec.Claims),
+		vgpuconfig.WithComputePolicy(policy),
 		vgpuconfig.WithCompatibilityMode(util.SessionMode),
-		vgpuconfig.WithComputePolicy(util.FixedComputePolicy),
 		vgpuconfig.WithDriverVersion(nvidia.DriverVersion{
-			DriverVersion: driverVersion,
-			CudaDriverVersion: nvidia.NewCudaVersion(
+			DriverVersion: driverVersion, CudaDriverVersion: nvidia.NewCudaVersion(
 				nd.CudaVersion.Major(), nd.CudaVersion.Minor(),
 			),
 		}),

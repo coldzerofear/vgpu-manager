@@ -1328,6 +1328,29 @@ typedef struct CUaccessPolicyWindow_st {
 typedef CUaccessPolicyWindow_v1 CUaccessPolicyWindow;
 
 /**
+ * GPU kernel node parameters, CUDA 11 ABI.
+ *
+ * Kept next to _v2 because the two are distinct ELF symbols with distinct
+ * layouts: _v2 appends kern and ctx, so this is a strict prefix of it
+ * (56 bytes against 72, every shared field at the same offset). A caller
+ * that entered through the unversioned symbol owns a struct of THIS size,
+ * so the wrappers for that symbol must declare it: handing it to the _v2
+ * driver entry has the driver write 16 bytes past the end.
+ */
+typedef struct CUDA_KERNEL_NODE_PARAMS_v1_st {
+    CUfunction func;             /**< Kernel to launch */
+    unsigned int gridDimX;       /**< Width of grid in blocks */
+    unsigned int gridDimY;       /**< Height of grid in blocks */
+    unsigned int gridDimZ;       /**< Depth of grid in blocks */
+    unsigned int blockDimX;      /**< X dimension of each thread block */
+    unsigned int blockDimY;      /**< Y dimension of each thread block */
+    unsigned int blockDimZ;      /**< Z dimension of each thread block */
+    unsigned int sharedMemBytes; /**< Dynamic shared-memory size per thread block in bytes */
+    void **kernelParams;         /**< Array of pointers to kernel parameters */
+    void **extra;                /**< Extra options */
+} CUDA_KERNEL_NODE_PARAMS_v1;
+
+/**
  * GPU kernel node parameters
  */
 typedef struct CUDA_KERNEL_NODE_PARAMS_st {
@@ -1387,6 +1410,12 @@ typedef CUDA_HOST_NODE_PARAMS_v1 CUDA_HOST_NODE_PARAMS;
 typedef struct CUDA_HOST_NODE_PARAMS_v2_st {
     CUhostFn fn;    /**< The function to call when the node executes */
     void* userData; /**< Argument to pass to the function */
+    unsigned int syncMode;  /**< The sync mode to use for the host task */
+    // preferred context to use for the host task
+    union {
+        CUcontext ctx;
+        CUgreenCtx gCtx;
+    };
 } CUDA_HOST_NODE_PARAMS_v2;
 
 /**
@@ -1525,6 +1554,12 @@ typedef struct CUDA_EVENT_WAIT_NODE_PARAMS_st {
  */
 typedef struct CUDA_EVENT_RECORD_NODE_PARAMS_st {
     CUevent event; /**< The event to record when the node executes */
+
+    // preferred context to use for the event record
+    union {
+        CUcontext ctx;
+        CUgreenCtx gCtx;
+    };
 } CUDA_EVENT_RECORD_NODE_PARAMS;
 
 typedef struct CUDA_BATCH_MEM_OP_NODE_PARAMS_v1_st {
@@ -1542,11 +1577,34 @@ typedef struct CUDA_BATCH_MEM_OP_NODE_PARAMS_v2_st {
     unsigned int flags;
 } CUDA_BATCH_MEM_OP_NODE_PARAMS_v2;
 
+/**
+ * Optional annotation for edges in a CUDA graph. Note, all edges implicitly have annotations and
+ * default to a zero-initialized value if not specified. A zero-initialized struct indicates a
+ * standard full serialization of two nodes with memory visibility.
+ */
 typedef struct CUgraphEdgeData_st {
-    unsigned char  from_port;
-    unsigned char  reserved[5];
-    unsigned char  to_port;
-    unsigned char  type;
+    unsigned char from_port; /**< This indicates when the dependency is triggered from the upstream
+                                  node on the edge. The meaning is specfic to the node type. A value
+                                  of 0 in all cases means full completion of the upstream node, with
+                                  memory visibility to the downstream node or portion thereof
+                                  (indicated by \c to_port).
+                                  <br>
+                                  Only kernel nodes define non-zero ports. A kernel node
+                                  can use the following output port types:
+                                  ::CU_GRAPH_KERNEL_NODE_PORT_DEFAULT, ::CU_GRAPH_KERNEL_NODE_PORT_PROGRAMMATIC,
+                                  or ::CU_GRAPH_KERNEL_NODE_PORT_LAUNCH_ORDER. */
+    unsigned char to_port; /**< This indicates what portion of the downstream node is dependent on
+                                the upstream node or portion thereof (indicated by \c from_port). The
+                                meaning is specific to the node type. A value of 0 in all cases means
+                                the entirety of the downstream node is dependent on the upstream work.
+                                <br>
+                                Currently no node types define non-zero ports. Accordingly, this field
+                                must be set to zero. */
+    unsigned char type; /**< This should be populated with a value from ::CUgraphDependencyType. (It
+                             is typed as char due to compiler-specific layout of bitfields.) See
+                             ::CUgraphDependencyType. */
+    unsigned char reserved[5]; /**< These bytes are unused and must be zeroed. This ensures
+                                    compatibility if additional fields are added in the future. */
 } CUgraphEdgeData;
 
 /**
@@ -1702,6 +1760,26 @@ typedef struct CUctxCreateParams_st {
     int                  numExecAffinityParams;
     CUctxCigParam       *cigParams;
 } CUctxCreateParams;
+
+typedef enum CUstreamCigDataType_enum {
+    STREAM_CIG_DATA_TYPE_D3D12_COMMAND_LIST = 0x1,              /**< D3D12 Command List Handle */
+} CUstreamCigDataType;
+
+/**
+* CIG Stream Capture Params
+*/
+typedef struct CUstreamCigParam_st {
+    CUstreamCigDataType streamSharedDataType;  /**< Type of shared data from graphics client (D3D12). */
+    void* streamSharedData;                    /**< Graphics client data handle (ID3D12CommandList/ID3D12GraphicsCommandList). */
+} CUstreamCigParam;
+
+/**
+* Params for capturing CUDA stream to CIG
+* streamCigParams must be non-NULL.
+*/
+ typedef struct CUstreamCigCaptureParams_st {
+    CUstreamCigParam * streamCigParams;  /**< CIG (CUDA in Graphics) parameters for sharing command list data from D3D12 graphics clients. */
+} CUstreamCigCaptureParams;
 
 /**
  * Error codes
@@ -3033,6 +3111,11 @@ typedef struct CUDA_EXT_SEM_SIGNAL_NODE_PARAMS_v2_st {
     CUexternalSemaphore* extSemArray;                         /**< Array of external semaphore handles. */
     const CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS* paramsArray; /**< Array of external semaphore signal parameters. */
     unsigned int numExtSems;                                  /**< Number of handles and parameters supplied in extSemArray and paramsArray. */
+    // preferred context to use for the semaphore signal task
+    union {
+        CUcontext ctx;
+        CUgreenCtx gCtx;
+    };
 } CUDA_EXT_SEM_SIGNAL_NODE_PARAMS_v2;
 
 /**
@@ -3094,6 +3177,11 @@ typedef struct CUDA_EXT_SEM_WAIT_NODE_PARAMS_v2_st {
     CUexternalSemaphore* extSemArray;                       /**< Array of external semaphore handles. */
     const CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS* paramsArray; /**< Array of external semaphore wait parameters. */
     unsigned int numExtSems;                                /**< Number of handles and parameters supplied in extSemArray and paramsArray. */
+    // preferred context to use for the semaphore wait task
+    union {
+        CUcontext ctx;
+        CUgreenCtx gCtx;
+    };
 } CUDA_EXT_SEM_WAIT_NODE_PARAMS_v2;
 
 /**

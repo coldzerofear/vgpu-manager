@@ -39,6 +39,7 @@ rules:
     resources:
       - resourceclaims/status
     verbs:
+      - get
       - update
   - apiGroups:
       - ""
@@ -125,11 +126,12 @@ spec:
               mountPropagation: Bidirectional
       containers:
         - name: kubelet-plugin
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c]
           args:
             - kubelet-plugin
+            - --domain=nvidia.com
             - --kube-api-qps=20
             - --kube-api-burst=30
             - -v=6

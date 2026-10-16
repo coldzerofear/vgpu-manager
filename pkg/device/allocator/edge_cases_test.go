@@ -29,6 +29,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/tools/events"
+	"k8s.io/klog/v2"
 )
 
 // Degenerate and adversarial inputs must degrade, never panic: this code runs
@@ -136,18 +138,12 @@ type fakeRecorder struct {
 	onEventf func(eventtype, reason, message string)
 }
 
-func (f *fakeRecorder) Event(_ runtime.Object, eventtype, reason, message string) {
-	if f.onEventf != nil {
-		f.onEventf(eventtype, reason, message)
-	}
-}
-
-func (f *fakeRecorder) Eventf(_ runtime.Object, eventtype, reason, messageFmt string, args ...interface{}) {
+func (f *fakeRecorder) Eventf(_, _ runtime.Object, eventtype, reason, _, messageFmt string, args ...interface{}) {
 	if f.onEventf != nil {
 		f.onEventf(eventtype, reason, fmt.Sprintf(messageFmt, args...))
 	}
 }
 
-func (f *fakeRecorder) AnnotatedEventf(o runtime.Object, _ map[string]string, eventtype, reason, messageFmt string, args ...interface{}) {
-	f.Eventf(o, eventtype, reason, messageFmt, args...)
+func (f *fakeRecorder) WithLogger(logger klog.Logger) events.EventRecorderLogger {
+	return f
 }

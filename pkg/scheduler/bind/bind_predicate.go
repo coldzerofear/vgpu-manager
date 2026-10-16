@@ -31,7 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
@@ -40,14 +40,15 @@ type nodeBinding struct {
 	locker     *serial.Locker
 	kubeClient kubernetes.Interface
 	podLister  client.PodLister
-	recorder   record.EventRecorder
+	recorder   events.EventRecorderLogger
 }
 
 const Name = "BindPredicate"
 
 var _ predicate.BindPredicate = &nodeBinding{}
 
-func New(client kubernetes.Interface, recorder record.EventRecorder, podLister client.PodLister, serialBindNode bool) (*nodeBinding, error) {
+func New(client kubernetes.Interface, recorder events.EventRecorderLogger,
+	podLister client.PodLister, serialBindNode bool) (*nodeBinding, error) {
 	minLockingDuration := 20 * time.Millisecond
 	locker := serial.NewLocker(serial.WithName(Name),
 		serial.WithEnabled(serialBindNode),
@@ -122,7 +123,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 			outcome = metrics.ResultBindNodeMismatch
 			err = fmt.Errorf("predicate node %q does not match the bound node %q", nodeName, args.Node)
 			klog.ErrorS(err, "", "pod", klog.KObj(pod), "predicateNode", nodeName, "bindingNode", args.Node)
-			b.recorder.Event(pod, corev1.EventTypeWarning, reason.EventBindingFailed, err.Error())
+			b.recorder.Eventf(pod, nil, corev1.EventTypeWarning, reason.EventBindingFailed, "Binding", "%s", err.Error())
 			// patch failed metadata
 			if patchErr := client.PatchPodAllocationFailed(b.kubeClient, pod); patchErr != nil {
 				klog.ErrorS(patchErr, "PatchPodAllocationFailed", "pod", klog.KObj(pod))
@@ -134,7 +135,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 			klog.ErrorS(err, "device pre allocation check failed", "pod", klog.KObj(pod), "bindingNode", args.Node)
 			outcome = metrics.ResultBindPreAllocExpired
 			err = fmt.Errorf("device pre allocation check failed, unable to bind to node %q", nodeName)
-			b.recorder.Event(pod, corev1.EventTypeWarning, reason.EventBindingFailed, err.Error())
+			b.recorder.Eventf(pod, nil, corev1.EventTypeWarning, reason.EventBindingFailed, "Binding", "%s", err.Error())
 			// patch failed metadata
 			if patchErr := client.PatchPodAllocationFailed(b.kubeClient, pod); patchErr != nil {
 				klog.ErrorS(patchErr, "PatchPodAllocationFailed", "pod", klog.KObj(pod))
@@ -166,7 +167,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 	if err != nil {
 		outcome = metrics.ResultBindFailed
 		klog.ErrorS(err, "Pod binding node failed", "pod", klog.KObj(pod), "bindingNode", args.Node)
-		b.recorder.Event(pod, corev1.EventTypeWarning, reason.EventBindingFailed, err.Error())
+		b.recorder.Eventf(pod, nil, corev1.EventTypeWarning, reason.EventBindingFailed, "Binding", "%s", err.Error())
 		// patch failed metadata
 		if patchErr := client.PatchPodAllocationFailed(b.kubeClient, pod); patchErr != nil {
 			klog.ErrorS(patchErr, "PatchPodAllocationFailed", "pod", klog.KObj(pod))
@@ -174,8 +175,8 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 	}
 
-	b.recorder.Eventf(pod, corev1.EventTypeNormal, reason.EventBindingSucceed,
-		"Successfully bound pod %q to node %q", klog.KObj(pod), args.Node)
+	b.recorder.Eventf(pod, nil, corev1.EventTypeNormal, reason.EventBindingSucceed,
+		"Binding", "Successfully bound pod %q to node %q", klog.KObj(pod), args.Node)
 	klog.V(2).InfoS("Pod binding node successful", "pod", klog.KObj(pod), "bindingNode", args.Node)
 	return &extenderv1.ExtenderBindingResult{}
 }

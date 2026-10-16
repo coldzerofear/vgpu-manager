@@ -55,6 +55,8 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/informers"
+	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
@@ -79,10 +81,16 @@ type Config struct {
 	// see AdvertiseEndpoint and serverState.Endpoint.
 	ServerEndpoint string
 	// AdvertiseEndpoint, when set, is reported to callers of ServerInfo as the
-	// server's endpoint verbatim (URL form) instead of the discovered one.
+	// server.s endpoint verbatim (URL form) instead of the discovered one.
 	// For DNS names and gateways that this host cannot resolve or reach
 	// itself; it is not probed.
 	AdvertiseEndpoint string
+	// AdvertiseAgentEndpoint, when set, is reported as this agent's own
+	// endpoint (grpc://host:port) instead of the address it discovered for
+	// itself. A pod that is not on the host network has only its pod IP to
+	// offer, which a recreated pod loses; the name of a headless service
+	// keeps working (see pkg/webhook/pod/hostname).
+	AdvertiseAgentEndpoint string
 	// ListenEndpoints are the gRPC listen addresses, URL form; grpc://host:port
 	// for TCP (empty host = all interfaces) and unix:///path for a socket.
 	// The same service is served on every one of them.
@@ -124,8 +132,9 @@ type Agent struct {
 	claimInformer cache.SharedIndexInformer
 	claimCache    cache.MutationCache
 	podInformer   cache.SharedIndexInformer
-	nodeInformer  cache.SharedIndexInformer
 	podCache      cache.MutationCache
+	nodeInformer  cache.SharedIndexInformer
+	nodeLister    listerv1.NodeLister
 
 	// Device snapshots, one per owner kind: a claim session is built from this
 	// node's ResourceSlices, a pod session from the device registry the device
@@ -162,8 +171,9 @@ type Agent struct {
 	// hasReady reports (without blocking) whether every informer cache and
 	// event-handler registration has synced; nil until Run wires it (see
 	// addReady, which auto mode calls once per informer set).
-	hasReady    func() bool
-	readySynced []cache.InformerSynced
+	hasReady     func() bool
+	healthSynced []cache.InformerSynced
+	readySynced  []cache.InformerSynced
 }
 
 func New(cfg Config) *Agent {
@@ -174,10 +184,9 @@ func New(cfg Config) *Agent {
 		// Unset is the DRA path, which is what this agent started as.
 		cfg.SessionOwnerKind = OwnerClaim
 	}
-	store := NewSessionStore(cfg)
 	a := &Agent{
 		cfg:          cfg,
-		store:        store,
+		store:        NewSessionStore(cfg),
 		servesClaims: cfg.covers(OwnerClaim),
 		servesPods:   cfg.covers(OwnerPod),
 	}
@@ -216,6 +225,21 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.resolveOwners(); err != nil {
 		return err
 	}
+
+	nodeFactory := informers.NewSharedInformerFactoryWithOptions(a.cfg.ClientSets.Core,
+		10*time.Hour, informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
+			opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", a.cfg.NodeName).String()
+		}))
+	a.nodeInformer = nodeFactory.Core().V1().Nodes().Informer()
+	a.nodeLister = listerv1.NewNodeLister(a.nodeInformer.GetIndexer())
+	if err := a.nodeInformer.SetTransform(crcache.TransformStripManagedFields()); err != nil {
+		return err
+	}
+	a.healthSynced = append(a.healthSynced, a.nodeInformer.HasSynced)
+	a.store.GetNodeFn = func() (*corev1.Node, error) {
+		return a.nodeLister.Get(a.cfg.NodeName)
+	}
+
 	if a.servesClaims {
 		if err := a.startClaimInformers(ctx); err != nil {
 			return err
@@ -229,6 +253,18 @@ func (a *Agent) Run(ctx context.Context) error {
 	if a.hasReady == nil {
 		return fmt.Errorf("invalid session owner %q", a.cfg.SessionOwnerKind)
 	}
+
+	// The node informer serves both owner kinds - node-level compute policy
+	// defaults for either, plus the device registry the pod path reads - so it
+	// is started here, once the owner's handlers are registered.
+	a.wg.Go(func() { a.nodeInformer.RunWithContext(ctx) })
+
+	syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer syncCancel()
+	if !cache.WaitForNamedCacheSyncWithContext(syncCtx, a.healthSynced...) {
+		return fmt.Errorf("informers cache synchronization timeout")
+	}
+
 	klog.Infof("Serving %s sessions", strings.Join(a.servedKinds(), " and "))
 
 	// 3. Bind every configured listener (TCP for other nodes, a unix socket
@@ -242,40 +278,16 @@ func (a *Agent) Run(ctx context.Context) error {
 	return a.serve(ctx, cancel, listeners)
 }
 
-// startClaimInformers watches the node's own slices (device snapshot) and all
-// claims (lifecycle). ResourceSlice has a spec.driver field selector; claims
-// have none, narrowing happens client-side. Blocks until the caches are synced.
-func (a *Agent) startClaimInformers(ctx context.Context) error {
-	a.sliceInformer = cache.NewSharedIndexInformer(
-		cache.NewListWatchFromClient(a.cfg.ClientSets.Resource.RESTClient(), "resourceslices", corev1.NamespaceAll,
-			fields.AndSelectors(
-				fields.OneTermEqualSelector(resourceapi.ResourceSliceSelectorDriver, a.cfg.DriverName),
-				// TODO "Failed to watch" err="failed to list *v1.ResourceSlice: field label not supported for resource.k8s.io/v1, Kind=ResourceSlice: spec.pool.name" logger="UnhandledError" reflector="pkg/mod/k8s.io/client-go@v0.37.0-rc.0/tools/cache/reflector.go:343" type="*v1.ResourceSlice"
-				//fields.OneTermEqualSelector(resourceapi.ResourceSliceSelectorPoolName, a.cfg.NodeName),
-			),
-		), &resourceapi.ResourceSlice{}, 10*time.Hour, cache.Indexers{})
-	if err := a.sliceInformer.SetTransform(crcache.TransformStripManagedFields()); err != nil {
-		return err
-	}
-	a.claimInformer = cache.NewSharedIndexInformer(
-		cache.NewListWatchFromClient(a.cfg.ClientSets.Resource.RESTClient(), "resourceclaims", corev1.NamespaceAll,
-			fields.Everything()), &resourceapi.ResourceClaim{}, 10*time.Hour, claimIndexers())
-	// The cache keeps only the fields the agent reads (see trimClaim);
-	// EnsureSession re-fetches the full object from the API when the
-	// trimmed one turns out stale.
-	if err := a.claimInformer.SetTransform(trimClaim(a.cfg.DriverName, a.cfg.NodeName)); err != nil {
-		return err
-	}
-
-	sliceRegistration, err := a.sliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+func (a *Agent) sliceResourceEventHandler() cache.ResourceEventHandler {
+	return &cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(interface{}) { a.refreshNodeDevices() },
 		UpdateFunc: func(_, _ interface{}) { a.refreshNodeDevices() },
 		DeleteFunc: func(interface{}) { a.refreshNodeDevices() },
-	})
-	if err != nil {
-		return err
 	}
-	claimRegistration, err := a.claimInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+}
+
+func (a *Agent) claimResourceEventHandler() cache.ResourceEventHandler {
+	return &cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			if c, ok := obj.(*resourceapi.ResourceClaim); ok {
 				a.sweepClaim(c)
@@ -294,7 +306,37 @@ func (a *Agent) startClaimInformers(ctx context.Context) error {
 				a.store.Sweep(string(c.UID), nil, math.MaxInt64)
 			}
 		},
-	})
+	}
+}
+
+// startClaimInformers watches the node's own slices (device snapshot) and all
+// claims (lifecycle). ResourceSlice has a spec.driver field selector; claims
+// have none, narrowing happens client-side. Blocks until the caches are synced.
+func (a *Agent) startClaimInformers(ctx context.Context) error {
+	a.sliceInformer = cache.NewSharedIndexInformer(cache.NewListWatchFromClient(a.cfg.ClientSets.Resource.RESTClient(),
+		"resourceslices", corev1.NamespaceAll, fields.AndSelectors(
+			fields.OneTermEqualSelector(resourceapi.ResourceSliceSelectorDriver, a.cfg.DriverName),
+			// TODO "Failed to watch" err="failed to list *v1.ResourceSlice: field label not supported for resource.k8s.io/v1, Kind=ResourceSlice: spec.pool.name" logger="UnhandledError" reflector="pkg/mod/k8s.io/client-go@v0.37.0-rc.0/tools/cache/reflector.go:343" type="*v1.ResourceSlice"
+			//fields.OneTermEqualSelector(resourceapi.ResourceSliceSelectorPoolName, a.cfg.NodeName),
+		),
+	), &resourceapi.ResourceSlice{}, 10*time.Hour, cache.Indexers{})
+	if err := a.sliceInformer.SetTransform(crcache.TransformStripManagedFields()); err != nil {
+		return err
+	}
+	sliceRegistration, err := a.sliceInformer.AddEventHandler(a.sliceResourceEventHandler())
+	if err != nil {
+		return err
+	}
+
+	a.claimInformer = cache.NewSharedIndexInformer(cache.NewListWatchFromClient(a.cfg.ClientSets.Resource.RESTClient(),
+		"resourceclaims", corev1.NamespaceAll, fields.Everything()),
+		&resourceapi.ResourceClaim{}, 10*time.Hour, claimIndexers())
+	// The cache keeps only the fields the agent reads (see trimClaim);
+	// EnsureSession re-fetches the full object from the API when the trimmed one turns out stale.
+	if err = a.claimInformer.SetTransform(trimClaim(a.cfg.DriverName, a.cfg.NodeName)); err != nil {
+		return err
+	}
+	claimRegistration, err := a.claimInformer.AddEventHandler(a.claimResourceEventHandler())
 	if err != nil {
 		return err
 	}
@@ -318,16 +360,8 @@ func (a *Agent) startClaimInformers(ctx context.Context) error {
 	a.wg.Go(func() { a.sliceInformer.RunWithContext(ctx) })
 	a.wg.Go(func() { a.claimInformer.RunWithContext(ctx) })
 
-	syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer syncCancel()
+	a.healthSynced = append(a.healthSynced, a.sliceInformer.HasSynced, a.claimInformer.HasSynced)
 
-	if !cache.WaitForNamedCacheSyncWithContext(
-		syncCtx,
-		a.sliceInformer.HasSynced,
-		a.claimInformer.HasSynced,
-	) {
-		return fmt.Errorf("informers cache synchronization timeout")
-	}
 	return nil
 }
 
@@ -638,6 +672,9 @@ func (a *Agent) serverEndpointFor(host string) string {
 // on the routable host (or on the listener's own address when it is bound
 // to one); "" without a TCP listener or a routable host.
 func (a *Agent) agentEndpointFor(host string) string {
+	if a.cfg.AdvertiseAgentEndpoint != "" {
+		return a.cfg.AdvertiseAgentEndpoint
+	}
 	tcp := a.agentTCP.Load()
 	if tcp == nil {
 		return ""

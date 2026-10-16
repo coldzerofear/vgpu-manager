@@ -71,7 +71,8 @@ func NewNodeGPUCollector(
 	contLister *lister.ContainerLister, managerRoot, sessionBase string, featureGate featuregate.FeatureGate,
 ) (prometheus.Collector, error) {
 	driverRoot := config.GetDriverRoot()
-	deviceLib, err := nvidia.DetectionDeviceLib(driverRoot)
+	deviceLib, err := nvidia.DetectionDeviceLib(driverRoot,
+		nvidia.WithMemoryOverrideMB(config.GetDeviceMemoryOverride()))
 	if err != nil {
 		return nil, err
 	}
@@ -597,9 +598,15 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 
 				deviceMemUsage += deviceVMemUsage
 				memoryUtilRate := int64(0)
-				if deviceMemUsage >= deviceMemLimit {
+				switch {
+				case deviceMemLimit == 0:
+					// No quota: a whole-card request, or a device whose size
+					// nothing could report. Nothing to be a percentage of, and
+					// reporting 100% of nothing reads as a container at its
+					// limit.
+				case deviceMemUsage >= deviceMemLimit:
 					memoryUtilRate = 100
-				} else if deviceMemLimit > 0 {
+				default:
 					memoryUtilRate = int64(float64(deviceMemUsage) / float64(deviceMemLimit) * 100)
 				}
 				ch <- prometheus.MustNewConstMetric(containerVGPUMemoryUtilRate,

@@ -45,6 +45,13 @@ FAMILIES=(
   "cuGraphAddNode                cuGraphAddNode                 cuGraphAddNode_v2"
   "cuGetProcAddress              cuGetProcAddress               cuGetProcAddress_v2"
   "cuStreamGetCaptureInfo        cuStreamGetCaptureInfo_v2      cuStreamGetCaptureInfo_v3"
+  "cuGraphAddKernelNode          cuGraphAddKernelNode           cuGraphAddKernelNode_v2"
+  "cuGraphKernelNodeSetParams    cuGraphKernelNodeSetParams     cuGraphKernelNodeSetParams_v2"
+  "cuGraphKernelNodeGetParams    cuGraphKernelNodeGetParams     cuGraphKernelNodeGetParams_v2"
+  "cuGraphExecUpdate             cuGraphExecUpdate              cuGraphExecUpdate_v2"
+  "cuStreamGetCtx                cuStreamGetCtx                 cuStreamGetCtx_v2"
+  "cuStreamBeginCapture          cuStreamBeginCapture           cuStreamBeginCapture_v2"
+  "cuStreamUpdateCaptureDependencies cuStreamUpdateCaptureDependencies cuStreamUpdateCaptureDependencies_v2"
   # cuGetProcAddress above is listed for export-completeness (we must
   # export both ABI versions of this symbol) even though its substitution
   # logic is handled specially inside cuGetProcAddress() / _v2() in
@@ -89,8 +96,8 @@ if (( errors > 0 )); then
   exit 1
 fi
 
-echo "[PASS] ABI-conflict symbol export check: all ${#FAMILIES[@]} family "\
-"pairs present in $(basename "${SO_PATH}")"
+so_name="$(basename "${SO_PATH}")"
+echo "[PASS] ABI-conflict symbol export check: all ${#FAMILIES[@]} family pairs present in ${so_name}"
 
 # ---------------------------------------------------------------------------
 # Negative assertions: internal helpers MUST NOT leak into .dynsym.
@@ -125,7 +132,7 @@ FORBIDDEN_HELPERS=(
   device_vmem_unlock
   init_devices_mapping
   init_g_vgpu_config_by_env
-  init_real_dlsym
+  get_real_dlsym
   load_necessary_data
   load_controller_configuration
   load_cuda_libraries
@@ -199,12 +206,12 @@ unexpected=$(comm -23 \
   <(printf '%s\n' "${EXPORTED_ALL}" \
       | grep -E '^(cu[A-Z]|cudbg|_cu[A-Z]|nvml[A-Z])' \
       | sort -u))
-# lupinecr_get_lupine_provider_v1 is library-remote's LUPINE checkpoint-provider
-# entry point: the same .so is LD_PRELOAD'd as a hook library AND dlopen'd by
-# lupine-server as a provider, so this symbol must stay visible there. library/
-# never defines it, so allowing it here costs that tree nothing.
+# lupinecr_get_lupine_provider_v1 is the LUPINE checkpoint-provider entry
+# point, and lupinecr_cuda_symbol_v1 its separate optional-override lookup
+# (checkpoint_provider.c): the same .so is LD_PRELOAD'd as a hook library AND
+# dlopen'd by lupine-server as a provider, so both symbols must stay visible.
 unexpected=$(printf '%s\n' "${unexpected}" \
-              | grep -vxE 'dlsym|vkNegotiateLoaderLayerInterfaceVersion|lupinecr_get_lupine_provider_v1' \
+              | grep -vxE 'dlsym|vkNegotiateLoaderLayerInterfaceVersion|lupinecr_get_lupine_provider_v1|lupinecr_cuda_symbol_v1' \
               | grep -v '^$' || true)
 
 if [[ -n "${unexpected}" ]]; then

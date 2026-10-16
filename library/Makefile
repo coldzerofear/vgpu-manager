@@ -7,9 +7,19 @@
 #   make docker-build            build the .so inside a CUDA docker image
 #   make build-in-docker         same, but via an ephemeral run (no Dockerfile)
 #   make check                   run all static checks (no GPU needed)
+#   make check-all               the above plus the built .so's export surface
+#   make cppcheck                just the C static analysis CI gates on
+#   make check-abi-signatures    classify versioned APIs against a real <cuda.h>
+#   make test-nogpu              run the GPU-less tests (no GPU, no CUDA needed)
+#   make test-sanitize           the same tests under ASan+UBSan
 #   make check-exports           verify ABI-conflict symbol exports on the built .so
 #   make test                    build and run the smoke tests under test/
 #   make help                    show this listing
+#
+# The static checks skip rather than fail when a tool they need is missing -
+# cppcheck, or a <cuda.h> for the struct layout and ABI signature checks - so
+# `make check` works on a bare machine. CI installs them, so nothing is skipped
+# where it gates.
 #
 .DEFAULT_GOAL := help
 
@@ -18,13 +28,22 @@ BUILD_DIR       ?= $(LIBRARY_DIR)build
 CUDA_HOME       ?= /usr/local/cuda
 CMAKE           ?= cmake
 DOCKER          ?= docker
-PYTHON          ?= python3
+# Whichever interpreter the host actually has. Pinning python3.12 meant the
+# hack/ checks could not run in the CUDA container, whose Ubuntu base ships
+# python3.8 or 3.10 - the scripts need 3.8+, not a specific minor.
+PYTHON          ?= $(shell command -v python3.12 2>/dev/null || \
+                          command -v python3 2>/dev/null || echo python3)
 BASH            ?= bash
 CMAKE_BUILD_TYPE ?= Release
+# Build the CUDA-linked tools under tools/ (needs a CUDA toolkit). OFF lets
+# every GPU-less check run on a plain machine -- what CI does.
+WITH_CUDA_TOOLS ?= ON
+# ASan+UBSan for the GPU-less tests. See VGPU_SANITIZE in CMakeLists.txt.
+SANITIZE        ?= OFF
 J               ?= $(shell nproc 2>/dev/null | awk '{print int(($$0+1)/2)}')
-IMG             ?= coldzerofear/vgpu-control:dev
-CUDA_BASE_IMAGE ?= nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
-APT_MIRROR      ?= https://mirrors.aliyun.com
+IMG             ?= ghcr.io/coldzerofear/vgpu-control:dev
+CUDA_BASE_IMAGE ?= nvidia/cuda:13.4.2-devel-rockylinux8
+DNF_MIRROR      ?= https://mirrors.ustc.edu.cn/rocky
 TEST_DEVICE_ID  ?= 0
 TEST_TIMEOUT    ?= 120
 
@@ -54,6 +73,8 @@ configure: ## Run cmake to (re)configure the build tree.
 	@mkdir -p $(BUILD_DIR)
 	cd $(BUILD_DIR) && CUDA_HOME=$(CUDA_HOME) $(CMAKE) \
 	    -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) \
+	    -DVGPU_WITH_CUDA_TOOLS=$(WITH_CUDA_TOOLS) \
+	    -DVGPU_SANITIZE=$(SANITIZE) \
 	    $(CMAKE_EXTRA_ARGS) \
 	    $(LIBRARY_DIR)
 
@@ -76,21 +97,22 @@ clean: ## Remove the build tree.
 
 .PHONY: docker-build
 docker-build: ## Build libvgpu-control.so inside $(IMG) using the local Dockerfile.
-	$(DOCKER) build --build-arg NVIDIA_CUDA_IMAGE=$(CUDA_BASE_IMAGE) --build-arg APT_MIRROR=$(APT_MIRROR) -t $(IMG) $(LIBRARY_DIR)
+	$(DOCKER) build --build-arg NVIDIA_CUDA_IMAGE=$(CUDA_BASE_IMAGE) --build-arg DNF_MIRROR=$(DNF_MIRROR) -t $(IMG) $(LIBRARY_DIR)
 
 .PHONY: build-in-docker
 build-in-docker: ## Build the .so in an ephemeral CUDA container (no local toolkit required).
-	$(DOCKER) run -i --rm \
-	    -v $(LIBRARY_DIR):/vgpu-library \
-	    -w /vgpu-library \
-	    -e DEBIAN_FRONTEND=noninteractive \
-	    $(CUDA_BASE_IMAGE) \
-	    sh -c "apt-get -y update && apt-get -y install make cmake $(PYTHON) && bash ./build.sh"
+	$(DOCKER) run -i --rm -v $(LIBRARY_DIR):/vgpu-library -w /vgpu-library -e DEBIAN_FRONTEND=noninteractive $(CUDA_BASE_IMAGE) sh -c '\
+		if [ -n "$(DNF_MIRROR)" ]; then \
+	      sed -e '\''s|^mirrorlist=|#mirrorlist=|g'\'' \
+	          -e '\''s|^#baseurl=http://dl\.rockylinux\.org/\$$contentdir|baseurl=$(DNF_MIRROR)|g'\'' \
+	          -i.bak /etc/yum.repos.d/Rocky-*.repo; \
+	    fi && dnf clean all && dnf makecache && dnf install -y make cmake gcc-c++ $(PYTHON) && bash ./build.sh'
 
 ##@ Checks (no GPU needed)
 
 .PHONY: check
-check: check-hook-consistency check-struct-layout check-session-paths ## Run every static check.
+check: check-hook-consistency check-struct-layout check-abi-signatures \
+       check-session-paths cppcheck ## Run every static check.
 
 .PHONY: check-hook-consistency
 check-hook-consistency: ## Verify dispatch table / enum / wrapper alignment + ABI-conflict coverage.
@@ -104,6 +126,29 @@ check-struct-layout: ## Compare cuda-subset.h struct layouts vs real <cuda.h> on
 check-session-paths: ## Reject compile-time paths that bypass session_path().
 	$(BASH) $(LIBRARY_DIR)hack/check_session_paths.sh
 
+.PHONY: cppcheck
+cppcheck: ## Run the same cppcheck invocation CI gates on.
+	@# -I library matters: without it cppcheck misresolves the NVML headers and
+	@# invents an uninitvar in cuda_hook.c, so a hand-typed command disagrees
+	@# with the gate. Keep this and the ci.yaml step identical.
+	@# Skips rather than fails when cppcheck is absent, the way the struct
+	@# layout check skips without a CUDA toolkit, so `make check` still runs
+	@# on a machine that has only python3 and bash. The gate that must not be
+	@# skipped is the ci.yaml job, which installs it.
+	@if ! command -v cppcheck >/dev/null 2>&1; then \
+	    echo "[SKIP] cppcheck not installed - no C static analysis"; \
+	else \
+	    cppcheck --enable=warning,performance,portability \
+	        --std=c11 --inline-suppr --error-exitcode=1 \
+	        --suppress=missingInclude --suppress=missingIncludeSystem \
+	        -I $(LIBRARY_DIR)include -I $(LIBRARY_DIR). \
+	        $(LIBRARY_DIR)src $(LIBRARY_DIR)tools; \
+	fi
+
+.PHONY: check-abi-signatures
+check-abi-signatures: ## Classify every versioned API family against a real <cuda.h>.
+	$(PYTHON) $(LIBRARY_DIR)hack/check_abi_signatures.py --cuda-home $(CUDA_HOME) --check-wrappers $(ARGS)
+
 .PHONY: check-exports
 check-exports: $(SO_FILE) ## Verify the built .so exports both ABI versions of every conflict family.
 	$(BASH) $(LIBRARY_DIR)hack/check_exported_symbols.sh $(SO_FILE)
@@ -111,7 +156,7 @@ check-exports: $(SO_FILE) ## Verify the built .so exports both ABI versions of e
 $(SO_FILE): build
 
 .PHONY: check-all
-check-all: check check-exports ## Static + post-build symbol-export checks.
+check-all: check check-exports ## Every check: the static ones plus the built .so's exports.
 
 ##@ Tests (need GPU + NVIDIA driver)
 
@@ -120,6 +165,8 @@ build-tests: ## Compile smoke tests under test/.
 	@mkdir -p $(BUILD_DIR)
 	cd $(BUILD_DIR) && CUDA_HOME=$(CUDA_HOME) $(CMAKE) \
 	    -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) \
+	    -DVGPU_WITH_CUDA_TOOLS=$(WITH_CUDA_TOOLS) \
+	    -DVGPU_SANITIZE=$(SANITIZE) \
 	    -DBUILD_TESTS=ON \
 	    -DBUILD_SM_NODE_TESTS=ON \
 	    -DTEST_DEVICE_ID=$(TEST_DEVICE_ID) \
@@ -161,6 +208,13 @@ test-nogpu: build-tests ## Run the GPU-less checks (no GPU, no CUDA needed).
 #
 # Depends on test-nogpu rather than repeating it: two prerequisites here would
 # be eligible to run in parallel under -j, and the tests would race the build.
+# Separate build tree: sanitized and plain objects never share one, so CI can
+# cache both and a human can switch back and forth without a full rebuild.
+.PHONY: test-sanitize
+test-sanitize: ## Run the GPU-less checks under ASan+UBSan (no GPU, no CUDA needed).
+	$(MAKE) -f $(lastword $(MAKEFILE_LIST)) test-nogpu \
+	    SANITIZE=ON WITH_CUDA_TOOLS=$(WITH_CUDA_TOOLS) BUILD_DIR=$(LIBRARY_DIR)build-asan
+
 test: test-nogpu ## Build then run all tests with LD_PRELOAD of libvgpu-control.so.
 	TEST_DEVICE_ID=$(TEST_DEVICE_ID) \
 	    $(BASH) $(BUILD_DIR)/test/run_tests_with_env.sh $(BUILD_DIR)/test $(SO_FILE)

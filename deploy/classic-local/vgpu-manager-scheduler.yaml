@@ -259,11 +259,12 @@ spec:
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 5
-        - image: coldzerofear/vgpu-manager:latest
+        - image: ghcr.io/coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           name: device-scheduler
           command:
             - device-scheduler
+            - --domain=nvidia.com
             - --server-bind-port=3456
             - --watch-lease
             - --leader-elect-resource-name=vgpu-manager-scheduler

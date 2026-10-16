@@ -32,6 +32,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/opencontainers/cgroups"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 )
 
@@ -448,10 +449,10 @@ func WithDeviceManager(devManager *manager.DeviceManager) OptionFunc {
 	}
 }
 
-func GetDefaultComputePolicy(pod *corev1.Pod, node *corev1.Node) util.ComputePolicy {
-	computePolicy, ok := util.HasAnnotation(pod, util.VGPUComputePolicyAnnotation)
+func GetDefaultComputePolicy(currentPolicy, defaultPolicy metav1.Object) util.ComputePolicy {
+	computePolicy, ok := util.HasAnnotation(currentPolicy, util.VGPUComputePolicyAnnotation)
 	if !ok || len(computePolicy) == 0 {
-		computePolicy, _ = util.HasAnnotation(node, util.VGPUComputePolicyAnnotation)
+		computePolicy, _ = util.HasAnnotation(defaultPolicy, util.VGPUComputePolicyAnnotation)
 	}
 	return GetComputePolicy(computePolicy)
 }

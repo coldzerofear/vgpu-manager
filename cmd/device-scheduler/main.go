@@ -38,9 +38,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/component-base/logs"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -61,8 +63,6 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/scheme"
-	typedv1 "k8s.io/client-go/kubernetes/typed/core/v1"
-	"k8s.io/client-go/tools/record"
 	_ "k8s.io/component-base/metrics/prometheus/clientgo"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -98,9 +98,10 @@ func runApp(opt *options.Options) (exitCode int) {
 				"tlsKeyFile: %q, tlsCertFile: %q", opt.TlsKeyFile, opt.TlsCertFile)
 			return exitCode
 		}
-		if opt.CertRefreshInterval <= 0 {
-			klog.Warningf("Certificate refresh interval is less than or equal to 0, " +
-				"and the automatic certificate rotation function will be turned off")
+		if opt.CertRefreshInterval < time.Second {
+			klog.Warningf("Certificate refresh interval is less than 1 second, " +
+				"the automatic certificate rotation function will be turned off")
+			opt.CertRefreshInterval = 0
 		}
 
 		tlsConfig, err = tlsserverconfig.GetServerTLSConfig(slog.Default(), &tlsconfig.TLSServerConfig{
@@ -121,10 +122,16 @@ func runApp(opt *options.Options) (exitCode int) {
 		}
 	}
 
-	broadcaster := record.NewBroadcaster()
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
+	broadcaster := events.NewEventBroadcasterAdapterWithContext(ctx, kubeClient)
+	// Deferred after cancelFunc, so it runs before it: Shutdown blocks until the
+	// queued events reach the API server, and cancelling the context first would
+	// stop the sinks that have to deliver them.
 	defer broadcaster.Shutdown()
-	broadcaster.StartRecordingToSink(&typedv1.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
-	recorder := broadcaster.NewRecorder(Scheme, corev1.EventSource{Component: opt.SchedulerName})
+	recorder := broadcaster.NewRecorder(opt.SchedulerName)
+	broadcaster.StartRecordingToSink(ctx.Done())
 
 	// trim managedFields to reduce cache memory usage.
 	option := informers.WithTransform(cache.TransformStripManagedFields())
@@ -158,10 +165,14 @@ func runApp(opt *options.Options) (exitCode int) {
 		klog.Errorln("The watch-lease and leader-elect functions are mutually exclusive and cannot be enabled simultaneously")
 		return exitCode
 	}
-	podName := strings.TrimSpace(os.Getenv("POD_NAME"))
-	podNamespace := strings.TrimSpace(os.Getenv("POD_NAMESPACE"))
-	leaseName := strings.TrimSpace(opt.LeaderElectResourceName)
-	leaseNamespace := strings.TrimSpace(opt.LeaderElectResourceNamespace)
+
+	var (
+		podName        = util.GetEnvDefault("POD_NAME", "")
+		podNamespace   = util.GetEnvDefault("POD_NAMESPACE", "")
+		leaseName      = strings.TrimSpace(opt.LeaderElectResourceName)
+		leaseNamespace = strings.TrimSpace(opt.LeaderElectResourceNamespace)
+		isLeaderFunc   = func() bool { return true }
+	)
 	if opt.WatchLease || opt.LeaderElect {
 		if leaseName == "" {
 			klog.Errorln("Enabling leader-elect or watch-lease requires specifying leader-elect-resource-name")
@@ -177,10 +188,6 @@ func runApp(opt *options.Options) (exitCode int) {
 		}
 	}
 
-	ctx, cancelFunc := context.WithCancel(context.Background())
-	defer cancelFunc()
-
-	isLeaderFunc := func() bool { return true }
 	if opt.WatchLease {
 		klog.Infoln("Watch lease enabled: Initialize lease detector")
 		leaderIdentityPrefix := strings.TrimSpace(opt.LeaderIdentityPrefix)
@@ -188,17 +195,10 @@ func runApp(opt *options.Options) (exitCode int) {
 			klog.Errorln("Enabling watch-lease requires specifying leader-identity-prefix")
 			return exitCode
 		}
-		leaseDetector, err := NewLeaseDetector(factory,
-			leaseNamespace, leaseName, leaderIdentityPrefix,
-			WithStartCallback(func() {
-				patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower)
-			}),
-			WithLeaderCallback(func() {
-				patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueLeader)
-			}),
-			WithReleaseCallback(func() {
-				patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower)
-			}),
+		leaseDetector, err := NewLeaseDetector(factory, leaseNamespace, leaseName, leaderIdentityPrefix,
+			WithStartCallback(func() { patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower) }),
+			WithLeaderCallback(func() { patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueLeader) }),
+			WithReleaseCallback(func() { patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower) }),
 		)
 		if err != nil {
 			klog.Errorf("Initialization of LeaseDetector failed: %v", err)
@@ -212,6 +212,8 @@ func runApp(opt *options.Options) (exitCode int) {
 		leaderIdentity := uuid.NewString()
 		if leaderIdentityPrefix := strings.TrimSpace(opt.LeaderIdentityPrefix); leaderIdentityPrefix != "" {
 			leaderIdentity = fmt.Sprintf("%s_%s", leaderIdentityPrefix, leaderIdentity)
+		} else if hostname, err := os.Hostname(); err == nil && hostname != "" {
+			leaderIdentity = fmt.Sprintf("%s_%s", hostname, leaderIdentity)
 		}
 		leaderElector, err := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
 			Lock: &resourcelock.LeaseLock{
@@ -221,8 +223,11 @@ func runApp(opt *options.Options) (exitCode int) {
 				},
 				Client: kubeClient.CoordinationV1(),
 				LockConfig: resourcelock.ResourceLockConfig{
-					Identity:      leaderIdentity,
-					EventRecorder: recorder,
+					Identity: leaderIdentity,
+					EventRecorder: &eventRecorderAdapter{
+						action:   "Election",
+						recorder: recorder,
+					},
 				},
 			},
 			// NewLeaderElector rejects a config that leaves these zero
@@ -285,7 +290,6 @@ func runApp(opt *options.Options) (exitCode int) {
 	// Served on the extender's existing port: the endpoint inherits its TLS
 	// setting and needs no extra chart plumbing (port, probe, NetworkPolicy).
 	route.AddMetricsHandle(handler, metrics.Handler())
-
 	factory.StartWithContext(ctx)
 	if klog.V(4).Enabled() {
 		go func() {
@@ -335,6 +339,15 @@ func runApp(opt *options.Options) (exitCode int) {
 	}
 
 	return exitCode
+}
+
+type eventRecorderAdapter struct {
+	action   string
+	recorder events.EventRecorderLogger
+}
+
+func (a *eventRecorderAdapter) Eventf(obj runtime.Object, eventType, reason, message string, args ...interface{}) {
+	a.recorder.Eventf(obj, nil, eventType, reason, a.action, message, args...)
 }
 
 func patchPodRoleLabel(kubeClient kubernetes.Interface, podName, podNamespace, roleValue string) {

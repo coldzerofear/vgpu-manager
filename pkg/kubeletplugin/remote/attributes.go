@@ -177,6 +177,10 @@ func ParseNodeSelector(expr string) ([]corev1.NodeSelectorRequirement, error) {
 			nr.Operator = corev1.NodeSelectorOpExists
 		case selection.DoesNotExist:
 			nr.Operator = corev1.NodeSelectorOpDoesNotExist
+		case selection.GreaterThan:
+			nr.Operator = corev1.NodeSelectorOpGt
+		case selection.LessThan:
+			nr.Operator = corev1.NodeSelectorOpLt
 		default:
 			return nil, fmt.Errorf("node selector %q: operator %q is not supported for node selection", expr, r.Operator())
 		}

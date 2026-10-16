@@ -78,6 +78,7 @@ func main() {
 	var (
 		kube            pkgflags.KubeClientConfig
 		cfg             remoteagent.Config
+		domain          string
 		listenEndpoints string
 		sessionOwner    string
 		featureGate     = featuregate.NewFeatureGate()
@@ -94,6 +95,7 @@ func main() {
 	))
 
 	flags := append([]cli.Flag{
+		&cli.StringFlag{Name: "domain", Usage: "Set global domain name to replace all resource and annotation domains.", Value: util.NvidiaDomain, Destination: &domain, EnvVars: []string{"DOMAIN"}},
 		&cli.StringFlag{Name: "node-name", Usage: "Node this agent runs on (= the driver's pool name).", Destination: &cfg.NodeName, EnvVars: []string{"NODE_NAME"}, Required: true},
 		&cli.StringFlag{Name: "driver-name", Usage: "DRA driver name whose slices/claims are consumed.", Value: util.DRADriverName, Destination: &cfg.DriverName, EnvVars: []string{"DRIVER_NAME"}},
 		&cli.StringFlag{Name: "ready-file", Usage: "File written after preflight; the server container waits for it. Defaults to <session-base>/.agent-ready.", Destination: &cfg.ReadyFile, EnvVars: []string{"READY_FILE"}},
@@ -101,6 +103,7 @@ func main() {
 		&cli.StringFlag{Name: "config-session-base", Usage: "Session directory root shared with lupine-server (VGPU_CONFIG_SESSION_BASE).", Value: util.RemoteSessionBasePath, Destination: &cfg.SessionBase, EnvVars: []string{"VGPU_CONFIG_SESSION_BASE"}},
 		&cli.StringFlag{Name: "remote-server-endpoint", Usage: "lupine-server endpoint to probe (URL form, http/https; host defaults to 127.0.0.1 = same pod). When the host is a loopback, the agent discovers the address other nodes can reach the server at and reports that from ServerInfo.", Value: fmt.Sprintf("127.0.0.1:%d", remotegpu.DefaultServerPort), Destination: &cfg.ServerEndpoint, EnvVars: []string{"REMOTE_SERVER_ENDPOINT"}},
 		&cli.StringFlag{Name: "advertise-server-endpoint", Usage: "lupine-server endpoint reported to other components verbatim (URL form, e.g. https://gpu-a.corp/pool-a), instead of the probed/discovered one. For DNS names or gateways this host cannot reach itself.", Destination: &cfg.AdvertiseEndpoint, EnvVars: []string{"ADVERTISE_SERVER_ENDPOINT"}},
+		&cli.StringFlag{Name: "advertise-agent-endpoint", Usage: "This agent's own endpoint reported to other nodes verbatim (grpc://host:port), instead of the address it discovers for itself. Needed when this pod is not on the host network: its pod IP does not survive a recreation, the DNS name of a headless service does.", Destination: &cfg.AdvertiseAgentEndpoint, EnvVars: []string{"ADVERTISE_AGENT_ENDPOINT"}},
 		&cli.StringFlag{Name: "listen-server-endpoint", Usage: "Agent gRPC listen endpoints, comma separated: grpc://host:port (empty host = all interfaces) and/or unix:///path.sock for same-node callers.", Value: fmt.Sprintf("0.0.0.0:%d", remotegpu.DefaultAgentPort), Destination: &listenEndpoints, EnvVars: []string{"LISTEN_SERVER_ENDPOINT"}},
 		&cli.DurationFlag{Name: "gc-interval", Usage: "Orphaned session sweep interval.", Value: time.Minute, Destination: &cfg.GCInterval, EnvVars: []string{"GC_INTERVAL"}},
 		&cli.StringFlag{Name: "session-owner", Usage: "What owns the sessions this agent serves: \"claim\" (DRA path), \"pod\" (device-plugin path, uses no DRA API) or \"auto\" (both at once; claims are skipped with a log line when the cluster serves no DRA API).", Value: string(remoteagent.OwnerPod), Destination: &sessionOwner, EnvVars: []string{"SESSION_OWNER"}},
@@ -117,8 +120,9 @@ func main() {
 			return loggingConfig.Apply()
 		},
 		Action: func(c *cli.Context) error {
+			util.MustInitGlobalDomain(domain)
 			if util.PathIsNotExist(cfg.ContainerManagerDir) {
-				return fmt.Errorf("container-manager-dir %q does not exist", cfg.ContainerManagerDir)
+				return fmt.Errorf("invalid --container-manager-dir %q: does not exist", cfg.ContainerManagerDir)
 			}
 			switch cfg.SessionOwnerKind = remoteagent.OwnerKind(sessionOwner); cfg.SessionOwnerKind {
 			case remoteagent.OwnerClaim, remoteagent.OwnerPod, remoteagent.OwnerAuto:
@@ -145,6 +149,19 @@ func main() {
 					return fmt.Errorf("invalid --advertise-server-endpoint %q: the host must be one other nodes can reach", cfg.AdvertiseEndpoint)
 				}
 				cfg.AdvertiseEndpoint = advertise.String()
+			}
+
+			if cfg.AdvertiseAgentEndpoint != "" {
+				advertise, err := remotegpu.ParseAgentEndpoint(cfg.AdvertiseAgentEndpoint)
+				if err != nil {
+					return fmt.Errorf("invalid --advertise-agent-endpoint: %w", err)
+				}
+				if advertise.IsLoopback() {
+					// A unix socket is loopback by definition, and so is a
+					// pod-local address: neither is something to advertise.
+					return fmt.Errorf("invalid --advertise-agent-endpoint %q: the host must be one other nodes can reach", cfg.AdvertiseAgentEndpoint)
+				}
+				cfg.AdvertiseAgentEndpoint = advertise.String()
 			}
 
 			cfg.ListenEndpoints = nil

@@ -34,7 +34,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	testing2 "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
@@ -43,7 +43,7 @@ import (
 type dryRunFixture struct {
 	filter   *gpuFilter
 	client   *fake.Clientset
-	recorder *record.FakeRecorder
+	recorder *events.FakeRecorder
 	nodes    []corev1.Node
 }
 
@@ -51,7 +51,7 @@ func newDryRunFixture(t *testing.T) *dryRunFixture {
 	t.Helper()
 	k8sClient := fake.NewClientset()
 	factory := informers.NewSharedInformerFactory(k8sClient, 0)
-	recorder := record.NewFakeRecorder(64)
+	recorder := events.NewFakeRecorder(64)
 	filterPredicate, err := New(k8sClient, factory, recorder, false, true)
 	if err != nil {
 		t.Fatalf("failed to create new filterPredicate due to %v", err)

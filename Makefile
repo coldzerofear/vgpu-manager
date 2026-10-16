@@ -19,7 +19,7 @@
 CONTAINER_TOOL ?= docker
 GOOS ?= linux
 GOPROXY ?= https://goproxy.cn,direct
-APT_MIRROR ?= https://mirrors.aliyun.com
+DNF_MIRROR ?= https://mirrors.ustc.edu.cn/rocky
 
 include $(CURDIR)/versions.mk
 
@@ -83,6 +83,34 @@ generate: ## API code generation.
 	protoc --go_out=. --go-grpc_out=. pkg/api/registry/api.proto
 	protoc --go_out=. --go-grpc_out=. pkg/api/remoteagent/api.proto
 
+# Tool versions used by the verify targets. Kept equal to the versions
+# .github/workflows/ci.yaml pins, so `make verify` fails where CI fails.
+GOLANGCI_LINT_VERSION ?= v2.6.2
+ACTIONLINT_VERSION    ?= v1.7.12
+
+.PHONY: lint
+lint: ## Run golangci-lint (installs it into GOBIN if missing).
+	@command -v golangci-lint >/dev/null 2>&1 || \
+	    go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	hack/verify-lint-config.sh
+	golangci-lint run --timeout 15m ./...
+
+.PHONY: lint-actions
+lint-actions: ## Lint the GitHub Actions workflows.
+	@command -v actionlint >/dev/null 2>&1 || \
+	    go install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+	actionlint
+
+.PHONY: verify
+verify: ## Run every non-GPU check CI runs (Go and C).
+	hack/verify-license.sh
+	$(MAKE) lint
+	$(MAKE) lint-actions
+	$(MAKE) test
+	$(MAKE) -C library check
+	$(MAKE) -C library test-nogpu WITH_CUDA_TOOLS=OFF
+	$(MAKE) -C library test-sanitize WITH_CUDA_TOOLS=OFF
+
 ##@ Build
 
 .PHONY: build
@@ -107,19 +135,35 @@ docker-build-base: ## Build base docker image.
       --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
       --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
       --build-arg BUILD_NVVERSION="${NVVERSION}" --build-arg GOLANG_VERSION="${GOLANG_VERSION}" \
-      --build-arg APT_MIRROR="${APT_MIRROR}" --build-arg GOPROXY="${GOPROXY}" -t "${BASE_IMG}" -f Dockerfile.base .
+      --build-arg DNF_MIRROR="${DNF_MIRROR}" --build-arg GOPROXY="${GOPROXY}" \
+      --build-arg TARGETOS="${TARGETOS}" --build-arg TARGETARCH="${TARGETARCH}" -t "${BASE_IMG}" -f Dockerfile.base .
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
+# The toolkit image is derived from go.mod by a script that reports failure on
+# stdout, because versions.mk evaluates it for every target and most targets
+# do not need it. The two image builds do: without this guard the unresolved
+# marker reaches docker as a stage name and the error talks about lowercase
+# repository names instead of the missing version.
+.PHONY: check-toolkit-image
+check-toolkit-image:
+	@case "$(TOOLKIT_CONTAINER_IMAGE)" in \
+	  "" | *VERSION_NOT_SET* | *PARSE_FAILED*) \
+	    echo "error: could not resolve the NVIDIA container toolkit image" >&2; \
+	    echo "  scripts/toolkit-container-image.sh returned: $(TOOLKIT_CONTAINER_IMAGE)" >&2; \
+	    exit 1 ;; \
+	esac
+	@echo "toolkit image: $(TOOLKIT_CONTAINER_IMAGE)"
+
 .PHONY: docker-build
-docker-build: ## Build docker image.
+docker-build: check-toolkit-image ## Build docker image.
 	$(CONTAINER_TOOL) build --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" \
 	  --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
 	  --build-arg TOOLKIT_CONTAINER_IMAGE="${TOOLKIT_CONTAINER_IMAGE}" -t "${IMG}" -f Dockerfile .
 
 .PHONY: docker-build-dra
-docker-build-dra: ## Build dra driver docker image.
+docker-build-dra: check-toolkit-image ## Build dra driver docker image.
 	$(CONTAINER_TOOL) build --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" \
 	  --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
 	  --build-arg TOOLKIT_CONTAINER_IMAGE="${TOOLKIT_CONTAINER_IMAGE}" -t "${DRA_IMG}" -f Dockerfile.dra .
@@ -153,7 +197,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx create --name vgpu-manager-builder
 	$(CONTAINER_TOOL) buildx use vgpu-manager-builder
 	- $(CONTAINER_TOOL) buildx build --platform=$(PLATFORMS) --build-arg NVIDIA_CUDA_IMAGE="${CUDA_BASE_IMAGE}" --build-arg GIT_BRANCH="${GIT_BRANCH}" \
-      --build-arg APT_MIRROR="${APT_MIRROR}" --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
+      --build-arg DNF_MIRROR="${DNF_MIRROR}" --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
 	  --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" --build-arg GOLANG_VERSION="${GOLANG_VERSION}" \
 	  --build-arg GOPROXY="${GOPROXY}" --tag "${BASE_IMG}" -f Dockerfile.base.cross .
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" \

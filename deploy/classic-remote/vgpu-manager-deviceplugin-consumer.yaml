@@ -41,7 +41,7 @@ rules:
   - apiGroups: [""]
     resources: ["pods/eviction"]
     verbs: ["create"]
-  - apiGroups: [""]
+  - apiGroups: ["","events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch", "update"]
 ---
@@ -120,10 +120,11 @@ spec:
               mountPropagation: Bidirectional
       containers:
         - name: device-plugin
-          image: coldzerofear/vgpu-manager:latest
+          image: ghcr.io/coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-plugin
+            - --domain=nvidia.com
             # RemoteGPUSupport 是 --remote-consumer 的前置门控（必须成对配置）。
             - --feature-gates=RemoteGPUSupport=true,AllocationFailureReschedule=true
             - --mig-strategy=none
@@ -131,7 +132,6 @@ spec:
             # 本节点同时可运行的远程 vGPU 数量（= 上报的 vgpu-number）。纯 CPU 节点没有卡数/切分数
             # 可参考，给一个足够大的虚数即可；真正的容量约束在服务器侧。
             - --remote-consumer-number=1000
-            - --node-config-path=/config/nodeConfig.json
             - --v=4
           env:
             - name: NODE_NAME
@@ -174,9 +174,6 @@ spec:
             # 客户端 shim 目录与容器级目录都在这下面
             - name: manager-root
               mountPath: /etc/vgpu-manager
-            - name: node-config
-              mountPath: /config
-              readOnly: true
       volumes:
         - name: kubelet-root
           hostPath:
@@ -195,21 +192,3 @@ spec:
           hostPath:
             path: /etc/vgpu-manager/driver
             type: DirectoryOrCreate
-        - name: node-config
-          configMap:
-            name: vgpu-manager-remote-consumer-plugin-config
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: vgpu-manager-remote-consumer-plugin-config
-  namespace: kube-system
-data:
-  # 消费节点没有本地设备，这里只用来固定 cgroupDriver 之类的节点级参数。
-  nodeConfig.json: |
-    [
-      {
-        "nodeName": "consumer-node-a",
-        "cgroupDriver": "systemd"
-      }
-    ]

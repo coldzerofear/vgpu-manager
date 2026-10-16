@@ -30,6 +30,7 @@ type Flags struct {
 	KubeClientConfig              pkgflags.KubeClientConfig
 	HttpEndpoint                  string
 	MetricsPath                   string
+	Domain                        string
 	NodeName                      string
 	CdiRoot                       string
 	ContainerDriverRoot           string
@@ -47,6 +48,7 @@ type Flags struct {
 	CGroupDriver                  string
 	DeviceCoresRatio              uint
 	DeviceMemoryRatio             uint
+	DeviceMemoryOverride          uint
 	// NRIRoot is the directory (mounted from the host) that holds the runtime
 	// NRI socket. The in-process NRI plugin dials <NRIRoot>/nri.sock. Only used
 	// when the NRISupport feature gate is enabled.

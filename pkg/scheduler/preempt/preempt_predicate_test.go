@@ -37,8 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 	kubelettypes "k8s.io/kubernetes/pkg/kubelet/types"
 )
@@ -259,16 +258,13 @@ func newPreemptPluginWithSync(t *testing.T, pods []*corev1.Pod, nodes []*corev1.
 		},
 	}
 	factory := informers.NewSharedInformerFactory(k8sClient, 0)
-	broadcaster := record.NewBroadcaster()
-	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
-
 	// We need the filter plugin's PodLister so the indexer
 	// IndexerKeyPodRequestVGPU is registered on the shared informer.
-	filterPlugin, err := filter.New(k8sClient, factory, recorder, false, true)
+	filterPlugin, err := filter.New(k8sClient, factory, events.NewFakeRecorder(10), false, true)
 	if err != nil {
 		t.Fatalf("filter.New: %v", err)
 	}
-	plugin, err := New(k8sClient, factory, recorder, filterPlugin.GetPodLister(), true)
+	plugin, err := New(k8sClient, factory, events.NewFakeRecorder(10), filterPlugin.GetPodLister(), true)
 	if err != nil {
 		t.Fatalf("preempt.New: %v", err)
 	}
@@ -277,11 +273,7 @@ func newPreemptPluginWithSync(t *testing.T, pods []*corev1.Pod, nodes []*corev1.
 	factory.Start(ctx.Done())
 	factory.WaitForCacheSync(ctx.Done())
 
-	cleanup := func() {
-		cancel()
-		broadcaster.Shutdown()
-	}
-	return plugin, cleanup
+	return plugin, cancel
 }
 
 // metaUIDs extracts UIDs from a MetaVictims for assertion-friendly comparison.

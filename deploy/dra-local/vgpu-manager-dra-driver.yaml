@@ -147,7 +147,7 @@ spec:
       hostPID: true
       initContainers:
         - name: init-container
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
@@ -168,7 +168,7 @@ spec:
               mountPath: /driver-root-parent
               readOnly: true
         - name: init-install
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c, /usr/bin/install_files.sh]
           env:
@@ -186,7 +186,7 @@ spec:
               mountPropagation: Bidirectional
       containers:
         - name: kubelet-plugin
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c]
           args:
@@ -201,10 +201,16 @@ spec:
                 mount --bind root/gpu-params /proc/driver/nvidia/params
               fi
               exec kubelet-plugin "$@"
+            - --domain=nvidia.com
             - --kube-api-qps=20
             - --kube-api-burst=30
             - --device-cores-ratio=100
             - --device-memory-ratio=100
+            # Unified-memory GPUs (GB10 / DGX Spark) cannot report their memory size;
+            # supply it in MiB here, and on the device-monitor container below.
+            # Oversold memory is refused together with it.
+            # See docs/how_to_use_unified_memory_gpu.md
+#            - --device-memory-override=65536
             - -v=6
           env:
             - name: NODE_NAME
@@ -309,7 +315,7 @@ spec:
               mountPropagation: HostToContainer
               readOnly: true
         - name: device-monitor
-          image: coldzerofear/vgpu-manager-dra:latest
+          image: ghcr.io/coldzerofear/vgpu-manager-dra-driver:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor
@@ -319,6 +325,8 @@ spec:
             - --enable-dra-monitor
             - --server-bind-port=3456
             - --container-driver-root=/driver-root
+            # Must match the kubelet plugin. See docs/how_to_use_unified_memory_gpu.md
+#            - --device-memory-override=65536
             - --min-scrape-interval=1s
             - --feature-gates=SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
             - --v=4

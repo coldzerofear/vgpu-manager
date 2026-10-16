@@ -22,6 +22,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -99,6 +100,55 @@ func TestValidateCLIFlagsConsumableShares(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+		})
+	}
+}
+
+// The memory override is only used for a GPU that shares its memory with the
+// host, so there is nothing to oversell: the flags are refused outright rather
+// than handing out memory the host also needs.
+func TestValidateCLIFlagsMemoryOverrideRefusesOversold(t *testing.T) {
+	tests := map[string]struct {
+		override  uint
+		ratio     uint
+		expectErr bool
+	}{
+		"override without oversold":    {override: 65536, ratio: 100},
+		"oversold without an override": {override: 0, ratio: 200},
+		"override with oversold":       {override: 65536, ratio: 200, expectErr: true},
+		"override with undersold":      {override: 65536, ratio: 50},
+		"neither set":                  {override: 0, ratio: 100},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+				string(featuregates.VGPUSupport):      true,
+				string(featuregates.ConsumableShares): false,
+			}))
+			t.Cleanup(func() {
+				require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+					string(featuregates.VGPUSupport): false,
+				}))
+			})
+
+			flags := &kubeletplugin.Flags{
+				Domain:               util.NvidiaDomain,
+				ConsumableShares:     "disabled",
+				HostManagerDir:       "/etc/vgpu-manager",
+				ContainerManagerDir:  "/etc/vgpu-manager",
+				DeviceCoresRatio:     100,
+				DeviceMemoryRatio:    tc.ratio,
+				DeviceMemoryOverride: tc.override,
+			}
+
+			err := validateCLIFlags(flags)
+			if tc.expectErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "--device-memory-ratio must be 100")
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }

@@ -1,0 +1,95 @@
+# Vulnerability scan of the published images.
+#
+# Scheduled rather than per-build: the images change when we build them, but the
+# vulnerability database changes daily, and a CVE disclosed after a release is
+# exactly what a build-time scan cannot catch.
+#
+# Results go to the Security tab as code scanning alerts. The scan does not fail
+# the run on findings - a base-image CVE with no fix available would otherwise
+# leave a permanently red schedule that everyone learns to ignore.
+name: Image scan
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to scan'
+        required: false
+        default: latest
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: Trivy ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Uploading SARIF to the Security tab.
+      security-events: write
+      actions: read
+      # Pulling the images being scanned. They are published by this
+      # repository, so the built-in token can read them whether or not the
+      # packages have been made public.
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - vgpu-manager
+          - vgpu-manager-dra-driver
+    steps:
+      - name: Log in to ghcr.io
+        # Trivy pulls through the docker credential store; without this the
+        # pull is anonymous and fails on a package that is not public.
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Scan ${{ matrix.image }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ inputs.tag || 'latest' }}
+          format: sarif
+          output: trivy-${{ matrix.image }}.sarif
+          severity: 'CRITICAL,HIGH'
+          # Only what can be acted on becomes an alert. Reporting unfixed
+          # findings here put several hundred permanently-open alerts in the
+          # security tab - CVEs in the CUDA image's own packages with no fixed
+          # version, duplicated because both images share that base - and a tab
+          # nobody can ever empty is a tab nobody reads. They are not hidden:
+          # the summary step below still renders every finding, fixed or not,
+          # into the run summary.
+          ignore-unfixed: true
+      - name: Upload the results
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          sarif_file: trivy-${{ matrix.image }}.sarif
+          category: trivy-${{ matrix.image }}
+      - name: Summary
+        # A table in the run summary, so the schedule is readable without
+        # opening the Security tab.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ inputs.tag || 'latest' }}
+          format: table
+          severity: 'CRITICAL,HIGH'
+          # Deliberately not ignore-unfixed: this table is the full picture,
+          # including what only NVIDIA can fix. The SARIF step above is the
+          # one that has to stay actionable.
+          ignore-unfixed: false
+          output: trivy-${{ matrix.image }}.txt
+      - name: Write the summary
+        run: |
+          {
+            echo "### ${{ matrix.image }}:${{ inputs.tag || 'latest' }}"
+            echo
+            echo '```'
+            cat "trivy-${{ matrix.image }}.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -78,14 +78,32 @@ extern "C" {
 
 typedef struct nvmlDevice_st *nvmlDevice_t;
 
-typedef struct nvmlProcessInfo_st {
-  unsigned int pid;                 //!< Process ID
-  unsigned long long usedGpuMemory; //!< Amount of used GPU memory in bytes.
-  //! Under WDDM, \ref NVML_VALUE_NOT_AVAILABLE is always reported
-  //! because Windows KMD manages all the memory and not the NVIDIA driver
-  // unsigned int  computeInstanceId; //!<If MIG is enabled, stores a valid compute instance ID. computeInstanceId is set to.
-  // unsigned int  gpuInstanceId; //!<If MIG is enabled, stores a valid GPU instance ID. gpuInstanceId is set to.
-} nvmlProcessInfo_t;
+/**
+ * Information about running compute processes on the GPU, legacy version
+ * for older versions of the API.
+ */
+typedef struct nvmlProcessInfo_v1_st
+{
+    unsigned int        pid;                //!< Process ID
+    unsigned long long  usedGpuMemory;      //!< Amount of used GPU memory in bytes.
+                                            //! Under WDDM, \ref NVML_VALUE_NOT_AVAILABLE is always reported
+                                            //! because Windows KMD manages all the memory and not the NVIDIA driver
+} nvmlProcessInfo_v1_t;
+
+/**
+ * Information about running compute processes on the GPU
+ */
+typedef struct nvmlProcessInfo_v2_st
+{
+    unsigned int        pid;                //!< Process ID
+    unsigned long long  usedGpuMemory;      //!< Amount of used GPU memory in bytes.
+                                            //! Under WDDM, \ref NVML_VALUE_NOT_AVAILABLE is always reported
+                                            //! because Windows KMD manages all the memory and not the NVIDIA driver
+    unsigned int        gpuInstanceId;      //!< If MIG is enabled, stores a valid GPU instance ID. gpuInstanceId is set to
+                                            //  0xFFFFFFFF otherwise.
+    unsigned int        computeInstanceId;  //!< If MIG is enabled, stores a valid compute instance ID. computeInstanceId is set to
+                                            //  0xFFFFFFFF otherwise.
+} nvmlProcessInfo_v2_t, nvmlProcessInfo_t;
 
 typedef unsigned int nvmlPowerSource_t;
 

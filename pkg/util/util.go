@@ -444,7 +444,8 @@ func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 			continue
 		} else {
 			predicateTime, err := strconv.ParseInt(val, 10, 64)
-			if err != nil || predicateTime <= 0 || predicateTime >= math.MaxInt64 {
+			// ParseInt with bitSize 64 already rejects anything that does not fit.
+			if err != nil || predicateTime <= 0 {
 				continue
 			}
 		}
@@ -548,15 +549,14 @@ func CodecNormalize(x uint32) uint32 {
 	return x * 85 / 100
 }
 
+// GetPercentageValue clamps a utilisation reading to a percentage. The input
+// is unsigned, so only the upper bound needs checking; NVML's "not
+// available" sentinel is mapped to 0 by GetValidValue before it gets here.
 func GetPercentageValue(x uint32) uint32 {
-	switch {
-	case x > 100:
+	if x > 100 {
 		return 100
-	case x < 0:
-		return 0
-	default:
-		return x
 	}
+	return x
 }
 
 func ValueEnabled(val string) bool {
@@ -932,4 +932,20 @@ func AddContainerRequiredNRIPluginAnnotations(obj metav1.Object, container strin
 		InsertAnnotation(obj, annoKey, string(bytes))
 	}
 	return nil
+}
+
+// GetEnvIntDefault reads an integer env var, falling back to defaultValue when
+// it is unset or not a number. Flag defaults are built from these, so a typo
+// must not take the process down before flag parsing can report anything.
+func GetEnvIntDefault(env string, defaultValue int) int {
+	value := strings.TrimSpace(os.Getenv(env))
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		klog.Warningf("Invalid integer in env %s=%q, using default %d", env, value, defaultValue)
+		return defaultValue
+	}
+	return parsed
 }

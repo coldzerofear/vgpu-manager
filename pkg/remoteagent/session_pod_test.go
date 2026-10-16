@@ -169,7 +169,7 @@ func TestMaterializePodSession(t *testing.T) {
 	require.NoError(t, err)
 	token := remotegpu.SessionToken("pod-uid", "app")
 
-	require.NoError(t, store.Materialize(token, spec, nd))
+	require.NoError(t, store.Materialize(token, spec, nd, vgpuconfig.GetDefaultComputePolicy(pod, nil)))
 
 	root := filepath.Join(base, token)
 	for _, name := range []string{
@@ -197,10 +197,10 @@ func TestMaterializePodSession(t *testing.T) {
 	assert.Equal(t, []string{token}, store.TokensOfOwner("pod-uid"))
 
 	// Idempotent: the library may already have state in the session.
-	require.NoError(t, store.Materialize(token, spec, nd))
+	require.NoError(t, store.Materialize(token, spec, nd, vgpuconfig.GetDefaultComputePolicy(pod, nil)))
 
 	// Another pod must not take over a live session.
 	other := spec
 	other.Owner.UID = "other-uid"
-	assert.Error(t, store.Materialize(token, other, nd))
+	assert.Error(t, store.Materialize(token, other, nd, vgpuconfig.GetDefaultComputePolicy(pod, nil)))
 }

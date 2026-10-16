@@ -52,6 +52,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/component-base/logs"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -93,6 +94,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		node.WithNodeNameOption(opt.NodeName),
 		node.WithConfigPathOption(opt.NodeConfigPath),
 		node.WithCGroupDriverOption(string(cgroupDriver)),
+		node.WithDeviceMemoryOverrideOption(opt.DeviceMemoryOverride),
 		node.WithDriverRootOption(driverRoot))
 	if err != nil {
 		klog.Errorf("Initialization of node config failed: %v", err)
@@ -122,10 +124,15 @@ func runApp(opt *options.Options) (exitCode int) {
 				"tlsKeyFile: %q, tlsCertFile: %q", opt.TlsKeyFile, opt.TlsCertFile)
 			return exitCode
 		}
+		if opt.CertRefreshInterval < time.Second {
+			klog.Warningf("Certificate refresh interval is less than 1 second, " +
+				"the automatic certificate rotation function will be turned off")
+			opt.CertRefreshInterval = 0
+		}
 
 		tlsConfig, err := tlsserverconfig.GetServerTLSConfig(slog.Default(), &tlsconfig.TLSServerConfig{
 			Enable:  opt.EnableTls,
-			Refresh: time.Duration(opt.CertRefreshInterval) * time.Second,
+			Refresh: opt.CertRefreshInterval,
 			File: tlsconfig.TLSServerFiles{
 				Key:  opt.TlsKeyFile,
 				Cert: opt.TlsCertFile,

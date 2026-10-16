@@ -101,7 +101,8 @@ func (s *SessionStore) MaterializeClaim(token string, claim *resourceapi.Resourc
 	if err != nil {
 		return err
 	}
-	return s.Materialize(token, spec, nd)
+	policy := vgpuconfig.GetDefaultComputePolicy(claim, s.nodeObject())
+	return s.Materialize(token, spec, nd, policy)
 }
 
 func (s *SessionStore) claimSessionSpec(token string, claim *resourceapi.ResourceClaim, nd *NodeDevices, requests []string) (SessionSpec, error) {

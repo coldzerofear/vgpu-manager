@@ -24,8 +24,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	kcache "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,8 +43,7 @@ type ResourceAPIReader interface {
 }
 
 type resourceAPIReader struct {
-	liveClient client.Client
-
+	kubeClient            kubernetes.Interface
 	claimMutationCache    kcache.MutationCache
 	templateMutationCache kcache.MutationCache
 	classMutationCache    kcache.MutationCache
@@ -50,11 +51,11 @@ type resourceAPIReader struct {
 }
 
 func NewResourceAPIReader(
-	liveClient client.Client, claimIndexer, templateIndexer,
+	kubeClient kubernetes.Interface, claimIndexer, templateIndexer,
 	classIndexer, podIndexer kcache.Indexer, ttl time.Duration,
 ) ResourceAPIReader {
 	return &resourceAPIReader{
-		liveClient: liveClient,
+		kubeClient: kubeClient,
 		claimMutationCache: kcache.NewIntegerResourceVersionMutationCache(
 			klog.Background(), claimIndexer, claimIndexer, ttl, true,
 		),
@@ -174,12 +175,12 @@ func (r *resourceAPIReader) getResourceClaim(ctx context.Context, key types.Name
 		return claim.DeepCopy(), nil
 	}
 
-	if r.liveClient == nil {
+	if r.kubeClient == nil {
 		return nil, apierrors.NewNotFound(schema.GroupResource{Group: resourceapi.GroupName, Resource: "resourceclaims"}, key.String())
 	}
 
-	claim := &resourceapi.ResourceClaim{}
-	if err := r.liveClient.Get(ctx, key, claim); err != nil {
+	claim, err := r.kubeClient.ResourceV1().ResourceClaims(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
+	if err != nil {
 		return nil, err
 	}
 
@@ -204,12 +205,12 @@ func (r *resourceAPIReader) getResourceClaimTemplate(ctx context.Context, key ty
 		return tpl.DeepCopy(), nil
 	}
 
-	if r.liveClient == nil {
+	if r.kubeClient == nil {
 		return nil, apierrors.NewNotFound(schema.GroupResource{Group: resourceapi.GroupName, Resource: "resourceclaimtemplates"}, key.String())
 	}
 
-	tpl := &resourceapi.ResourceClaimTemplate{}
-	if err := r.liveClient.Get(ctx, key, tpl, client.UnsafeDisableDeepCopy); err != nil {
+	tpl, err := r.kubeClient.ResourceV1().ResourceClaimTemplates(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
+	if err != nil {
 		return nil, err
 	}
 
@@ -234,12 +235,12 @@ func (r *resourceAPIReader) getDeviceClass(ctx context.Context, key types.Namesp
 		return class.DeepCopy(), nil
 	}
 
-	if r.liveClient == nil {
+	if r.kubeClient == nil {
 		return nil, apierrors.NewNotFound(schema.GroupResource{Group: resourceapi.GroupName, Resource: "deviceclasses"}, key.String())
 	}
 
-	class := &resourceapi.DeviceClass{}
-	if err := r.liveClient.Get(ctx, key, class, client.UnsafeDisableDeepCopy); err != nil {
+	class, err := r.kubeClient.ResourceV1().DeviceClasses().Get(ctx, key.Name, metav1.GetOptions{})
+	if err != nil {
 		return nil, err
 	}
 
@@ -264,12 +265,12 @@ func (r *resourceAPIReader) getPod(ctx context.Context, key types.NamespacedName
 		return pod.DeepCopy(), nil
 	}
 
-	if r.liveClient == nil {
+	if r.kubeClient == nil {
 		return nil, apierrors.NewNotFound(schema.GroupResource{Group: corev1.GroupName, Resource: "pods"}, key.String())
 	}
 
-	pod := &corev1.Pod{}
-	if err := r.liveClient.Get(ctx, key, pod, client.UnsafeDisableDeepCopy); err != nil {
+	pod, err := r.kubeClient.CoreV1().Pods(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
+	if err != nil {
 		return nil, err
 	}
 

@@ -126,6 +126,22 @@ endif()
 # ---------------------------------------------------------------------------
 option(VGPU_RUN_HOOK_CHECKS "Run hack/check_*.* during build" ON)
 
+# ---------------------------------------------------------------------------
+# Sanitizers (CI: the GPU-less tests run twice, once plain and once here).
+#
+# This library's correctness lives in mmap'd shared regions, file locks,
+# atomics and fork handling, where a wrong offset or a missed bound is a
+# silent memory error rather than a failed assertion. ASan+UBSan turn those
+# into a failing test. Deliberately global rather than per-target: the test
+# executables link the same sources the .so is built from, and sanitizing
+# only one side is how ODR/ABI mismatches appear.
+# ---------------------------------------------------------------------------
+option(VGPU_SANITIZE "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+if(VGPU_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 if(VGPU_RUN_HOOK_CHECKS)
     find_package(Python3 COMPONENTS Interpreter)
 
@@ -241,6 +257,13 @@ endif()
 # anyone configures with -DBUILD_TESTS=ON. The subdirectory keeps the two test
 # families apart -- test/ needs a GPU and links CUDA, test/nogpu/ needs neither.
 #
+# Found here rather than next to the first target that links it, because every
+# GPU-less test below needs it and find_package has to precede them all.
+# THREADS_PREFER_PTHREAD_FLAG asks for -pthread over -lpthread, which sets the
+# compile flag too.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 # Sources that touch neither CUDA nor NVML, shared by the GPU-less test and
 # the session-config tool so neither has to restate the library's own file
 # handling (region layout, locking, path derivation).
@@ -264,10 +287,31 @@ if(BUILD_SM_NODE_TESTS)
     target_include_directories(test_session_paths PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+    # Bounds checks for the cgroup line parser. It lives in util.c precisely so
+    # it can be reached without the driver: the overflow it pins down survived
+    # because the parser was buried in cuda_hook.c where nothing could test it.
+    add_executable(test_cgroup_parse test/nogpu/test_cgroup_parse.c ${VGPU_NODRIVER_SRCS})
+    target_include_directories(test_cgroup_parse PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    # Pins the mode the library leaves its shared state in, including the
+    # umask immunity that is the reason it is an fchmod and not an open() mode.
+    add_executable(test_shared_file_mode test/nogpu/test_shared_file_mode.c ${VGPU_NODRIVER_SRCS})
+    target_include_directories(test_shared_file_mode PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
     # Drives the provider ABI against a concurrent reader, so it needs the
     # provider too -- the rewrite it checks is the provider.s.
     add_executable(test_session_pids_concurrency
-        test/nogpu/test_session_pids_concurrency.c src/checkpoint_provider.c ${VGPU_NODRIVER_SRCS})
+        test/nogpu/test_session_pids_concurrency.c
+        src/cuda_originals.c
+        src/nvml_originals.c
+        src/cuda_hook.c
+        src/nvml_hook.c
+        src/loader.c
+        src/register.c
+        src/checkpoint_provider.c
+        ${VGPU_NODRIVER_SRCS})
     target_include_directories(test_session_pids_concurrency PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -308,40 +352,84 @@ if(BUILD_SM_NODE_TESTS)
     # dependency has to be spelled out -- otherwise the test builds, finds no
     # shim to preload, and reports failures that say nothing about the code.
     add_dependencies(test_dlsym_entry dlsym_entry_shim)
+
+    if(VGPU_SANITIZE)
+        # ASan requires its runtime to be first in the initial library list,
+        # and this test exists to put a shim there through LD_PRELOAD -- both
+        # cannot hold at once. What it checks is dlsym/RTLD_NEXT symbol
+        # resolution, not memory safety, so these three targets opt out and
+        # the test keeps running in the sanitizer job instead of being
+        # silently dropped from it.
+        foreach(tgt dlsym_entry_shim dlsym_caller test_dlsym_entry)
+            target_compile_options(${tgt} PRIVATE -fno-sanitize=all)
+            target_link_options(${tgt} PRIVATE -fno-sanitize=all)
+        endforeach()
+    endif()
 endif()
+
+# The GPU-less tests compile library sources that call pthread_once and, in
+# loader.c / cuda_hook.c / checkpoint_provider.c, dlopen and dlvsym. glibc only
+# folded both sets of symbols into libc in 2.34; before that they live in
+# libpthread and libdl. Only the .so (-pthread via STATIC_C_LIBRARIES) and the
+# session-config tool linked threads, and nothing here linked dl - so these
+# built on CI's Ubuntu 24.04 and failed to link in the Rocky 8 container the
+# nightly job uses, which is the container the shipped library is built in.
+# Each target is guarded because most sit behind an option().
+foreach(vgpu_nogpu_test
+        test_sm_node_shared
+        test_vmem_region_concurrency
+        test_session_paths
+        test_session_pids_concurrency
+        test_cgroup_parse
+        test_shared_file_mode
+        test_delta_step
+        test_delta_campaign
+        test_dlsym_entry)
+    if(TARGET ${vgpu_nogpu_test})
+        target_link_libraries(${vgpu_nogpu_test} PRIVATE
+                              Threads::Threads ${CMAKE_DL_LIBS})
+    endif()
+endforeach()
 
 # Writes a session quota region the way the GPU-node agent would, so the
 # session paths can be exercised without Kubernetes. Needs no CUDA toolkit,
 # hence its placement outside the CUDA tool block below.
-find_package(Threads REQUIRED)
 add_executable(vgpu-session-config tools/session_config.c ${VGPU_NODRIVER_SRCS})
 target_include_directories(vgpu-session-config PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(vgpu-session-config PRIVATE Threads::Threads)
 
 # find_package(CUDAToolkit REQUIRED)
-add_executable(mem_occupy_tool tools/mem_occupy_tool.c)
-target_include_directories(mem_occupy_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
-target_link_libraries(mem_occupy_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
-target_compile_options(mem_occupy_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
+# The tools below link libcuda / libnvidia-ml and include <cuda.h>, so they
+# need a CUDA toolkit on the build host. Turn them off to build and run the
+# GPU-less checks anywhere (CI does: the hook checks, the nogpu tests and the
+# sanitizer runs need no toolkit, and pulling a CUDA image for them would cost
+# several gigabytes per job).
+option(VGPU_WITH_CUDA_TOOLS "Build the CUDA-linked helper tools under tools/" ON)
+if(VGPU_WITH_CUDA_TOOLS)
+    add_executable(mem_occupy_tool tools/mem_occupy_tool.c)
+    target_include_directories(mem_occupy_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
+    target_link_libraries(mem_occupy_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
+    target_compile_options(mem_occupy_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
-add_executable(mem_managed_tool tools/mem_managed_tool.c)
-target_include_directories(mem_managed_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
-target_link_libraries(mem_managed_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
-target_compile_options(mem_managed_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
+    add_executable(mem_managed_tool tools/mem_managed_tool.c)
+    target_include_directories(mem_managed_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
+    target_link_libraries(mem_managed_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
+    target_compile_options(mem_managed_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
-add_executable(mem_view_tool tools/mem_view_tool.c)
-target_include_directories(mem_view_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
-target_link_libraries(mem_view_tool PRIVATE cuda nvidia-ml ${STATIC_C_LIBRARIES})
-target_compile_options(mem_view_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
+    add_executable(mem_view_tool tools/mem_view_tool.c)
+    target_include_directories(mem_view_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
+    target_link_libraries(mem_view_tool PRIVATE cuda nvidia-ml ${STATIC_C_LIBRARIES})
+    target_compile_options(mem_view_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
-add_executable(virt_mem_tool tools/virt_mem_tool.c)
-target_include_directories(virt_mem_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
-target_link_libraries(virt_mem_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
-target_compile_options(virt_mem_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
+    add_executable(virt_mem_tool tools/virt_mem_tool.c)
+    target_include_directories(virt_mem_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
+    target_link_libraries(virt_mem_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
+    target_compile_options(virt_mem_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
-add_executable(mem_pool_tool tools/mem_pool_tool.c)
-target_include_directories(mem_pool_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
-target_link_libraries(mem_pool_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
-target_compile_options(mem_pool_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
+    add_executable(mem_pool_tool tools/mem_pool_tool.c)
+    target_include_directories(mem_pool_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
+    target_link_libraries(mem_pool_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
+    target_compile_options(mem_pool_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
+endif()

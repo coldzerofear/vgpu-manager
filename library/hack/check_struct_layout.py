@@ -67,6 +67,30 @@ ABI_CONFLICT_OFFSET_CHECKS = [
     ("CUctxCreateParams", ["execAffinityParams", "numExecAffinityParams", "cigParams"]),
     ("CUmemLocation",     ["type", "id"]),
     ("CUgraphEdgeData",   ["from_port", "reserved", "to_port", "type"]),
+
+    # Graph node params. NVIDIA extends these by APPENDING, and the library
+    # depends on that: the unversioned ELF symbol takes the short form and the
+    # _v2 symbol the long one, so the shared prefix has to stay put or a
+    # wrapper hands the driver a frame it will mis-read. A size-only check
+    # passes a struct whose fields were reordered, which is why these are
+    # audited field by field.
+    #
+    # Only fields that predate the newest CUDA are listed: the real-side probe
+    # is compiled against whatever <cuda.h> the host has, so naming a field
+    # added in a later release (syncMode, the ctx/gCtx unions) would fail to
+    # compile on an older toolkit rather than report anything useful. Those
+    # additions are exactly what the prefix check is here to let through.
+    ("CUDA_KERNEL_NODE_PARAMS_v1", ["func", "gridDimX", "gridDimY", "gridDimZ",
+                                    "blockDimX", "blockDimY", "blockDimZ",
+                                    "sharedMemBytes", "kernelParams", "extra"]),
+    ("CUDA_KERNEL_NODE_PARAMS",    ["func", "gridDimX", "gridDimY", "gridDimZ",
+                                    "blockDimX", "blockDimY", "blockDimZ",
+                                    "sharedMemBytes", "kernelParams", "extra",
+                                    "kern", "ctx"]),
+    ("CUDA_HOST_NODE_PARAMS_v2",   ["fn", "userData"]),
+    ("CUDA_EVENT_RECORD_NODE_PARAMS", ["event"]),
+    ("CUDA_EXT_SEM_SIGNAL_NODE_PARAMS_v2", ["extSemArray", "paramsArray", "numExtSems"]),
+    ("CUDA_EXT_SEM_WAIT_NODE_PARAMS_v2",   ["extSemArray", "paramsArray", "numExtSems"]),
 ]
 
 
@@ -176,6 +200,43 @@ def filter_real_structs(workdir: Path, cuda_include: Path,
     return survivors
 
 
+def filter_real_fields(workdir: Path, cuda_include: Path,
+                       items: list[tuple[str, list[str]]],
+                       ) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    """Per-field test-compile against <cuda.h>.
+
+    Without this, naming one field the host's CUDA does not have fails the
+    whole real-side probe to compile, and the audit reports nothing at all on
+    an older toolkit. The audit's job is the opposite: confirm the fields BOTH
+    sides know still sit at the same offsets, which is what lets NVIDIA append
+    to these structs without breaking the wrappers. A field only one side has
+    is reported and skipped.
+    """
+    kept: list[tuple[str, list[str]]] = []
+    dropped: list[str] = []
+    for name, fields in items:
+        present: list[str] = []
+        for f in fields:
+            src = (
+                "#include <cuda.h>\n"
+                "#include <stddef.h>\n"
+                f"static char _probe[offsetof({name}, {f}) + 1];\n"
+                "int main(void) { return (int)sizeof(_probe); }\n"
+            )
+            exe, _ = build_exe(workdir, f"probe_{name}_{f}.c", src, [cuda_include])
+            if exe is None:
+                dropped.append(f"{name}.{f}")
+                continue
+            present.append(f)
+            try:
+                exe.unlink()
+            except OSError:
+                pass
+        if present:
+            kept.append((name, present))
+    return kept, dropped
+
+
 def build_size_probe(header_include: str, structs: list[StructDecl]) -> str:
     lines = [
         f"#include {header_include}",
@@ -216,8 +277,16 @@ def diff_lines(a: list[str], b: list[str]) -> list[tuple[str, str, str]]:
     def to_dict(lines):
         d: dict[str, str] = {}
         for l in lines:
-            # "struct NAME size=N" -> key "struct NAME", val "size=N"
-            m = re.match(r"(struct \S+|offset \S+)\s*(.*)$", l.strip())
+            # "struct NAME size=N"       -> key "struct NAME",       val "size=N"
+            # "offset NAME.FIELD=N"       -> key "offset NAME.FIELD", val "=N"
+            #
+            # [^=\s]+ rather than \S+: the offset probe puts no space before
+            # the '=', so a greedy \S+ swallowed the value into the key. Both
+            # sides then had different keys whenever an offset differed, the
+            # intersection dropped them, and the audit could only ever report
+            # that everything matched. It passed a CUgraphEdgeData whose
+            # to_port sat at 6 where the real header has 1.
+            m = re.match(r"(struct [^=\s]+|offset [^=\s]+)\s*(.*)$", l.strip())
             if m:
                 d[m.group(1)] = m.group(2)
         return d
@@ -296,8 +365,24 @@ def main() -> int:
                 print(f"[INFO] sizeof check: all {len(shared)} struct sizes match")
 
         # Phase 3: ABI-conflict offsetof audits.
+        shared_names = {s.public for s in shared}
         offset_items = [(n, fs) for n, fs in ABI_CONFLICT_OFFSET_CHECKS
-                        if any(s.public == n for s in shared)]
+                        if n in shared_names]
+        # A name in the list that is not a public struct on both sides audits
+        # nothing. Silence there is how a typo, or a type that is only an alias
+        # (CUDA_KERNEL_NODE_PARAMS_v2 is reached as CUDA_KERNEL_NODE_PARAMS),
+        # turns the audit off without anyone noticing.
+        unaudited = [n for n, _ in ABI_CONFLICT_OFFSET_CHECKS if n not in shared_names]
+        if unaudited:
+            print(f"[INFO] offsetof check: {len(unaudited)} listed struct(s) not "
+                  f"comparable on both sides, not audited: {', '.join(unaudited)}")
+        if offset_items:
+            offset_items, dropped_fields = filter_real_fields(
+                tmp_path, cuda_include, offset_items)
+            if dropped_fields:
+                print(f"[INFO] offsetof check: {len(dropped_fields)} field(s) "
+                      f"absent from this <cuda.h>, skipped: "
+                      f"{', '.join(dropped_fields)}")
         if offset_items:
             our_probe = build_offset_probe('"include/cuda-subset.h"', offset_items)
             real_probe = build_offset_probe("<cuda.h>", offset_items)

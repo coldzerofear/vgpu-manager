@@ -26,6 +26,7 @@ limitations under the License.
 #include <errno.h>
 #include <sched.h>
 #include <sys/file.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <signal.h>
 #include <time.h>
@@ -227,7 +228,7 @@ int get_compatibility_mode(int *mode) {
 
 int get_mem_ratio(uint32_t index, double *ratio) {
   char env[32] = {0};
-  snprintf(env, sizeof(env), "%s_%d", CUDA_MEMORY_RATIO_ENV, index);
+  snprintf(env, sizeof(env), "%s_%u", CUDA_MEMORY_RATIO_ENV, index);
   char *str = _getenv(env);
   if (!str) {
     str = _getenv(CUDA_MEMORY_RATIO_ENV);
@@ -244,7 +245,7 @@ int get_mem_ratio(uint32_t index, double *ratio) {
 
 int get_mem_limit(uint32_t index, size_t *limit) {
   char env[32] = {0};
-  snprintf(env, sizeof(env), "%s_%d", CUDA_MEMORY_LIMIT_ENV, index);
+  snprintf(env, sizeof(env), "%s_%u", CUDA_MEMORY_LIMIT_ENV, index);
   char *str = _getenv(env);
   if (!str) {
     str = _getenv(CUDA_MEMORY_LIMIT_ENV);
@@ -261,7 +262,7 @@ int get_mem_limit(uint32_t index, size_t *limit) {
 
 int get_core_limit(uint32_t index, int *limit) {
   char env[32] = {0};
-  snprintf(env, sizeof(env), "%s_%d", CUDA_CORE_LIMIT_ENV, index);
+  snprintf(env, sizeof(env), "%s_%u", CUDA_CORE_LIMIT_ENV, index);
   char *str = _getenv(env);
   if (!str) {
     str = _getenv(CUDA_CORE_LIMIT_ENV);
@@ -278,7 +279,7 @@ int get_core_limit(uint32_t index, int *limit) {
 
 int get_core_soft_limit(uint32_t index, int *limit) {
   char env[32] = {0};
-  snprintf(env, sizeof(env), "%s_%d", CUDA_CORE_SOFT_LIMIT_ENV, index);
+  snprintf(env, sizeof(env), "%s_%u", CUDA_CORE_SOFT_LIMIT_ENV, index);
   char *str = _getenv(env);
   if (!str) {
     str = _getenv(CUDA_CORE_SOFT_LIMIT_ENV);
@@ -295,7 +296,7 @@ int get_core_soft_limit(uint32_t index, int *limit) {
 
 int get_manager_device_uuid(uint32_t index, char *uuid, size_t uuid_size) {
   char env[32] = {0};
-  snprintf(env, sizeof(env), "%s_%d", MANAGER_VISIBLE_DEVICE_ENV, index);
+  snprintf(env, sizeof(env), "%s_%u", MANAGER_VISIBLE_DEVICE_ENV, index);
   char *str = _getenv(env);
   if (!str || str[0] == '\0') {
     return -1;
@@ -382,7 +383,7 @@ int get_vmem_node_enabled(int *i) {
 
 int get_mem_oversold(uint32_t index, int *i) {
   char env[32] = {0};
-  snprintf(env, sizeof(env), "%s_%d", CUDA_MEM_OVERSOLD_ENV, index);
+  snprintf(env, sizeof(env), "%s_%u", CUDA_MEM_OVERSOLD_ENV, index);
   char *str = _getenv(env);
   if (!str) {
     str = _getenv(CUDA_MEM_OVERSOLD_ENV);
@@ -664,6 +665,83 @@ static int lock_pids_config_shared(int fd) {
   return -1;
 }
 
+/* Copies line[start,end) into out, trimming leading blanks and the same
+ * trailing junk this parser has always trimmed. Returns -1 when the field
+ * would not fit, so no caller ever compares a silently truncated path. */
+static int copy_trimmed_field(const char *line, size_t start, size_t end,
+                              char *out, size_t out_size) {
+  if (out_size == 0) {
+    return -1;
+  }
+  for (; start < end && (line[start] == ' ' || line[start] == '\t'); start++) {}
+  size_t len = end - start;
+  if (len >= out_size) {
+    return -1;
+  }
+  memcpy(out, line + start, len);
+  for (; len > 0 && (out[len - 1] == '\0' || out[len - 1] == '\n' ||
+                     out[len - 1] == '\t'); len--) {}
+  out[len] = '\0';
+  return 0;
+}
+
+/* Splits "<key><d><value>" out of line. Both out-params carry their own size:
+ * these used to be written with no bound at all, and a real container cgroup
+ * path (191 bytes) overflowed the caller's 128-byte buffers by 64 bytes.
+ * Returns 0 on success, 1 when the delimiter is absent, -1 on overflow. */
+int split_str(const char *line, char *key, size_t key_size,
+              char *value, size_t value_size, char d) {
+  size_t len = strlen(line);
+  size_t index = 0;
+  for (; index < len && line[index] != d; index++) {}
+
+  if (index == len) {
+    if (key_size) key[0] = '\0';
+    if (value_size) value[0] = '\0';
+    return 1;
+  }
+
+  if (copy_trimmed_field(line, 0, index, key, key_size) != 0 ||
+      copy_trimmed_field(line, index + 1, len, value, value_size) != 0) {
+    if (key_size) key[0] = '\0';
+    if (value_size) value[0] = '\0';
+    return -1;
+  }
+  return 0;
+}
+
+/* Reads the cgroup path for cgroup_key out of a /proc/<pid>/cgroup file.
+ * cgroup_value is written in place by split_str -- its contents are only
+ * meaningful when this returns 0. */
+int read_cgroup(const char *pid_path, const char *cgroup_key,
+                char *cgroup_value, size_t value_size) {
+  int ret = -1;
+  FILE *f = fopen(pid_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
+  if (f == NULL) {
+    return ret;
+  }
+  char buff[CGROUP_LINE_MAX];
+  while (fgets(buff, sizeof(buff), f)) {
+    size_t len = strlen(buff);
+    size_t index = 0;
+    for (; index < len && buff[index] != ':'; index++) {}
+    if (index == len) {
+      continue;
+    }
+    char key[CGROUP_KEY_MAX];
+    if (split_str(&buff[index + 1], key, sizeof(key),
+                  cgroup_value, value_size, ':') != 0) {
+      continue;
+    }
+    if (strcmp(key, cgroup_key) == 0) {
+      ret = 0;
+      break;
+    }
+  }
+  fclose(f);
+  return ret;
+}
+
 int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids) {
   if (!file_path || !pids || !pids_size) {
     LOGGER(ERROR, "invalid NULL parameter");
@@ -671,15 +749,15 @@ int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_s
     return -1;
   }
 
-  if (access(file_path, F_OK) != 0) {
-    *pids_size = 0;
-    return -1;
-  }
-
+  /* No access(F_OK) pre-check: it only duplicated what fopen already reports,
+   * and the gap between the two was a time-of-check/time-of-use window. A
+   * missing file stays quiet, as it did when access() screened it out. */
   /* "e" = O_CLOEXEC, prevent fork inheritance */
   FILE *fp = fopen(file_path, "re");
   if (!fp) {
-    LOGGER(WARNING, "error opening %s: %s", file_path, strerror(errno));
+    if (errno != ENOENT) {
+      LOGGER(WARNING, "error opening %s: %s", file_path, strerror(errno));
+    }
     *pids_size = 0;
     return -1;
   }
@@ -738,7 +816,7 @@ char *GetNthMapsToken(char *line, int n) {
 int library_exists_in_process_maps(char const *libName, unsigned int pid) {
   int ret = -1;
   char fileName[512];
-  snprintf(fileName, sizeof(fileName), "/proc/%d/maps", pid);
+  snprintf(fileName, sizeof(fileName), "/proc/%u/maps", pid);
 
   FILE *fMaps = fopen(fileName, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
   if (NULL == fMaps) {
@@ -771,7 +849,7 @@ int device_pid_in_same_container(unsigned int pid) {
   for (int i = 0; ns_types[i] != NULL; i++) {
     char device_path[128];
     struct stat device_st;
-    snprintf(device_path, sizeof(device_path), "/proc/%d/ns/%s", pid, ns_types[i]);
+    snprintf(device_path, sizeof(device_path), "/proc/%u/ns/%s", pid, ns_types[i]);
     if (stat(device_path, &device_st) != 0) {
       return -1;
     }
@@ -786,6 +864,60 @@ int device_pid_in_same_container(unsigned int pid) {
     }
   }
   return 0;
+}
+
+/* Widens a shared-state file this library just created, so that another uid
+ * sharing the directory can still open it O_RDWR. Two reasons this is an
+ * fchmod and not a mode argument to open(): the mode passed to open() is
+ * masked by the process umask, so a hardened image's umask 077 would quietly
+ * produce 0600 whatever we asked for; and fchmod succeeds only for the file's
+ * owner, which makes this exactly the best-effort hardening it should be --
+ * when the file was created by a different uid there is nothing we may change
+ * and nothing we need to, and the caller is no worse off than before.
+ *
+ * Deliberately not reported as a failure: the mode is a courtesy to whoever
+ * comes next, never a precondition for the caller's own use of the fd. */
+void relax_shared_file_mode(int fd, const char *file_path) {
+  if (fchmod(fd, VGPU_SHARED_FILE_MODE) != 0) {
+    LOGGER(VERBOSE, "could not relax the mode of %s: %s -- another uid sharing "
+                    "this directory may be unable to open it read-write",
+           file_path, strerror(errno));
+  }
+}
+
+/* The directory counterpart, for the directories the library creates itself
+ * when the plugin did not provide the mount. Same best-effort contract.
+ *
+ * Opened and fchmod'ed rather than chmod'ed by path, with O_NOFOLLOW: these
+ * directories sit in world-writable parents, which is the one place a
+ * path-based chmod is the wrong tool -- a directory swapped for a symlink
+ * under us is refused outright instead of followed. */
+void relax_shared_dir_mode(const char *dir_path) {
+  int fd = open(dir_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) {
+    LOGGER(VERBOSE, "could not open %s to relax its mode: %s",
+           dir_path, strerror(errno));
+    return;
+  }
+  if (fchmod(fd, VGPU_SHARED_DIR_MODE) != 0) {
+    LOGGER(VERBOSE, "could not relax the mode of %s: %s -- another uid sharing "
+                    "it may be unable to create files in it",
+           dir_path, strerror(errno));
+  }
+  close(fd);
+}
+
+/* As relax_shared_file_mode(), but at most once per process for a given slot.
+ * The device lock paths reopen the same file on every allocation, and an
+ * unconditional fchmod there would undo the syscall economy try_lock_fd() is
+ * built around. Only whoever created the file can change its mode anyway, so
+ * every later open has nothing to do. The exchange means exactly one caller
+ * attempts it even if several threads arrive together. */
+void relax_shared_file_mode_once(int fd, const char *file_path,
+                                 unsigned char *slot) {
+  if (unlikely(!__atomic_exchange_n(slot, 1, __ATOMIC_RELAXED))) {
+    relax_shared_file_mode(fd, file_path);
+  }
 }
 
 int file_exist(const char *file_path) {
@@ -811,7 +943,9 @@ int is_zombie_proc(int pid) {
   int unused_pid;
   char comm[1024];
   char state;
-  int ret = fscanf(fp, "%d %s %c", &unused_pid, comm, &state);
+  /* Field width bounds comm to the buffer: /proc/<pid>/stat is kernel-written,
+   * but an unbounded %s is one driver change away from a stack overflow. */
+  int ret = fscanf(fp, "%d %1023s %c", &unused_pid, comm, &state);
   fclose(fp);
 
   if (ret != 3 || ret == EOF) {

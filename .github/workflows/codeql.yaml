@@ -1,0 +1,71 @@
+# CodeQL for both languages in this repository.
+#
+# Requires CodeQL default setup to be OFF for this repository:
+# Settings > Code security > Code scanning > CodeQL analysis > Advanced
+# (or the "..." menu > Switch to advanced). GitHub refuses uploads from a
+# workflow while default setup is enabled -
+# "CodeQL analyses from advanced configurations cannot be processed when the
+# default setup is enabled" - and default setup covers neither the C library
+# nor a build this project controls, which is the reason for this file.
+#
+# Not part of CI: a CodeQL run takes much longer than the checks a pull request
+# waits on, and its findings are advisory. It runs on merges to main, weekly,
+# and on demand, and reports into the repository's Security tab.
+name: CodeQL
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    # Mondays, early UTC: a fresh query pack finds things in unchanged code.
+    - cron: '30 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze ${{ matrix.language }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: autobuild
+          - language: c-cpp
+            build-mode: manual
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@90ad2b35f69faf97585ad74d28fa006d2739b7af # post-v7.0.0, see header
+        if: matrix.language == 'go'
+        with:
+          go-version-file: go.mod
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+      - name: Build the library
+        # CodeQL's C analysis needs to watch a real compile. Only the helper
+        # tools under library/tools need a CUDA toolkit, so the .so itself
+        # builds here without pulling a multi-gigabyte CUDA image.
+        if: matrix.language == 'c-cpp'
+        run: make -C library build WITH_CUDA_TOOLS=OFF
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          category: /language:${{ matrix.language }}

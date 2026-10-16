@@ -62,10 +62,15 @@ function(vgpu_configure_c_test name)
     target_link_directories(${name} PRIVATE ${_CUDA_LIBDIR})
     # Link cuda (driver) and cudart (runtime) explicitly since CUDA 12/13
     # cmake packages may not correctly resolve cudart from 'cuda' target
+    # ${CMAKE_DL_LIBS} because several of these call dlsym directly and glibc
+    # only folded the dl* symbols into libc in 2.34 - on the Rocky 8 image the
+    # library actually ships from, they are still in libdl and the link fails.
     if(_CUDART_LIBRARY)
-        target_link_libraries(${name} PRIVATE cuda "${_CUDART_LIBRARY}" nvidia-ml pthread rt)
+        target_link_libraries(${name} PRIVATE cuda "${_CUDART_LIBRARY}" nvidia-ml
+                              pthread rt ${CMAKE_DL_LIBS})
     else()
-        target_link_libraries(${name} PRIVATE cuda cudart nvidia-ml pthread rt)
+        target_link_libraries(${name} PRIVATE cuda cudart nvidia-ml
+                              pthread rt ${CMAKE_DL_LIBS})
     endif()
 endfunction()
 
@@ -117,7 +122,7 @@ if(CU_TESTS)
             get_filename_component(name ${src} NAME_WE)
             cuda_add_executable(${name} ${src})
             target_include_directories(${name} PRIVATE ${TEST_SRC_DIR})
-            target_link_libraries(${name} cuda nvidia-ml pthread rt)
+            target_link_libraries(${name} cuda nvidia-ml pthread rt ${CMAKE_DL_LIBS})
         endforeach()
     else()
         message(WARNING "[vgpu] legacy FindCUDA not available - skipping .cu tests")

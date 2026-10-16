@@ -62,7 +62,7 @@ import (
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	policyv1 "k8s.io/client-go/listers/policy/v1"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
@@ -78,7 +78,7 @@ type vgpuPreempt struct {
 	nodeLister  listerv1.NodeLister
 	podLister   client.PodLister
 	pdbLister   policyv1.PodDisruptionBudgetLister
-	recorder    record.EventRecorder
+	recorder    events.EventRecorderLogger
 	gpuTopology bool
 	hasSyncFunc func(ctx context.Context) bool
 }
@@ -99,8 +99,10 @@ var (
 // New wires the preempt plugin to the same informer-backed pod lister that
 // the filter plugin uses, so per-node pod lookups go through the indexer that
 // already filters by vGPU resource requests.
-func New(kubeClient kubernetes.Interface, factory informers.SharedInformerFactory, recorder record.EventRecorder,
-	podLister client.PodLister, gpuTopology bool) (*vgpuPreempt, error) {
+func New(
+	kubeClient kubernetes.Interface, factory informers.SharedInformerFactory,
+	recorder events.EventRecorderLogger, podLister client.PodLister, gpuTopology bool,
+) (*vgpuPreempt, error) {
 	podInformer := factory.Core().V1().Pods().Informer()
 	nodeInformer := factory.Core().V1().Nodes().Informer()
 	if err := podInformer.AddIndexers(PodIndexers); err != nil {
@@ -323,8 +325,8 @@ func (p *vgpuPreempt) Preempt(
 	})
 	parallel.WaitDone()
 
-	if gangNameSet.Len() > 0 {
-		p.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventGangDisrupted,
+	if gangNameSet.Len() > 0 && p.recorder != nil {
+		p.recorder.Eventf(pod, nil, corev1.EventTypeWarning, reason.EventGangDisrupted, "Preempting",
 			"evicted as preemption victim; this may trigger rescheduling of these pod groups %v", sets.List(gangNameSet))
 	}
 
@@ -335,7 +337,7 @@ func (p *vgpuPreempt) Preempt(
 	// user only sees the in-tree "no preemption victims found" message
 	// and has no signal that vgpu-manager itself vetoed every option.
 	if len(result.NodeNameToMetaVictims) == 0 && len(victimsMap) > 0 && p.recorder != nil {
-		p.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventPreemptionFailed,
+		p.recorder.Eventf(pod, nil, corev1.EventTypeWarning, reason.EventPreemptionFailed, "Preempting",
 			"preemption: 0/%d nodes are available: vgpu-manager rejects allocation on every candidate after victim removal",
 			len(victimsMap))
 	}
@@ -594,7 +596,7 @@ func (p *vgpuPreempt) canAllocate(
 	// internal error answer the same question: "no". Log at V(5) for
 	// debugging; the verb-level Preempt event captures the user-facing
 	// outcome.
-	_, rsn, err := allocator.NewSimulationAllocator(nodeInfo).Allocate(req)
+	_, rsn, err := allocator.NewAllocator(nodeInfo, allocator.WithSimulate(true)).Allocate(req)
 	switch {
 	case err != nil:
 		klog.V(3).ErrorS(err, "Preempt: allocator internal error",

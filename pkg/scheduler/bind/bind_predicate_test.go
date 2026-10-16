@@ -28,20 +28,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/kubernetes/scheme"
-	typedv1 "k8s.io/client-go/kubernetes/typed/core/v1"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
 func Test_BindPredicate(t *testing.T) {
 	k8sClient := fake.NewSimpleClientset()
-	broadcaster := record.NewBroadcaster()
-	broadcaster.StartRecordingToSink(&typedv1.EventSinkImpl{Interface: k8sClient.CoreV1().Events("")})
-	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
-	defer broadcaster.Shutdown()
-
-	bindPredicate, err := New(k8sClient, recorder, nil, true)
+	bindPredicate, err := New(k8sClient, events.NewFakeRecorder(10), nil, true)
 	if err != nil {
 		t.Fatalf("failed to create new bindPredicate due to %v", err)
 	}

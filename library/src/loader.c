@@ -461,8 +461,8 @@ entry_t cuda_library_entry[] = {
     {.name = "cuLaunchHostFunc_ptsz"},
     {.name = "cuSignalExternalSemaphoresAsync"},
     {.name = "cuSignalExternalSemaphoresAsync_ptsz"},
-//    {.name = "cuStreamBeginCapture"},
-//    {.name = "cuStreamBeginCapture_ptsz"},
+    {.name = "cuStreamBeginCapture"},
+    {.name = "cuStreamBeginCapture_ptsz"},
     {.name = "cuStreamEndCapture"},
     {.name = "cuStreamEndCapture_ptsz"},
     {.name = "cuStreamGetCtx"},
@@ -475,8 +475,8 @@ entry_t cuda_library_entry[] = {
     {.name = "cuWaitExternalSemaphoresAsync"},
     {.name = "cuWaitExternalSemaphoresAsync_ptsz"},
     {.name = "cuGraphExecKernelNodeSetParams"},
-//    {.name = "cuStreamBeginCapture_v2"},
-//    {.name = "cuStreamBeginCapture_v2_ptsz"},
+    {.name = "cuStreamBeginCapture_v2"},
+    {.name = "cuStreamBeginCapture_v2_ptsz"},
     {.name = "cuStreamGetCaptureInfo"},
     {.name = "cuStreamGetCaptureInfo_ptsz"},
     {.name = "cuThreadExchangeStreamCaptureMode"},
@@ -589,6 +589,8 @@ entry_t cuda_library_entry[] = {
     {.name = "cuStreamGetCaptureInfo_v3_ptsz"},
     {.name = "cuStreamUpdateCaptureDependencies"},
     {.name = "cuStreamUpdateCaptureDependencies_ptsz"},
+    {.name = "cuStreamUpdateCaptureDependencies_v2"},
+    {.name = "cuStreamUpdateCaptureDependencies_v2_ptsz"},
     {.name = "cuUserObjectCreate"},
     {.name = "cuUserObjectRelease"},
     {.name = "cuUserObjectRetain"},
@@ -648,6 +650,8 @@ entry_t cuda_library_entry[] = {
     {.name = "cuTensorMapEncodeIm2col"},
     {.name = "cuTensorMapEncodeTiled"},
     {.name = "cuTensorMapReplaceAddress"},
+    {.name = "cuStreamBeginCaptureToCig"},
+    {.name = "cuStreamEndCaptureToCig"},
 };
 
 entry_t nvml_library_entry[] = {
@@ -1028,7 +1032,7 @@ extern int get_sm_watcher_enabled(int *i);
 extern char* _getenv(const char* name);
 /* This is the symbol search function */
 fp_dlsym real_dlsym = NULL;
-void *lib_control;
+void* lib_control = NULL;
 
 // virtual memory node lock
 extern int device_vmem_write_lock(int ordinal);
@@ -1116,11 +1120,16 @@ static void resolve_real_dlsym(void) {
   }
 }
 
-void init_real_dlsym() {
+static void init_real_dlsym() {
   resolve_real_dlsym();
   if (lib_control == NULL) {
     lib_control = dlopen(CONTROLLER_DRIVER_FILE_PATH, RTLD_LAZY);
   }
+}
+
+fp_dlsym get_real_dlsym() {
+  resolve_real_dlsym();
+  return real_dlsym;
 }
 
 static void load_nvml_libraries() {
@@ -1466,11 +1475,16 @@ device_t get_device_snapshot(int host_index) {
 
 int mmap_file_to_util_path(device_util_t** data) {
   int ret = 1;
-  if (unlikely(file_exist(CONTROLLER_SM_UTIL_FILE_PATH) != 0)) {
-    return 0;
-  }
+  /* No file_exist() pre-check: it only duplicated what open already reports,
+   * and the gap between the two was a time-of-check/time-of-use window. */
   int fd = open(CONTROLLER_SM_UTIL_FILE_PATH, O_RDONLY | O_CLOEXEC);
   if (unlikely(fd == -1)) {
+    /* An absent file means the external SM watcher is simply not deployed,
+     * which is a supported configuration rather than an error. Keep the 0
+     * the file_exist() pre-check returned for it, and keep it unlogged. */
+    if (errno == ENOENT) {
+      return 0;
+    }
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_SM_UTIL_FILE_PATH, strerror(errno));
     return ret;
   }
@@ -1594,7 +1608,10 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
   }
 
   if (unlikely(file_exist(VMEMORY_NODE_PATH) != 0)) {
-    mkdir(VMEMORY_NODE_PATH, 0755);
+    if (mkdir(VMEMORY_NODE_PATH, 0755) == 0) {
+      /* Only when we created it; the plugin's own mount is already 0777. */
+      relax_shared_dir_mode(VMEMORY_NODE_PATH);
+    }
   }
 
   /* Unconditional O_CREAT, no file_exist() pre-check -- checking first would
@@ -1605,6 +1622,8 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
     LOGGER(WARNING, "can't open %s: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
     return ret;
   }
+  /* Best effort, after the guard: the fd is usable either way. */
+  relax_shared_file_mode(fd, VMEMORY_NODE_FILE_PATH);
 
   /* Lock only byte 0 of the header, not the whole file -- the per-device
    * locks live at higher offsets, so a whole-file lock would needlessly
@@ -1711,7 +1730,10 @@ static void sm_node_rebuild_locked(sm_node_region_t *r) {
 
 int open_sm_node_lock(void) {
   if (unlikely(file_exist(SM_NODE_PATH) != 0)) {
-    mkdir(SM_NODE_PATH, 0755);
+    if (mkdir(SM_NODE_PATH, 0755) == 0) {
+      /* Only when we created it; the plugin's own mount is already 0777. */
+      relax_shared_dir_mode(SM_NODE_PATH);
+    }
   }
   /* Zero-length file: it carries no data, only byte-range locks (one byte per
    * device, so devices are independent). Never ftruncate'd -- fcntl ranges do
@@ -1722,6 +1744,8 @@ int open_sm_node_lock(void) {
            SM_NODE_LOCK_PATH, strerror(errno));
     return -1;
   }
+  /* Best effort, after the guard: the fd is usable either way. */
+  relax_shared_file_mode(fd, SM_NODE_LOCK_PATH);
   return fd;
 }
 
@@ -1754,7 +1778,10 @@ int map_sm_node_region(sm_node_region_t **data) {
   }
 
   if (unlikely(file_exist(SM_NODE_PATH) != 0)) {
-    mkdir(SM_NODE_PATH, 0755);
+    if (mkdir(SM_NODE_PATH, 0755) == 0) {
+      /* Only when we created it; the plugin's own mount is already 0777. */
+      relax_shared_dir_mode(SM_NODE_PATH);
+    }
   }
 
   /* open(O_CREAT) unconditionally, no file_exist() pre-check -- that check is
@@ -1766,6 +1793,8 @@ int map_sm_node_region(sm_node_region_t **data) {
     LOGGER(WARNING, "can't open %s: %s", SM_NODE_FILE_PATH, strerror(errno));
     return 1;
   }
+  /* Best effort, after the guard: the fd is usable either way. */
+  relax_shared_file_mode(fd, SM_NODE_FILE_PATH);
 
   /* Blocking lock, no timeout, deliberately: a late arriver just sleeps in
    * the kernel until the region is built, burning no CPU. Safe here (unlike
@@ -1967,8 +1996,7 @@ FUNC_ATTR_HIDDEN void* vgpu_dlsym_target(void* handle, const char* symbol) {
   if (symbol_is_cuda_api(symbol) || symbol_is_nvml_api(symbol)) {
     return NULL;
   }
-  resolve_real_dlsym();
-  return (void*)real_dlsym;   /* NULL if unresolved -- dispatch reports it */
+  return (void *)get_real_dlsym();   /* NULL if unresolved -- dispatch reports it */
 }
 
 /* Everything the entry stub did not tail-jump: driver symbols (which resolve
@@ -2203,6 +2231,8 @@ int get_host_device_index_by_nvml_device(nvmlDevice_t device) {
   if (unlikely(ret)) {
     return -1;
   }
+  /* cppcheck-suppress uninitvar ; nvml_index is the out-param of the
+   * nvmlDeviceGetIndex call above, which NVML_INTERNAL_CHECK hides. */
   if (unlikely(!is_valid_device_index(nvml_index, "nvml"))) {
     return -1;
   }
@@ -2844,6 +2874,9 @@ void init_nvml_to_host_device_index() {
   }
 
   nvmlDevice_t device;
+  /* cppcheck-suppress legacyUninitvar ; device_count is written by whichever
+   * nvmlDeviceGetCount variant was found, and the else branch sets rt, on
+   * which LOGGER(FATAL) exits the process before this loop. */
   for (int device_index = 0; device_index < device_count; device_index++) {
     rt = _nvmlDeviceGetHandleByIndex(device_index, &device);
     if (unlikely(rt)) {

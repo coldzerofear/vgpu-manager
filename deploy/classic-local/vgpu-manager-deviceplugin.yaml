@@ -41,7 +41,7 @@ rules:
   - apiGroups: [""]
     resources: ["pods/eviction"]
     verbs: ["create"]
-  - apiGroups: [""]
+  - apiGroups: ["","events.k8s.io"]
     resources: ["events"]
     verbs: ["create","patch","update"]
 ---
@@ -126,7 +126,7 @@ spec:
       initContainers:
         - name: install
           command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
-          image: coldzerofear/vgpu-manager:latest
+          image: ghcr.io/coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: HOST_MANAGER_DIR
@@ -143,14 +143,20 @@ spec:
               mountPropagation: Bidirectional
       containers:
         - name: device-plugin
-          image: coldzerofear/vgpu-manager:latest
+          image: ghcr.io/coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-plugin
+            - --domain=nvidia.com
             - --device-list-strategy=envvar
             - --device-split-count=10
             - --device-cores-scaling=1
             - --device-memory-scaling=1
+            # Unified-memory GPUs (GB10 / DGX Spark) cannot report their memory size;
+            # supply it in MiB here (or in the node config, which also reaches the
+            # monitor). Oversold memory is refused together with it. See
+            # docs/how_to_use_unified_memory_gpu.md
+#            - --device-memory-override=65536
             - --node-config-path=/config/nodeConfig.json
             - --open-kernel-modules=false
             # CDI device injection (set deviceListStrategy to cdi-annotations and/or
@@ -224,12 +230,16 @@ spec:
               mountPath: /driver-root
               readOnly: true
         - name: device-monitor
-          image: coldzerofear/vgpu-manager:latest
+          image: ghcr.io/coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor
+            - --domain=nvidia.com
             - --server-bind-port=3456
             - --node-config-path=/config/nodeConfig.json
+            # Must match the device plugin when set there as a flag rather than in
+            # the node config. See docs/how_to_use_unified_memory_gpu.md
+#            - --device-memory-override=65536
             - --container-driver-root=/driver-root
             - --v=4
           ports:

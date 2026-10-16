@@ -218,7 +218,7 @@ func Test_Simulation_RecordsNothing(t *testing.T) {
 	before := linkSearchCount(t)
 
 	req := BuildAllocationRequest(linkPod(4, false, ""))
-	_, rsn, err := NewSimulationAllocator(n).Allocate(req)
+	_, rsn, err := NewAllocator(n, WithSimulate(true)).Allocate(req)
 	require.NoError(t, err)
 	require.Nil(t, rsn)
 

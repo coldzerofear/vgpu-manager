@@ -117,26 +117,14 @@ func combinedReadyz(server webhook.Server, cacheGate *cacheSyncGate) healthz.Che
 // 3. Wait for cache sync in the background
 // 4. Cancel the entire process if sync timeout or failure occurs, and restart kubelet
 func startCacheAsync(
-	parentCtx context.Context,
+	ctx context.Context,
 	cancel context.CancelFunc,
 	c cache.Cache,
-	warmupObjects []rtclient.Object,
 	gate *cacheSyncGate,
 ) error {
-
-	for _, obj := range warmupObjects {
-		if obj == nil {
-			continue
-		}
-		if _, err := c.GetInformer(parentCtx, obj, cache.BlockUntilSynced(false)); err != nil {
-			return fmt.Errorf("prewarm informer for %T failed: %w", obj, err)
-		}
-		klog.InfoS("Prewarmed informer", "type", fmt.Sprintf("%T", obj))
-	}
-
 	// Starting cache.Start in the background will block until the end of ctx.
 	go func() {
-		if err := c.Start(parentCtx); err != nil {
+		if err := c.Start(ctx); err != nil {
 			wrappedErr := fmt.Errorf("cache start failed: %w", err)
 			gate.MarkError(wrappedErr)
 			klog.ErrorS(err, "cache exited unexpectedly")
@@ -150,7 +138,7 @@ func startCacheAsync(
 
 	// The backend is waiting for the cache to complete synchronization; Do not block the main.
 	go func() {
-		syncCtx, syncCancel := context.WithTimeout(parentCtx, cacheSyncTimeout)
+		syncCtx, syncCancel := context.WithTimeout(ctx, cacheSyncTimeout)
 		defer syncCancel()
 
 		ok := c.WaitForCacheSync(syncCtx)
@@ -187,6 +175,12 @@ func runApp(opt *options.Options) (exitCode int) {
 		return exitCode
 	}
 
+	kubeClient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		klog.Errorf("Create kubeClient failed: %v", err)
+		return exitCode
+	}
+
 	// Start pprof debug debugging service.
 	route.StartDebugServer(opt.PprofBindPort)
 	klog.Infoln("Create webhook server")
@@ -208,9 +202,8 @@ func runApp(opt *options.Options) (exitCode int) {
 	ctx, cancel := context.WithCancel(baseCtx)
 	defer cancel()
 
-	cacheGate := &cacheSyncGate{}
-
 	// init probe
+	cacheGate := &cacheSyncGate{}
 	probeHandler := &healthz.Handler{
 		Checks: map[string]healthz.Checker{
 			"healthz": healthz.Ping,
@@ -221,18 +214,14 @@ func runApp(opt *options.Options) (exitCode int) {
 	server.Register("/healthz", probeHandler)
 	server.Register("/readyz", probeHandler)
 
-	clientOptions := rtclient.Options{
-		Scheme: Scheme,
-	}
-
 	var (
+		clientOptions      = rtclient.Options{Scheme: Scheme}
 		resourceReader     resourcereader.ResourceAPIReader
 		claimObjectType    = &resourcev1.ResourceClaim{}
 		templateObjectType = &resourcev1.ResourceClaimTemplate{}
 		classObjectType    = &resourcev1.DeviceClass{}
 		podObjectType      = &corev1.Pod{}
-		liveClient         rtclient.Client
-		recorder           events.EventRecorderLogger
+		eventRecorder      events.EventRecorderLogger
 		objIndexerMap      map[rtclient.Object]k8scache.Indexer
 	)
 
@@ -251,35 +240,6 @@ func runApp(opt *options.Options) (exitCode int) {
 	needInitClient := opt.DRAAdmissionEnabled || opt.DefaultConvertToDRA
 
 	if needInitClient {
-		liveClient, err = rtclient.New(config, rtclient.Options{Scheme: Scheme})
-		if err != nil {
-			klog.Errorf("Create live kubeClient failed: %v", err)
-			return exitCode
-		}
-
-		kubeClient, err := kubernetes.NewForConfig(config)
-		if err != nil {
-			klog.Errorf("Create kubeClient failed: %v", err)
-			return exitCode
-		}
-
-		broadcaster := events.NewBroadcaster(&events.EventSinkImpl{Interface: kubeClient.EventsV1()})
-		if err = broadcaster.StartRecordingToSinkWithContext(ctx); err != nil {
-			klog.Errorf("Failed to start Sink: %v", err)
-			return exitCode
-		}
-		stopLog, err := broadcaster.StartLogging(klog.Background())
-		if err != nil {
-			klog.Errorf("Failed to start Logging: %v", err)
-			return exitCode
-		}
-		defer func() {
-			stopLog()
-			broadcaster.Shutdown()
-		}()
-
-		recorder = broadcaster.NewRecorder(Scheme, util.ComponentName)
-
 		c, err := cache.New(config, cache.Options{
 			Scheme:           clientOptions.Scheme,
 			HTTPClient:       clientOptions.HTTPClient,
@@ -291,25 +251,26 @@ func runApp(opt *options.Options) (exitCode int) {
 			return exitCode
 		}
 
-		warmupObjects := []rtclient.Object{
-			claimObjectType,
-			templateObjectType,
-			classObjectType,
-			podObjectType,
-		}
-		if err := startCacheAsync(ctx, cancel, c, warmupObjects, cacheGate); err != nil {
-			klog.Errorf("Start clientCache failed: %v", err)
-			return exitCode
-		}
-		objIndexerMap = make(map[rtclient.Object]k8scache.Indexer)
-		clientOptions.Cache = &rtclient.CacheOptions{Reader: c}
+		broadcaster := events.NewEventBroadcasterAdapterWithContext(ctx, kubeClient)
+		// Deferred after cancel, so it runs before it: Shutdown blocks until the
+		// queued events reach the API server, and cancelling the context first
+		// would stop the sinks that have to deliver them. Function-scoped, not
+		// block-scoped, so it covers the whole run.
+		defer broadcaster.Shutdown()
+		eventRecorder = broadcaster.NewRecorder(util.ComponentName)
+		broadcaster.StartRecordingToSink(ctx.Done())
 
-		for _, object := range warmupObjects {
+		// Pre initialize informants, prewarmed cache
+		objIndexerMap = make(map[rtclient.Object]k8scache.Indexer)
+		for _, object := range []rtclient.Object{
+			claimObjectType, templateObjectType, classObjectType, podObjectType,
+		} {
 			informer, err := c.GetInformer(ctx, object, cache.BlockUntilSynced(false))
 			if err != nil {
-				klog.Errorf("Get %T informer failed: %v", object, err)
+				klog.Errorf("prewarm informer for %T failed: %v", object, err)
 				return exitCode
 			}
+			klog.InfoS("Prewarmed informer", "type", fmt.Sprintf("%T", object))
 			indexer, _, err := util.NewMirrorIndexer(informer)
 			if err != nil {
 				klog.Errorf("Create %T mirror indexer failed: %v", object, err)
@@ -317,6 +278,12 @@ func runApp(opt *options.Options) (exitCode int) {
 			}
 			objIndexerMap[object] = indexer
 		}
+
+		if err := startCacheAsync(ctx, cancel, c, cacheGate); err != nil {
+			klog.Errorf("Start clientCache failed: %v", err)
+			return exitCode
+		}
+		clientOptions.Cache = &rtclient.CacheOptions{Reader: c}
 
 	} else {
 		cacheGate.MarkReady()
@@ -330,18 +297,24 @@ func runApp(opt *options.Options) (exitCode int) {
 	if needInitClient {
 		// The mutation cache overlays informer snapshots with fresher write-through
 		// updates and live-API fallback results.
-		resourceReader = resourcereader.NewResourceAPIReader(liveClient,
+		resourceReader = resourcereader.NewResourceAPIReader(
+			kubeClient,
 			objIndexerMap[claimObjectType], objIndexerMap[templateObjectType],
-			objIndexerMap[classObjectType], objIndexerMap[podObjectType], 30*time.Second)
+			objIndexerMap[classObjectType], objIndexerMap[podObjectType],
+			30*time.Second,
+		)
 	}
 
-	if err := pkgwebhook.RegisterWebhookToServer(server, cacheGate, client, opt, resourceReader, recorder); err != nil {
+	if err = pkgwebhook.RegisterWebhookToServer(
+		opt, server, client, resourceReader,
+		eventRecorder, healthCheckMiddleware(cacheGate),
+	); err != nil {
 		klog.Errorf("Register webhook to server failed: %v", err)
 		return exitCode
 	}
 
 	klog.Infoln("Starting webhook server")
-	if err := server.Start(ctx); err != nil {
+	if err = server.Start(ctx); err != nil {
 		klog.ErrorS(err, "problem running webhook server")
 		exitCode = 1
 	} else {
@@ -349,6 +322,20 @@ func runApp(opt *options.Options) (exitCode int) {
 	}
 
 	return exitCode
+}
+
+func healthCheckMiddleware(healthChecker *cacheSyncGate) func(http.Handler) http.Handler {
+	return func(handler http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if healthChecker != nil {
+				if err := healthChecker.Check(r); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			handler.ServeHTTP(w, r)
+		})
+	}
 }
 
 func main() {

@@ -21,6 +21,7 @@ import (
 	"net/http/pprof"
 	"strconv"
 	"sync"
+	"time"
 
 	"k8s.io/klog/v2"
 )
@@ -47,7 +48,19 @@ func StartDebugServer(port int) {
 		go func() {
 			addr := "0.0.0.0:" + strconv.Itoa(port)
 			klog.V(4).Infof("Debug Server starting on <%s>", addr)
-			if err := http.ListenAndServe(addr, debugMux); err != nil {
+			// ReadHeaderTimeout and nothing else. It bounds the one phase an
+			// attacker controls - a client that opens a connection and dribbles
+			// out its request headers holds a goroutine for as long as it likes
+			// otherwise. ReadTimeout and WriteTimeout are deliberately unset:
+			// /debug/pprof/profile and /trace stream for as long as the caller
+			// asks (?seconds=), so a write deadline would truncate exactly the
+			// profiles this server exists to serve.
+			srv := &http.Server{
+				Addr:              addr,
+				Handler:           debugMux,
+				ReadHeaderTimeout: 10 * time.Second,
+			}
+			if err := srv.ListenAndServe(); err != nil {
 				klog.ErrorS(err, "Debug Server error occurred")
 			}
 		}()

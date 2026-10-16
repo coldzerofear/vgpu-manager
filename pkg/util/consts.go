@@ -40,9 +40,14 @@ const (
 	VFIODeviceClassName = "vfio-manager"
 
 	IgnoreWebhookAnnotation = "vgpu-manager.io/ignore-webhook"
-	DRAOriResAnnotation     = "vgpu-manager.io/original-resources"
-	DRAOwnerKeyLabel        = "vgpu-manager.io/owner-key"
-	DRACreateTimeLabel      = "vgpu-manager.io/create-timestamp"
+	// NodeHostnameLabel ("true") opts a pod into having its hostname derived
+	// from the node it is going to run on, so that a DaemonSet pod gets a
+	// stable DNS name of its own through a headless service (see
+	// pkg/webhook/pod/hostname).
+	NodeHostnameLabel   = "vgpu-manager.io/node-hostname"
+	DRAOriResAnnotation = "vgpu-manager.io/original-resources"
+	DRAOwnerKeyLabel    = "vgpu-manager.io/owner-key"
+	DRACreateTimeLabel  = "vgpu-manager.io/create-timestamp"
 
 	SchedulerRoleLabel = "vgpu-manager.io/scheduler-role"
 	// SchedulerRoleValueLeader is the label value used to identify the leader pod.
@@ -118,9 +123,9 @@ var (
 	PodAssignedPhaseLabel      = globalDomainName + "/assigned-phase"
 	PodMetricsNodeLabel        = globalDomainName + "/metrics-node"
 
-	// PodVGPUPreAllocAnnotation Pre allocated device information by the scheduler
+	// PodVGPUPreAllocAnnotation Pre allocated device information by the scheduler.
 	PodVGPUPreAllocAnnotation = globalDomainName + "/pre-allocated"
-	// PodVGPURealAllocAnnotation Real device information allocated by device plugins
+	// PodVGPURealAllocAnnotation Real device information allocated by device plugins.
 	PodVGPURealAllocAnnotation = globalDomainName + "/real-allocated"
 	// VGPUAccessModeAnnotation selects local (default) or remote vGPU devices for the pod.
 	VGPUAccessModeAnnotation = globalDomainName + "/vgpu-access-mode"
@@ -128,6 +133,8 @@ var (
 	// NodeRemoteEndpointsAnnotation is published on a remote GPU server node
 	// (JSON, see remotegpu.ServerEndpointInfo).
 	NodeRemoteEndpointsAnnotation = globalDomainName + "/remote-endpoints"
+	// NodeRemoteSelectorsAnnotation configure a remote node selector for pods in remote access mode.
+	NodeRemoteSelectorsAnnotation = globalDomainName + "/remote-selectors"
 
 	// NodeRemoteServerLabel ("true") marks a GPU node whose GPUs serve remote pods only.
 	NodeRemoteServerLabel = globalDomainName + "/remote-server"
@@ -164,6 +171,7 @@ func initConstants() {
 	PodVGPURealAllocAnnotation = globalDomainName + "/real-allocated"
 	VGPUAccessModeAnnotation = globalDomainName + "/vgpu-access-mode"
 	NodeRemoteEndpointsAnnotation = globalDomainName + "/remote-endpoints"
+	NodeRemoteSelectorsAnnotation = globalDomainName + "/remote-selectors"
 	NodeRemoteServerLabel = globalDomainName + "/remote-server"
 	NodeRemoteConsumerLabel = globalDomainName + "/remote-consumer"
 }

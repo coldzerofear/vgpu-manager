@@ -99,7 +99,6 @@ func (h *validateHandle) createResourceClaimTemplates(ctx context.Context, job *
 	} else if len(infoMap) == 0 { // fast return
 		return nil
 	}
-	var deleteTasks []string
 
 	ownerKey := fmt.Sprintf("%s-%s", job.Namespace, job.Name)
 	createTimestamp := fmt.Sprintf("%v", time.Now().UnixMilli())
@@ -129,7 +128,9 @@ func (h *validateHandle) createResourceClaimTemplates(ctx context.Context, job *
 		})
 		if index < 0 {
 			subLogger.V(2).Info("TaskSpec not found, skip ResourceClaimTemplate creation")
-			deleteTasks = append(deleteTasks, taskName)
+			// Nothing to collect: only the mutating webhook can rewrite the
+			// annotation that named this task, and it already drops entries it
+			// has handled (see job_mutate.go, deleteTaskNames).
 			continue
 		}
 		task := &job.Spec.Tasks[index]

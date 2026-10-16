@@ -59,6 +59,10 @@ extern int file_exist(const char *);
 extern int device_pid_in_same_container(unsigned int pid);
 extern int library_exists_in_process_maps(char const *libName, unsigned int pid);
 extern int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids);
+extern int split_str(const char *line, char *key, size_t key_size,
+                     char *value, size_t value_size, char d);
+extern int read_cgroup(const char *pid_path, const char *cgroup_key,
+                       char *cgroup_value, size_t value_size);
 
 /* SM throttle controller selection (see util.c). Defaults preserve stock
  * behaviour when env is unset. */
@@ -1970,8 +1974,13 @@ static void active_utilization_notifier(int batch_code) {
                   batches[batch_code].batch_code, strerror(rc));
     return;
   }
-  char thread_name[32] = {0};
-  sprintf(thread_name, "watch_util_bt_%d", batches[batch_code].batch_code);
+  /* The kernel caps a thread name at 16 bytes including the NUL, and the old
+   * "watch_util_bt_" prefix alone was 14 -- any batch >= 10 pushed the name to
+   * the limit and setname failed with ERANGE, silently leaving the watchers
+   * unnamed in exactly the multi-batch case where telling them apart matters. */
+  char thread_name[16] = {0};
+  snprintf(thread_name, sizeof(thread_name), "watch_bt_%d",
+           batches[batch_code].batch_code);
 #ifdef __APPLE__
   pthread_setname_np(thread_name);
 #else
@@ -2137,85 +2146,33 @@ static void initialization() {
   balance_batches(device_count);
 }
 
-int split_str(char *line, char *key, char *value, char d) {
-  int index = 0;
-  for (index = 0; index < strlen(line) && line[index] != d; index++) {}
-
-  if (index == strlen(line)){
-    key[0] = '\0';
-    value = '\0';
-    return 1;
-  }
-
-  int start = 0, i = 0;
-  // trim head
-  for (; start < index && (line[start] == ' ' || line[start] == '\t'); start++) {}
-
-  for (i = 0; start < index; i++, start++) {
-    key[i] = line[start];
-  }
-  // trim tail
-  for (; i > 0 && (key[i - 1] == '\0' || key[i - 1] == '\n' || key[i - 1] == '\t'); i--) {}
-
-  key[i] = '\0';
-
-  start = index + 1;
-  i = 0;
-
-  // trim head
-  for (; start < strlen(line) && (line[start] == ' ' || line[start] == '\t'); start++) {}
-
-  for (i = 0; start < strlen(line); i++, start++) {
-    value[i] = line[start];
-  }
-  // trim tail
-  for (; i > 0 && (value[i - 1] == '\0' || value[i - 1] == '\n' || value[i - 1] == '\t'); i--) {}
-
-  value[i] = '\0';
-  return 0;
-}
-
-int read_cgroup(char *pid_path, char *cgroup_key, char *cgroup_value) {
-  int ret = -1;
-  FILE *f = fopen(pid_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
-  if (f == NULL) {
-    return ret;
-  }
-  char buff[256];
-  while (fgets(buff, 256, f)) {
-    int index = 0;
-    for (; index < strlen(buff) && buff[index] != ':'; index++) {}
-    if (index == strlen(buff)) {
-      continue;
-    }
-    char key[128], value[128];
-    if (split_str(&buff[index + 1], key, value, ':') != 0) {
-      continue;
-    }
-    if (strcmp(key, cgroup_key) == 0) {
-      strcpy(cgroup_value, value);
-      ret = 0;
-      break;
-    }
-  }
-  fclose(f);
-  return ret;
-}
-
 // Container PID matching method in cgroupv1 mode
 int check_device_pid_in_cgroupv1_container(unsigned int device_pid) {
   int ret = -1;
   if (device_pid == 0) {
     return ret;
   }
-  char host_pid_path[128];
-  char cont_process_cg[256];
-  char host_process_cg[256];
-  sprintf(host_pid_path, HOST_PROC_CGROUP_PID_PATH, device_pid);
-  if (!read_cgroup(PID_SELF_CGROUP_PATH, "memory", cont_process_cg) &&
-      !read_cgroup(host_pid_path, "memory", host_process_cg)) {
+  char host_pid_path[PATH_MAX];
+  char cont_process_cg[CGROUP_LINE_MAX];
+  char host_process_cg[CGROUP_LINE_MAX];
+  snprintf(host_pid_path, sizeof(host_pid_path), HOST_PROC_CGROUP_PID_PATH, device_pid);
+  if (!read_cgroup(PID_SELF_CGROUP_PATH, "memory", cont_process_cg,
+                   sizeof(cont_process_cg)) &&
+      !read_cgroup(host_pid_path, "memory", host_process_cg,
+                   sizeof(host_process_cg))) {
     LOGGER(DETAIL, "\ncontainer process cgroup: %s\nhost process cgroup: %s", cont_process_cg, host_process_cg);
-    if (strstr(host_process_cg, cont_process_cg) != NULL) {
+    /* Our own path has to be specific enough to identify us. A container in
+     * its own cgroup namespace reads "/" here, and "/" is a substring of
+     * every absolute host path -- the test below would then claim every
+     * process on the device. This mode needs the host's view of our cgroup
+     * (cgroupns=host, which is what Kubernetes uses on cgroup v1), so when
+     * we cannot see it, report "not ours" rather than "all of them". */
+    if (cont_process_cg[0] != '/' || cont_process_cg[1] == '\0') {
+      LOGGER(VERBOSE, "own cgroup path %s is not specific enough to match against "
+                      "the host's view -- cgroup v1 matching needs cgroupns=host; "
+                      "not claiming pid %u",
+             cont_process_cg, device_pid);
+    } else if (strstr(host_process_cg, cont_process_cg) != NULL) {
       ret = 0;
     }
   }
@@ -2229,15 +2186,18 @@ int check_device_pid_in_cgroupv2_container(unsigned int device_pid) {
     return ret;
   }
   // TODO May I need to check if there are zombie processes?
-  char host_pid_path[128];
-  sprintf(host_pid_path, HOST_PROC_CGROUP_PID_PATH, device_pid);
-  if (file_exist(host_pid_path) != 0) {
-    return ret;
-  }
-
+  char host_pid_path[PATH_MAX];
+  snprintf(host_pid_path, sizeof(host_pid_path), HOST_PROC_CGROUP_PID_PATH, device_pid);
+  /* No file_exist() pre-check: it only duplicated what fopen already reports,
+   * and the gap between the two was a time-of-check/time-of-use window. */
   FILE *fp = fopen(host_pid_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
   if (!fp) {
-    LOGGER(VERBOSE, "read host pid path %s failed: %s", host_pid_path, strerror(errno));
+    /* A PID that exited between being sampled and being read here is the
+     * common case on this per-PID path, not something worth a log line --
+     * which is exactly what the file_exist() pre-check used to filter. */
+    if (errno != ENOENT) {
+      LOGGER(VERBOSE, "read host pid path %s failed: %s", host_pid_path, strerror(errno));
+    }
     return ret;
   }
 
@@ -2435,24 +2395,72 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
 
 nvmlReturn_t _nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
   nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses, device, infoCount, infos);
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3, device, infoCount, infos);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2, device, infoCount, infos);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3, device, infoCount, infos);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
+    /* The v1 entry writes a shorter element than the caller's array holds, so
+     * it cannot be handed that array: it would stride by the wrong size.
+     * Translate through a correctly typed buffer, on the heap rather than a
+     * VLA - infoCount is the caller's capacity and nothing bounds it, so a
+     * generous one would size a stack frame to match. */
+    const unsigned int capacity = *infoCount;
+    nvmlProcessInfo_v1_t *infoTemps = capacity > 0
+        ? (nvmlProcessInfo_v1_t *)malloc((size_t)capacity * sizeof(*infoTemps))
+        : NULL;
+    if (unlikely(capacity > 0 && infoTemps == NULL)) {
+      ret = NVML_ERROR_MEMORY;
+    } else {
+      ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses, device, infoCount, infoTemps);
+      if (likely(ret == NVML_SUCCESS)) {
+        /* Never read past what the buffer held, whatever the entry reports. */
+        const unsigned int count = *infoCount < capacity ? *infoCount : capacity;
+        for (unsigned int i = 0; i < count; i++) {
+          infos[i].pid = infoTemps[i].pid;
+          infos[i].usedGpuMemory = infoTemps[i].usedGpuMemory;
+          infos[i].gpuInstanceId = 0;
+          infos[i].computeInstanceId = 0;
+        }
+      }
+    }
+    free(infoTemps);
   }
   return ret;
 }
 
 nvmlReturn_t _nvmlDeviceGetGraphicsRunningProcesses(nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
   nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses, device, infoCount, infos);
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3, device, infoCount, infos);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2, device, infoCount, infos);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3, device, infoCount, infos);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
+    /* The v1 entry writes a shorter element than the caller's array holds, so
+     * it cannot be handed that array: it would stride by the wrong size.
+     * Translate through a correctly typed buffer, on the heap rather than a
+     * VLA - infoCount is the caller's capacity and nothing bounds it, so a
+     * generous one would size a stack frame to match. */
+    const unsigned int capacity = *infoCount;
+    nvmlProcessInfo_v1_t *infoTemps = capacity > 0
+        ? (nvmlProcessInfo_v1_t *)malloc((size_t)capacity * sizeof(*infoTemps))
+        : NULL;
+    if (unlikely(capacity > 0 && infoTemps == NULL)) {
+      ret = NVML_ERROR_MEMORY;
+    } else {
+      ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses, device, infoCount, infoTemps);
+      if (likely(ret == NVML_SUCCESS)) {
+        /* Never read past what the buffer held, whatever the entry reports. */
+        const unsigned int count = *infoCount < capacity ? *infoCount : capacity;
+        for (unsigned int i = 0; i < count; i++) {
+          infos[i].pid = infoTemps[i].pid;
+          infos[i].usedGpuMemory = infoTemps[i].usedGpuMemory;
+          infos[i].gpuInstanceId = 0;
+          infos[i].computeInstanceId = 0;
+        }
+      }
+    }
+    free(infoTemps);
   }
   return ret;
 }
@@ -4178,6 +4186,9 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
       CUdevice device;
       ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
       if (likely(ret == CUDA_SUCCESS)) {
+        /* cppcheck-suppress uninitvar ; device is the out-param of the
+         * cuCtxGetDevice call above, which CUDA_INTERNAL_CHECK hides from
+         * cppcheck, and it is only read when that call returned SUCCESS. */
         int host_index = get_host_device_index_by_cuda_device(device);
         rate_limiter(p->gridDimX * p->gridDimY * p->gridDimZ,
                      p->blockDimX * p->blockDimY * p->blockDimZ, host_index);

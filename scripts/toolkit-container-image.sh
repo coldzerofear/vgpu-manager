@@ -38,7 +38,19 @@
 
 set -euo pipefail
 
+# The Go toolchain is the authority on the resolved version, but it is not
+# always present: the image build needs this value and compiles Go inside
+# Docker, so requiring a toolchain on the host just to read a version would
+# make a container build depend on the host having Go. Fall back to go.mod,
+# which is where the version comes from anyway. (A replace directive would
+# be missed by the fallback; there is none for this module.)
+GO_MOD="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/go.mod"
+
 TOOLKIT_VERSION=$(go list -m -f '{{.Version}}' github.com/NVIDIA/nvidia-container-toolkit 2>/dev/null || true)
+
+if [ -z "${TOOLKIT_VERSION}" ] && [ -f "${GO_MOD}" ]; then
+    TOOLKIT_VERSION=$(awk '$1 == "github.com/NVIDIA/nvidia-container-toolkit" { print $2; exit }' "${GO_MOD}")
+fi
 
 if [ -z "${TOOLKIT_VERSION}" ]; then
     echo "TOOLKIT_VERSION_NOT_SET"

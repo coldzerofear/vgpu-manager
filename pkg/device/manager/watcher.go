@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"golang.org/x/exp/maps"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 )
@@ -91,27 +93,32 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 			}
 		}()
 
+		keys := maps.Keys(gpuDeviceMap)
+
+		if len(keys) == 0 {
+			klog.V(3).Infoln("no gpu devices, will exit retry")
+			return
+		}
+
 		if err = deviceLib.NvmlInitWithFlags(nvml.INIT_FLAG_NO_GPUS); err != nil {
 			klog.Errorln(err)
 			return
 		}
 		defer deviceLib.NvmlShutdown()
 
-		gpuDevices := make([]*GPUDevice, 0, len(gpuDeviceMap))
-		deviceHandlers := make([]device.Device, 0, len(gpuDeviceMap))
-		for _, dev := range gpuDeviceMap {
-			handle, ret := deviceLib.DeviceGetHandleByUUID(dev.UUID)
-			if ret != nvml.SUCCESS {
-				klog.Errorf("error getting device handle for uuid '%v': %v", dev.UUID, ret)
+		gpuDevices := make([]*GPUDevice, 0, len(keys))
+		deviceHandlers := make([]device.Device, 0, len(keys))
+		// Ensure stable devices sequence
+		sort.Strings(keys)
+		for _, key := range keys {
+			dev := gpuDeviceMap[key]
+			devHandle, err := deviceLib.NewDeviceByUUID(dev.UUID)
+			if err != nil {
+				klog.V(1).ErrorS(err, "Failed to obtain device handle, will exit retry")
 				return
 			}
 			gpuDevices = append(gpuDevices, dev)
-			devHandle, _ := deviceLib.NewDevice(handle)
 			deviceHandlers = append(deviceHandlers, devHandle)
-		}
-		if len(deviceHandlers) == 0 {
-			klog.V(3).Infoln("no gpu device handle, will exit retry")
-			return
 		}
 
 		subCtx, subCancelFunc := context.WithCancel(ctx)
@@ -192,14 +199,13 @@ func smWatcherBatchWithContext(
 }
 
 func smWatcherSingleDevice(
-	utilAdapter watcher.DeviceUtilInterface,
-	mmapUtil *watcher.MmapDeviceUtil,
-	info *GPUDevice, d device.Device,
+	utilAdapter watcher.DeviceUtilInterface, mmapUtil *watcher.MmapDeviceUtil, info *GPUDevice, d device.Device,
 ) error {
-	if !info.Healthy || info.MigEnabled {
+	if !info.Healthy {
 		return nil
 	}
-	if enabled, _ := d.IsMigEnabled(); enabled {
+	// Skip utilization monitoring based on the actual MIG activation status of the current device.
+	if migEnabled, _ := d.IsMigEnabled(); migEnabled {
 		return nil
 	}
 	i := info.Index

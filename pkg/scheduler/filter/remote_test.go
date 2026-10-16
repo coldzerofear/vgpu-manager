@@ -32,7 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
@@ -74,7 +74,7 @@ func remotePod(name string, number, cores, memory int) *corev1.Pod {
 type remoteFixture struct {
 	filter    *gpuFilter
 	client    *fake.Clientset
-	recorder  *record.FakeRecorder
+	recorder  *events.FakeRecorder
 	consumers []corev1.Node
 }
 
@@ -92,7 +92,7 @@ func newRemoteFixture(t *testing.T, servers []corev1.Node, pods ...*corev1.Pod) 
 		require.NoError(t, err)
 	}
 	factory := informers.NewSharedInformerFactory(k8sClient, 0)
-	recorder := record.NewFakeRecorder(64)
+	recorder := events.NewFakeRecorder(64)
 	filterPredicate, err := New(k8sClient, factory, recorder, true, true)
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -330,4 +330,74 @@ func Test_RemoteFilter_ServerTaints(t *testing.T) {
 			assert.Contains(t, result.FailedNodes["consumer-a"], reason.Phrase(reason.NoRemoteServer))
 		})
 	}
+}
+
+// The remote-selectors annotation narrows the servers a remote pod accepts, on
+// top of the server label every candidate needs.
+func Test_RemoteFilter_RemoteSelectorsAnnotation(t *testing.T) {
+	zoned := func(t *testing.T, name, zone string) corev1.Node {
+		t.Helper()
+		node, _ := remoteServerNode(t, name)
+		node.Labels["zone"] = zone
+		return node
+	}
+	selecting := func(name, selector string) *corev1.Pod {
+		pod := remotePod(name, 1, 50, 2048)
+		pod.Annotations[util.NodeRemoteSelectorsAnnotation] = selector
+		return pod
+	}
+
+	t.Run("only the matching server is used", func(t *testing.T) {
+		fixture := newRemoteFixture(t, []corev1.Node{zoned(t, "server-a", "a"), zoned(t, "server-b", "b")})
+		pod := fixture.createPod(t, selecting("zone-b", "zone=b"))
+
+		result := fixture.run(pod, liveFilter)
+
+		require.Empty(t, result.Error)
+		assert.Equal(t, []string{"consumer-a", "consumer-b"}, NodeNamesOfResult(result))
+		assert.Equal(t, "server-b", fixture.getPod(t, pod).Annotations[util.PodPredicateNodeAnnotation])
+	})
+
+	t.Run("no server matches", func(t *testing.T) {
+		fixture := newRemoteFixture(t, []corev1.Node{zoned(t, "server-a", "a")})
+
+		result := fixture.run(selecting("zone-c", "zone=c"), dryRunFilter)
+
+		assert.Empty(t, NodeNamesOfResult(result))
+		assert.Contains(t, result.FailedNodes["consumer-a"], reason.Phrase(reason.NoRemoteServer))
+	})
+
+	// A dry run is handed candidates the cache does not have yet (the Cluster
+	// Autoscaler simulating an upscale); the annotation has to reach those too.
+	t.Run("a candidate outside the cache is filtered as well", func(t *testing.T) {
+		fixture := newRemoteFixture(t, nil)
+		future := zoned(t, "future-server", "a")
+
+		result := fixture.run(selecting("zone-b", "zone=b"), dryRunFilter, fixture.consumers[0], future)
+
+		assert.Empty(t, NodeNamesOfResult(result))
+		assert.Contains(t, result.FailedNodes["consumer-a"], reason.Phrase(reason.NoRemoteServer))
+	})
+
+	// Set operators work the same as they do in any label selector.
+	t.Run("set based selector", func(t *testing.T) {
+		fixture := newRemoteFixture(t, []corev1.Node{zoned(t, "server-a", "a"), zoned(t, "server-b", "b")})
+		pod := fixture.createPod(t, selecting("zone-in", "zone in (b,c)"))
+
+		result := fixture.run(pod, liveFilter)
+
+		require.Empty(t, result.Error)
+		assert.Equal(t, "server-b", fixture.getPod(t, pod).Annotations[util.PodPredicateNodeAnnotation])
+	})
+
+	// The webhook rejects a malformed selector on create; a pod that got in
+	// anyway (webhook disabled) must fail the request, not select every server.
+	t.Run("malformed selector fails the request", func(t *testing.T) {
+		fixture := newRemoteFixture(t, []corev1.Node{zoned(t, "server-a", "a")})
+
+		result := fixture.run(selecting("zone=", "zone in"), dryRunFilter)
+
+		assert.NotEmpty(t, result.Error)
+		assert.Empty(t, NodeNamesOfResult(result))
+	})
 }

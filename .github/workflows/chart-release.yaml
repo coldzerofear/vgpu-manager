@@ -1,0 +1,133 @@
+# Publishes the Helm charts as a chart repository served from GitHub Pages.
+#
+# The packages live on the gh-pages branch next to index.yaml, and no GitHub
+# release is created. That is deliberate: chart-releaser, the usual tool for
+# this, creates a release and then uploads the package to it, which a
+# repository with immutable releases refuses - "422 Cannot upload assets to an
+# immutable release" (helm/chart-releaser#591). Worse, a tag an immutable
+# release has used cannot be reused even after the release is deleted, so every
+# failed attempt burns the <chart>-<version> name it tried. Hosting the
+# packages on the branch avoids that whole class of problem, and a chart bump
+# no longer produces a GitHub release nobody asked for.
+#
+# One-time setup, outside this file: Settings > Pages > Source "Deploy from a
+# branch", branch gh-pages, / (root).
+#
+# A chart is published only if its exact version is not on the branch already,
+# and an already-published package is never overwritten. The version field in
+# Chart.yaml is therefore what decides whether anything happens - bump it in
+# the same commit as a chart change.
+#
+# Consumers then use:
+#   helm repo add vgpu-manager https://coldzerofear.github.io/vgpu-manager
+name: Chart release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'charts/**'
+      # Changes to the publishing logic itself take effect straight away. A run
+      # that finds nothing new publishes nothing, so this costs a no-op run.
+      - '.github/workflows/chart-release.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two runs rewriting index.yaml at once is how a chart repository loses a
+  # chart.
+  group: ${{ github.workflow }}
+
+jobs:
+  publish:
+    name: Publish to the chart repository
+    runs-on: ubuntu-24.04
+    permissions:
+      # Commits the packages and index.yaml to gh-pages.
+      contents: write
+    steps:
+      # Credentials are deliberately kept here: the push to gh-pages at the
+      # end of this job is what publishes.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+        with:
+          version: v3.19.0
+      - name: Configure git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+      - name: Ensure the gh-pages branch exists
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            echo "gh-pages already exists"
+            exit 0
+          fi
+          # Built and pushed as a bare object: switching branches in the
+          # checkout would leave the worktree somewhere the later steps do not
+          # expect, and `git switch -` has no previous branch to return to in a
+          # fresh clone ("fatal: invalid reference: @{-1}").
+          echo "creating an empty gh-pages branch"
+          empty_tree="$(git hash-object -t tree /dev/null)"
+          commit="$(git commit-tree "${empty_tree}" -m "Initialise the chart repository")"
+          git push origin "${commit}:refs/heads/gh-pages"
+      - name: Package the charts
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/packages"
+          for chart in charts/*; do
+            echo "::group::${chart}"
+            # A last guard before publishing: the pull-request CI lints these
+            # too, but a manual run has no pull request behind it.
+            helm lint "${chart}"
+            helm package "${chart}" --destination "${RUNNER_TEMP}/packages"
+            echo "::endgroup::"
+          done
+      - name: Publish to gh-pages
+        run: |
+          set -euo pipefail
+          pages="${RUNNER_TEMP}/pages"
+          pages_url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
+
+          git fetch origin gh-pages
+          git worktree add "${pages}" origin/gh-pages
+
+          published=""
+          for pkg in "${RUNNER_TEMP}"/packages/*.tgz; do
+            name="$(basename "${pkg}")"
+            if [ -e "${pages}/${name}" ]; then
+              echo "${name}: already published, left untouched"
+              continue
+            fi
+            cp "${pkg}" "${pages}/${name}"
+            published="${published} ${name}"
+            echo "${name}: new"
+          done
+
+          if [ -z "${published}" ]; then
+            echo "Nothing to publish: every packaged version is already on gh-pages." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Rebuilt from the packages on the branch rather than merged into the
+          # existing index: every published .tgz stays there, so the directory
+          # is the source of truth and a damaged index repairs itself.
+          helm repo index "${pages}" --url "${pages_url}"
+
+          git -C "${pages}" add .
+          git -C "${pages}" commit -m "Publish${published} from ${GITHUB_SHA}"
+          git -C "${pages}" push origin HEAD:refs/heads/gh-pages
+
+          {
+            echo "### Published"
+            echo
+            for name in ${published}; do
+              echo "- \`${name}\`"
+            done
+            echo
+            echo "\`helm repo add vgpu-manager ${pages_url}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

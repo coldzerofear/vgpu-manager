@@ -35,7 +35,7 @@ const char *nvmlErrorString(nvmlReturn_t result) {
 
 nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device,
                                                   unsigned int *infoCount,
-                                                  nvmlProcessInfo_t *infos) {
+                                                  nvmlProcessInfo_v1_t *infos) {
   return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
                                                         device, infoCount, infos);
 }
@@ -332,7 +332,7 @@ nvmlReturn_t nvmlDeviceGetGpuOperationMode(nvmlDevice_t device,
 
 nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses(nvmlDevice_t device,
                                                    unsigned int *infoCount,
-                                                   nvmlProcessInfo_t *infos) {
+                                                   nvmlProcessInfo_v1_t *infos) {
   return NVML_ENTRY_CHECK(nvml_library_entry,
                          nvmlDeviceGetGraphicsRunningProcesses, device,
                          infoCount, infos);
@@ -1606,7 +1606,7 @@ nvmlReturn_t nvmlDeviceGetModuleId(nvmlDevice_t device, unsigned int *moduleId){
 }
 
 nvmlReturn_t nvmlDeviceGetMPSComputeRunningProcesses_v3(nvmlDevice_t device,
-                                      unsigned int* infoCount, nvmlProcessInfo_t* infos){
+                                      unsigned int* infoCount, void* infos){
   return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetMPSComputeRunningProcesses_v3,
                          device, infoCount, infos);
 }

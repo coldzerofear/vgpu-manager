@@ -695,3 +695,52 @@ func TestCheckCrossPodsVGPURequestConflict(t *testing.T) {
 		})
 	}
 }
+
+// A remote pod may narrow its GPU servers with a label selector; a malformed
+// one is rejected at create time so the scheduler never has to deal with it.
+func TestValidateCreateRemoteSelectors(t *testing.T) {
+	remotePod := func(selector string) *corev1.Pod {
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name: "remote", Namespace: testNS,
+			Annotations: map[string]string{util.VGPUAccessModeAnnotation: util.AccessModeRemote},
+		}}
+		if selector != "" {
+			pod.Annotations[util.NodeRemoteSelectorsAnnotation] = selector
+		}
+		return pod
+	}
+
+	tests := map[string]struct {
+		selector string
+		local    bool
+		wantErr  bool
+	}{
+		"absent":             {},
+		"equality":           {selector: "zone=a"},
+		"set based":          {selector: "zone in (a,b),!isolated"},
+		"numeric comparison": {selector: "gpu-count>2"},
+		"incomplete set":     {selector: "zone in", wantErr: true},
+		"missing key":        {selector: "=a", wantErr: true},
+		"not a label value":  {selector: "zone=a/b", wantErr: true},
+		// The annotation only means anything in remote mode, so a local pod
+		// carrying a broken one is none of our business.
+		"a local pod is not asked": {selector: "zone in", local: true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			pod := remotePod(tc.selector)
+			if tc.local {
+				delete(pod.Annotations, util.VGPUAccessModeAnnotation)
+			}
+			err := newHandle(t).ValidateCreate(context.Background(), pod, false)
+
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), util.NodeRemoteSelectorsAnnotation)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}

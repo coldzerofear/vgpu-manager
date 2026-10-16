@@ -156,7 +156,7 @@ func (h *Healthcheck) Check(ctx context.Context, req *grpc_health_v1.HealthCheck
 	}
 
 	klog.V(7).Info("Health check: success: got NodePrepareResourcesResponse for noop request")
-	klog.V(6).Infof("Current kubelet plugin registration status: %s", h.kphelper.RegistrationStatus())
+	klog.V(7).Infof("Current kubelet plugin registration status: %s", h.kphelper.RegistrationStatus())
 
 	// When the in-process NRI plugin has been unhealthy past its grace period,
 	// fail liveness so kubelet restarts the pod cleanly (design §12.13.6). The

@@ -49,11 +49,7 @@ func RegisterController(name string, fn NewControllerFunc) {
 	mutex.Unlock()
 }
 
-func RegisterControllerToManager(
-	manager ctrm.Manager,
-	config *node.NodeConfigSpec,
-	controlSwitch map[string]bool,
-) error {
+func RegisterControllerToManager(manager ctrm.Manager, config *node.NodeConfigSpec, controlSwitch map[string]bool) error {
 	registerOnce.Do(func() {
 		var controller Controller
 		for name, newController := range controllerRegistry {

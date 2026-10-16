@@ -42,11 +42,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	helperv1 "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
@@ -59,7 +60,7 @@ type gpuFilter struct {
 	kubeClient  kubernetes.Interface
 	nodeLister  listerv1.NodeLister
 	podLister   client.PodLister
-	recorder    record.EventRecorder
+	recorder    events.EventRecorderLogger
 	gpuTopology bool
 	hasSyncFunc func(ctx context.Context) bool
 }
@@ -113,7 +114,7 @@ var (
 )
 
 func New(kubeClient kubernetes.Interface, factory informers.SharedInformerFactory,
-	recorder record.EventRecorder, serialFilterNode bool, gpuTopology bool) (*gpuFilter, error) {
+	recorder events.EventRecorderLogger, serialFilterNode bool, gpuTopology bool) (*gpuFilter, error) {
 	podInformer := factory.Core().V1().Pods().Informer()
 	nodeInformer := factory.Core().V1().Nodes().Informer()
 	if err := podInformer.AddIndexers(podIndexers); err != nil {
@@ -246,8 +247,8 @@ func (f *gpuFilter) filter(ctx context.Context, args extenderv1.ExtenderArgs, mo
 			// topology inside one server still apply.
 			req.CrossPodTopology = false
 			if !mode.isDryRun() && f.recorder != nil {
-				f.recorder.Eventf(req.Pod, corev1.EventTypeWarning, reason.EventTopologyFallback,
-					"Remote access mode does not support cross pod topology")
+				f.recorder.Eventf(req.Pod, nil, corev1.EventTypeWarning, reason.EventTopologyFallback,
+					"Filtering", "Remote access mode does not support cross pod topology")
 			}
 		}
 		consumers = remoteConsumerNodes(filteredNodes, nodeReasons)
@@ -313,7 +314,7 @@ func (f *gpuFilter) filter(ctx context.Context, args extenderv1.ExtenderArgs, mo
 				msg += " Remote GPU servers: " + r.Detail
 			}
 		}
-		f.recorder.Event(args.Pod, corev1.EventTypeWarning, reason.EventFilteringFailed, msg)
+		f.recorder.Eventf(args.Pod, nil, corev1.EventTypeWarning, reason.EventFilteringFailed, "Filtering", "%s", msg)
 		klog.V(2).InfoS("FilteringFailed", "pod", klog.KObj(args.Pod),
 			"totalCandidates", totalCandidates, "failedReasons", failureBreakdown(nodeReasons))
 	}
@@ -347,7 +348,17 @@ func remoteConsumerNodes(nodes []corev1.Node, failed map[string]*reason.FilterRe
 // cache: a dry run (the Cluster Autoscaler simulating an upscale) asks about
 // nodes that do not exist yet, and those may be the servers.
 func (f *gpuFilter) remoteServerNodes(req *allocator.AllocationRequest, nodes []corev1.Node) ([]corev1.Node, error) {
-	list, err := f.nodeLister.List(labels.SelectorFromSet(labels.Set{util.NodeRemoteServerLabel: "true"}))
+	remoteSelector := labels.SelectorFromSet(labels.Set{util.NodeRemoteServerLabel: "true"})
+	if selVal, _ := util.HasAnnotation(req.Pod, util.NodeRemoteSelectorsAnnotation); selVal != "" {
+		path := field.NewPath("metadata", "annotations").Key(util.NodeRemoteSelectorsAnnotation)
+		requirements, err := labels.ParseToRequirements(selVal, field.WithPath(path))
+		if err != nil {
+			return nil, err
+		}
+		// Add returns the combined selector, it does not mutate the receiver.
+		remoteSelector = remoteSelector.Add(requirements...)
+	}
+	list, err := f.nodeLister.List(remoteSelector)
 	if err != nil {
 		return nil, err
 	}
@@ -362,6 +373,11 @@ func (f *gpuFilter) remoteServerNodes(req *allocator.AllocationRequest, nodes []
 	for _, node := range nodes {
 		if nodeKeys.Has(node.Name) {
 			// Already taken from the cache, which is the fresher copy.
+			continue
+		}
+		// The candidates bypass the cache, so the pod's own selector is
+		// applied to them here instead of by the lister.
+		if !remoteSelector.Matches(labels.Set(node.Labels)) {
 			continue
 		}
 		if util.IsRemoteServerNode(&node) && serverInService(req.Pod, &node) {
@@ -701,7 +717,7 @@ func CheckNode(node *corev1.Node, checkNodeFuncs ...CheckNodeFunc) *reason.Filte
 // GPU registered, bad config, wrong memory scaling for the requested
 // policy). Per-node reasons feed both kube-scheduler's FailedNodesMap
 // (via Short()) and vgpu-manager's own aggregate FilteringFailed event.
-func (f *gpuFilter) nodeFilter(ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
+func (f *gpuFilter) nodeFilter(_ context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
 	var (
 		filteredNodes    = make([]corev1.Node, 0, len(nodes))
 		failed           = make(map[string]*reason.FilterReason, len(nodes))
@@ -761,7 +777,7 @@ func (f *gpuFilter) CheckDeviceRequest(req *allocator.AllocationRequest, mode fi
 		for _, checkFn := range checkFuncs {
 			if err := checkFn(container); err != nil {
 				if !mode.isDryRun() {
-					f.recorder.Event(req.Pod, corev1.EventTypeWarning, reason.EventResourceInvalid, err.Error())
+					f.recorder.Eventf(req.Pod, nil, corev1.EventTypeWarning, reason.EventResourceInvalid, "Filtering", "%s", err.Error())
 				}
 				return err
 			}
@@ -891,7 +907,7 @@ func majorityKey(votes map[string]int) string {
 }
 
 func (f *gpuFilter) preFilterNodeInfos(
-	ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState,
+	_ context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState,
 ) ([]*allocator.NodeInfo, map[string]int, map[string]*reason.FilterReason, error) {
 
 	nodePodsMap, err := f.podLister.NodeMapByIndexValue(IndexerKeyPodRequestVGPU, "true")
@@ -1194,10 +1210,9 @@ func (f *gpuFilter) deviceFilter(
 		}
 		// Attempt to allocate devices for pods on this node. A dry-run
 		// allocation is hypothetical, so it stays out of events and metrics.
-		alloc := allocator.NewAllocator(nodeInfo.NodeInfo, recorder)
-		if mode.isDryRun() {
-			alloc = allocator.NewSimulationAllocator(nodeInfo.NodeInfo)
-		}
+		alloc := allocator.NewAllocator(nodeInfo.NodeInfo,
+			allocator.WithEventRecorder(recorder),
+			allocator.WithSimulate(mode.isDryRun()))
 		newPod, rsn, err := alloc.Allocate(req)
 		if err != nil {
 			// Internal/programmer error (annotation encoding, accounting
@@ -1240,11 +1255,11 @@ func (f *gpuFilter) deviceFilter(
 			klog.V(2).InfoS("DryRun filter found feasible nodes", "pod",
 				klog.KObj(req.Pod), "feasibleNodes", len(filteredNodes), "failedNodes", len(failed))
 		} else if req.AccessMode == util.AccessModeRemote {
-			f.recorder.Eventf(req.Pod, corev1.EventTypeNormal, reason.EventFilteringSucceed,
-				"Successfully matched remote gpu node %q", filteredNodes[0].Name)
+			f.recorder.Eventf(req.Pod, nil, corev1.EventTypeNormal, reason.EventFilteringSucceed,
+				"Filtering", "Successfully matched remote gpu node %q", filteredNodes[0].Name)
 		} else {
-			f.recorder.Eventf(req.Pod, corev1.EventTypeNormal, reason.EventFilteringSucceed,
-				"Successfully matched node %q", filteredNodes[0].Name)
+			f.recorder.Eventf(req.Pod, nil, corev1.EventTypeNormal, reason.EventFilteringSucceed,
+				"Filtering", "Successfully matched node %q", filteredNodes[0].Name)
 		}
 	}
 	return filteredNodes, failed, nil
@@ -1261,16 +1276,20 @@ func (f *gpuFilter) sortNodeInfos(
 	var defaultSortPriority bool
 	switch req.NodePolicy {
 	case util.BinpackPolicy, util.SpreadPolicy:
-		klog.V(4).InfoS("Pod node scheduling policy", "pod", klog.KObj(req.Pod), "policy", req.NodePolicy, "dryRun", mode.isDryRun())
+		klog.V(4).InfoS("Pod node scheduling policy", "pod",
+			klog.KObj(req.Pod), "policy", req.NodePolicy, "dryRun", mode.isDryRun())
 		allocator.NewNodePolicyPriority(*req).Sort(nodeInfoList)
 	case util.NonePolicy:
-		klog.V(4).InfoS("Pod node scheduling policy", "pod", klog.KObj(req.Pod), "policy", req.NodePolicy, "dryRun", mode.isDryRun())
+		klog.V(4).InfoS("Pod node scheduling policy", "pod",
+			klog.KObj(req.Pod), "policy", req.NodePolicy, "dryRun", mode.isDryRun())
 		defaultSortPriority = true
 	default:
-		klog.V(4).InfoS("Pod not supported node scheduling policy", "pod", klog.KObj(req.Pod), "policy", req.NodePolicy, "dryRun", mode.isDryRun())
+		klog.V(4).InfoS("Pod not supported node scheduling policy", "pod",
+			klog.KObj(req.Pod), "policy", req.NodePolicy, "dryRun", mode.isDryRun())
 		defaultSortPriority = true
 		if !mode.isDryRun() {
-			f.recorder.Eventf(req.Pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported node scheduling policy %q", req.NodePolicy)
+			f.recorder.Eventf(req.Pod, nil, corev1.EventTypeWarning, reason.EventPolicyInvalid,
+				"Filtering", "unsupported node scheduling policy %q", req.NodePolicy)
 		}
 	}
 	if defaultSortPriority {

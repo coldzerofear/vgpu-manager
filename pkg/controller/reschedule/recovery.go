@@ -149,18 +149,27 @@ func (r *recoveryController) processNextItem() bool {
 	return true
 }
 
-var (
-	removedLabels = []string{
+// The key sets below are built per call instead of being cached in package
+// variables: the global domain is applied from --domain in main, long after
+// package variables are initialised, so cached keys would keep the default
+// domain forever.
+func removedLabels() []string {
+	return []string{
 		util.PodAssignedPhaseLabel, util.PodMetricsNodeLabel,
 	}
-	removedAnnotations = []string{
+}
+
+func removedAnnotations() []string {
+	return []string{
 		util.PodVGPUPreAllocAnnotation, util.PodVGPURealAllocAnnotation,
 		util.PodPredicateNodeAnnotation, util.PodPredicateTimeAnnotation,
 	}
-	removedDRAAnnotations = []string{
-		util.DRAOriResAnnotation,
-	}
-)
+}
+
+// removedDRAAnnotations uses a fixed domain, so --domain does not apply to it.
+var removedDRAAnnotations = []string{
+	util.DRAOriResAnnotation,
+}
 
 func CleanupDRAMetadata(obj metav1.Object) {
 	for _, anno := range removedDRAAnnotations {
@@ -172,14 +181,14 @@ func CleanupDRAMetadata(obj metav1.Object) {
 
 // CleanupMetadata Clean up metadata that affects scheduling and allocation.
 func CleanupMetadata(obj metav1.Object) {
-	for _, label := range removedLabels {
+	for _, label := range removedLabels() {
 		if _, ok := util.HasLabel(obj, label); ok {
 			delete(obj.GetLabels(), label)
 		}
 	}
-	for _, anno := range removedAnnotations {
+	for _, anno := range removedAnnotations() {
 		if _, ok := util.HasAnnotation(obj, anno); ok {
-			delete(obj.GetLabels(), anno)
+			delete(obj.GetAnnotations(), anno)
 		}
 	}
 }

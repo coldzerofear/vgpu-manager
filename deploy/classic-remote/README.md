@@ -15,7 +15,8 @@ CUDA 调用经 lupine 数据面落到 GPU 服务器节点的卡上。集群**不
 | `vgpu-manager-remote-gpu-server.yaml` | remote-agent + lupine-server + device-monitor（一个 DaemonSet 三容器） | GPU 节点（`vgpu-manager=remote-server`） | 会话物化/回收 + EnsureSession/FetchClientBundle gRPC(:14834)、远程 GPU 数据面(:14833)、指标(:3456，远程容器按会话 PID 归账) |
 | `vgpu-manager-deviceplugin-server.yaml` | device-plugin `--remote-server` | GPU 节点（同上标签） | 发布节点设备注册、`remote-server` 角色标签与 `remote-endpoints` 注解、注册 `vgpu-number`；**拒绝一切 Allocate**（本地 Pod 不该来这里） |
 | `vgpu-manager-deviceplugin-consumer.yaml` | device-plugin `--remote-consumer` | 消费节点（`vgpu-manager=remote-consumer`） | 注册 `vgpu-number` 槽位、发布 `remote-consumer` 标签；Allocate 时建会话、备客户端 shim、注入环境与挂载 |
-| `vgpu-manager-webhook.yaml` | device-webhook | 控制面 | 校验 `vgpu-access-mode` 注解等准入规则（需 cert-manager） |
+| `vgpu-manager-remote-gpu-server-networkpolicy.yaml` | NetworkPolicy（可选） | GPU 节点的服务端 Pod | 只在 `hostNetwork: false` **且**命名空间有 default-deny 时才需要，见"按域名寻址"末尾 |
+| `vgpu-manager-webhook.yaml` | device-webhook | 控制面 | 校验 `vgpu-access-mode` 注解与远程 Pod 的 DNS 策略；按节点名给 DaemonSet Pod 生成稳定 hostname（`/pods/hostname`，见"按域名寻址"）。需 cert-manager |
 
 一个进程同时承担两种角色也是支持的：GPU 节点想顺带消费自己的卡，就给同一个 DaemonSet 加上
 `--remote-server --remote-consumer`（此时 `vgpu-number` 数量取 `max(本地槽位, --remote-consumer-number)`），
@@ -30,6 +31,7 @@ CUDA 调用经 lupine 数据面落到 GPU 服务器节点的卡上。集群**不
 | `vgpu-manager=remote-server` / `vgpu-manager=remote-consumer` | **运维手动打** | 本目录各 DaemonSet 的 `nodeSelector` |
 | `nvidia.com/remote-server=true` | 服务者插件发布、退出时删；本地插件会清掉残留 | 调度器识别 GPU 服务器；同时让本地 Pod 避开该节点 |
 | `nvidia.com/remote-consumer=true` | 消费者插件发布、退出时删；本地插件会清掉残留 | 调度器识别可运行远程 Pod 的节点（还要求 `vgpu-number` 可分配 > 0） |
+| `vgpu-manager.io/node-hostname=true`（Pod 模板标签） | **运维在清单里打开**（默认注释） | 让 webhook 按节点名生成 `spec.hostname` 并注入 `HOSTNAME`，见"按域名寻址" |
 | `nvidia.com/remote-endpoints`（注解） | 服务者插件发布、每 5s 刷新、退出时删；本地插件会清掉残留 | agent / lupine-server 地址与服务器 CUDA 版本；服务不可用时发布 `{}`，调度器随即跳过该节点 |
 
 **不要**把 `nvidia.com/remote-*` 当 DaemonSet 的 `nodeSelector`：它们由插件自己发布，插件没起来时并不存在。
@@ -48,7 +50,9 @@ kubectl apply -f vgpu-manager-scheduler.yaml          # 已部署 classic-local 
 kubectl apply -f vgpu-manager-remote-gpu-server.yaml
 kubectl apply -f vgpu-manager-deviceplugin-server.yaml
 kubectl apply -f vgpu-manager-deviceplugin-consumer.yaml
-kubectl apply -f vgpu-manager-webhook.yaml            # 可选，需 cert-manager；已部署过则跳过
+kubectl apply -f vgpu-manager-remote-gpu-server-networkpolicy.yaml   # 仅 hostNetwork=false + default-deny 命名空间需要
+kubectl apply -f vgpu-manager-webhook.yaml            # 需 cert-manager。即使已装过 classic-local 的那份也要用本文件：
+                                                      # 它多了 /pods/hostname 入口与 Pod 校验入口（classic-local 只有变更入口）
 
 # 3. 校验
 kubectl get node <gpu-node> -o jsonpath='{.metadata.labels.nvidia\.com/remote-server}{"\n"}{.metadata.annotations.nvidia\.com/remote-endpoints}{"\n"}'
@@ -69,6 +73,7 @@ metadata:
   namespace: default
   annotations:
     nvidia.com/vgpu-access-mode: remote   # ← 唯一的远程开关（缺省 local）
+    #nvidia.com/remote-selectors: "zone=a,gpu-model in (a100,h100)"   # 可选：限定可用的服务器节点（标签选择器语法）
 spec:
   schedulerName: vgpu-scheduler
   terminationGracePeriodSeconds: 0
@@ -86,6 +91,79 @@ spec:
 容器里 `nvidia-smi` 看到的是远程会话视图（新版 client 制品自带 `nvidia-smi`，插件会只读挂到
 `/usr/bin/nvidia-smi`）；`LUPINE_SERVER` / `LUPINE_SESSION` 由插件注入，不要自己写。
 
+## 按域名寻址（集群禁止 hostNetwork 时）
+
+默认形态是 `hostNetwork: true`：节点 IP 天生稳定，数据面也不经 CNI 封装。但如果集群策略
+禁止 hostNetwork（PSS `baseline` 连 hostPort 一起禁），服务端 Pod 每次重建都会换 IP，而
+**`LUPINE_SERVER` 是在 `Allocate` 时烧进容器环境的、容器重启不会重新注入**——于是所有连着
+旧 IP 的远程容器都恢复不了，只能删 Pod 重新调度。
+
+解决办法是给每个节点的服务端 Pod 一个稳定域名（headless Service + 按节点名生成的 hostname）：
+
+```
+<spec.hostname>.<headless svc>.<namespace>.svc.<cluster domain>
+```
+
+DaemonSet 自己做不到这件事：它只有一份 Pod 模板，而 `spec.hostname` 不支持字段引用。所以由
+webhook 在准入时按目标节点名生成——依次从 `spec.nodeName`、`spec.affinity.nodeAffinity` 的
+`matchFields[metadata.name]`（DaemonSet 控制器写的就是这个）、`spec.nodeSelector` 里取节点名。
+
+**切换步骤**（都在 `vgpu-manager-remote-gpu-server.yaml` 里，按注释打开）：
+
+1. 部署**本目录的** webhook（多了 `/pods/hostname` 入口；classic-local 那份没有，也没有校验入口）；
+2. Pod 模板标签打开 `vgpu-manager.io/node-hostname: "true"`；
+3. `hostNetwork: false`、`dnsPolicy: ClusterFirst`、`subdomain: vgpu-manager-remote-gpu-server-headless`；
+4. remote-agent 打开 `POD_NAMESPACE` / `HEADLESS_SERVICE_NAME` / `CLUSTER_DOMAIN` /
+   `ADVERTISE_SERVER_ENDPOINT` / `ADVERTISE_AGENT_ENDPOINT` 这一组环境变量。
+
+几个要点：
+
+- **节点名 → hostname 的转换**：节点名是 DNS *subdomain*（可带点、最长 253），而 `spec.hostname`
+  必须是 DNS *label*（不带点、最长 63）。需要改写时（含大写、下划线、点、超长）会追加节点名的
+  sha256 前 8 位，因为改写不是一对一的：没有这个后缀，`a.b` 与 `a-b` 会撞成同一个域名，
+  客户端可能被解析到**另一台** GPU 服务器上。
+- **`publishNotReadyAddresses: true`**（headless Service 上）：记录只要 Pod 有 IP 就存在。否则
+  Pod 就绪与否（三个容器全 Ready 才算）会牵动 DNS，monitor 探针抖一下整台服务器就解析不出来，
+  而重建期间的 NXDOMAIN 还会被 CoreDNS 否定缓存住（默认 30s）。服务端健康与否由
+  `remote-endpoints` 注解（探测失败发 `{}`）告诉调度器，不靠 DNS 表达。
+- **两个 ADVERTISE 都要开**：只开 server 那条时，agent 自己的 endpoint 仍是 Pod IP——设备插件
+  每 5s 刷新注解，所以 Pod 重建后要等一轮才恢复，窗口内的 `Allocate` 会 EnsureSession 失败。
+- **`failurePolicy: Fail`（`/pods/hostname` 入口）是刻意的**：`spec.hostname` 创建后不可改，
+  webhook 缺席时创建出来的 Pod 是永久坏的；拒绝创建让 DaemonSet 控制器过几秒重试即可自愈。
+  另一层保险：webhook 没生效时 `$(HOSTNAME)` 会原样保留，agent 解析 endpoint 失败直接退出，
+  不会带着错地址上线。
+- **消费侧必须能解析集群 DNS**：默认 `ClusterFirst` 即可；`hostNetwork: true` 的业务 Pod 必须写
+  `dnsPolicy: ClusterFirstWithHostNet`。校验 webhook 会拒绝 `access-mode: remote` 且
+  `dnsPolicy: Default`、或 `hostNetwork` + `ClusterFirst` 的 Pod；`dnsPolicy: None` 要求自带
+  `dnsConfig.nameservers`（它是否解析集群域由运维负责）。
+- **代价**：数据面改走 CNI，overlay 封装与 MTU 会吃掉一部分 H2D/D2H 带宽；能用 hostNetwork 时
+  仍然推荐 hostNetwork。另外要放通消费 Pod → 服务端 Pod 的 14833/14834（NetworkPolicy）。
+- headless Service 在 hostNetwork 模式下也可以照常部署：那时记录解析到节点 IP，同一套寻址的
+  另一种落地，两种模式可以统一用域名下发。
+
+### 网络策略（default-deny 命名空间才需要）
+
+换到 Pod 网络之后，流量才受 NetworkPolicy 管（hostNetwork 的 Pod 不走 Pod 网络，策略对它不生效）。
+`vgpu-manager-remote-gpu-server-networkpolicy.yaml` 给出服务端**入站**的最小集合：
+
+| 端口 | 来源 | 说明 |
+|---|---|---|
+| 14833 | **所有命名空间的 Pod** | 远程 Pod 里的 client shim 直连数据面；远程负载是任意命名空间的业务 Pod，只在固定几个命名空间跑时可收紧 |
+| 14834 | 消费者插件（按 app 标签，跨命名空间） | EnsureSession / ReleaseSessions / FetchClientBundle |
+| 3456 | 监控组件 | 注释掉的，按你的监控所在命名空间打开 |
+
+注意三点：
+
+- **没有 default-deny 时不要部署它**：没有任何策略选中服务端 Pod 时本来就是全通的，部署它是**收紧**
+  而不是放行，先确认上面的入站集合对你的集群是完整的；
+- **只声明了 Ingress**：出站要放行 API server（agent 与 monitor 的 informer）与 DNS，地址随集群而变，
+  猜错会让 agent 静默失去 Pod/Node 事件；文件末尾给了出站模板，`ipBlock` 需要自己填（注意要填
+  API server 的**端点地址**，不是 `kubernetes` 服务的 ClusterIP——策略在 DNAT 之前生效）；
+- **kubelet 探针来自节点而不是 Pod**：NetworkPolicy 里只能用 `ipBlock` 表达。Calico / Cilium 默认放行
+  host → 本机 Pod，通常不必加；部署后探针开始失败就把节点网段填进文件里注释好的那一条。
+  消费侧插件若被改成 hostNetwork 部署，源地址同样是节点 IP，14834 也要这样放行。
+- 策略由 CNI 执行，Flannel 这类不带策略插件的 CNI 会直接忽略（部署了也不会有任何效果）。
+
 ## 需要自行修改的部署参数
 
 | 参数 | 位置 | 默认/占位值 | 说明 |
@@ -96,12 +174,13 @@ spec:
 | **消费槽位数** | `vgpu-manager-deviceplugin-consumer.yaml` `--remote-consumer-number` | `1000` | 本节点同时能跑多少个远程 vGPU（上报为 `vgpu-number`）。纯 CPU 节点给足够大的虚数即可，真正的容量约束在服务器侧 |
 | **切分参数** | `vgpu-manager-deviceplugin-server.yaml` `--device-split-count` / `--device-memory-scaling` / `--device-cores-scaling` + ConfigMap `nodeConfig.json` | 10 / 1 / 1 | 与本地路径含义相同，作用在服务器节点的卡上；ConfigMap 按节点名覆盖（示例里的 `gpu-node-a` 要改成真节点名） |
 | **cgroup driver** | 两个设备插件的 `CGROUP_DRIVER` | `auto` | 探测顺序：kubelet 配置 → kubeadm flags → kubelet 进程 → cgroup 布局；探测失败会退出，此时显式写 `systemd` / `cgroupfs`（消费者 DaemonSet 也因此挂了 `kubelet-root` 与 `cgroup-root`，显式指定后可去掉） |
-| **服务端 endpoint** | `remote-gpu-server.yaml`：`LUPINE_PORT` + agent 的 `REMOTE_SERVER_ENDPOINT`（探测地址，默认 `:14833` 即 127.0.0.1）；可选 `ADVERTISE_SERVER_ENDPOINT`（运维指定的对外地址，URL 形态） | `:14833` | 对外地址由 agent 自动发现（探测地址是回环时，在本机地址里找一个 server 同样应答的，优先节点 InternalIP），经服务者插件发布成节点注解；改端口只改这两处 |
-| **agent endpoint** | `remote-gpu-server.yaml` `LISTEN_SERVER_ENDPOINT`；`deviceplugin-server.yaml` `--remote-agent-endpoint` | `grpc://:14834` + `unix:///etc/vgpu-manager/agent.sock` | 消费节点按注解里的 `agentEndpoint` 调 agent（不用配）；同节点的服务者插件走 unix 套接字。两处要一致 |
+| **服务端端口** | `remote-gpu-server.yaml` 的 `LUPINE_PORT`（agent 与 lupine-server 两个容器各有一份，改端口两处一起改） | `14833` | agent 的 `REMOTE_SERVER_ENDPOINT` 与 `ADVERTISE_SERVER_ENDPOINT`、lupine-server 的监听端口都从它展开（`$(LUPINE_PORT)`）。对外地址由 agent 自动发现（探测地址是回环时，在本机地址里找一个 server 同样应答的，优先节点 InternalIP），经服务者插件发布成节点注解；`ADVERTISE_SERVER_ENDPOINT` 则跳过发现、直接发布运维指定的地址 |
+| **agent 端口** | `remote-gpu-server.yaml` 的 `LISTEN_PORT`（`LISTEN_SERVER_ENDPOINT` 与 `ADVERTISE_AGENT_ENDPOINT` 都从它展开）；同节点的服务者插件走 `deviceplugin-server.yaml` 的 `--remote-agent-endpoint`（unix 套接字，与 `LISTEN_SERVER_ENDPOINT` 里的路径一致） | `14834` | 消费节点按注解里的 `agentEndpoint` 调 agent，不用配。unix 套接字只供同节点组件，不会被发布 |
 | **会话归属** | `remote-gpu-server.yaml` `SESSION_OWNER` | `pod` | 经典路径 = `pod`；DRA 路径 = `claim`；`auto` = 两种都服务（DRA 与设备插件混布时用，集群没有 DRA API 时只打日志跳过 claim，并需要放开该文件 RBAC 里注释的 `resource.k8s.io` 权限） |
 | **SM watcher** | `deviceplugin-server.yaml` 与 `remote-gpu-server.yaml`（agent、monitor）三处 `FEATURE_GATES` / `--feature-gates` | 均开启 | 联动开关：**设备插件是写方**（节点级 SM 采样写到 `/etc/vgpu-manager/watcher/sm_util.config`），agent 把会话标记为使用它，monitor 读它。关就三处一起关 |
 | **monitor 端口** | `remote-gpu-server.yaml` `--server-bind-port` | `3456` | hostNetwork，与节点上其他进程冲突时改（Service targetPort 联动） |
 | **客户端 etag 校验** | `deviceplugin-consumer.yaml` `IGNORE_CLIENT_SHIM_ETAG` 注释块 | 关闭（即校验） | 打开后不注入 `LUPINE_CLIENT_ETAG`/`LUPINE_CLIENT_PLATFORM`，服务端无法校验 client 构建，不匹配会延后成运行时错误 |
+| **稳定域名** | `vgpu-manager-remote-gpu-server.yaml` 的 node-hostname 标签 / `subdomain` / `ADVERTISE_*`（默认注释） | 关闭（用 hostNetwork） | 见上一节"按域名寻址"；`CLUSTER_DOMAIN` 按集群的 `--cluster-domain` 改 |
 | **命名空间** | 全部文件 | `kube-system` | 整体替换时注意 webhook 证书 dnsNames 联动 |
 | **资源域名** | 各组件 `--domain`（未设 = `nvidia.com`） | `nvidia.com` | 改它会同时改掉资源名与所有注解/标签前缀，所有组件必须一起改 |
 

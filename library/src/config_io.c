@@ -40,12 +40,15 @@ extern int file_exist(const char *file_path);
 extern int ofd_fcntl(int fd, int wait, struct flock *fl);
 int mmap_file_to_config_path(resource_data_t** data) {
   int ret = 1;
-  if (unlikely(file_exist(CONTROLLER_CONFIG_FILE_PATH) != 0)) {
-    return ret;
-  }
+  /* No file_exist() pre-check: it only duplicated what open already reports,
+   * and the gap between the two was a time-of-check/time-of-use window. */
   int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_RDONLY | O_CLOEXEC);
   if (unlikely(fd == -1)) {
-    LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
+    /* An absent config is the ordinary "not configured" case and was silent
+     * while file_exist() screened it out. Only a real error gets logged. */
+    if (errno != ENOENT) {
+      LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
+    }
     return ret;
   }
   /* Read-lock byte 0 so we never validate a file a concurrent writer is
@@ -105,7 +108,12 @@ int write_file_to_config_path(resource_data_t* data) {
    * mode the parent chain is <base>/<session>/config, which is deeper and not
    * rooted at VGPU_MANAGER_PATH. */
   if (unlikely(file_exist(VGPU_CONFIG_PATH) != 0)) {
-    session_mkdir_p(VGPU_CONFIG_PATH);
+    /* Reached only when the directory was absent, so this widens one we
+     * just made -- not the plugin's mount, and not a session root (those go
+     * through session_make_dirs on the GPU server, under one uid). */
+    if (session_mkdir_p(VGPU_CONFIG_PATH) == 0) {
+      relax_shared_dir_mode(VGPU_CONFIG_PATH);
+    }
   }
   /* Deliberately not O_TRUNC: truncation must happen after the write lock is
    * held, not at open() time, or a concurrent peer/reader races the empty
@@ -115,6 +123,8 @@ int write_file_to_config_path(resource_data_t* data) {
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     return ret;
   }
+  /* Best effort, after the guard: the fd is usable either way. */
+  relax_shared_file_mode(fd, CONTROLLER_CONFIG_FILE_PATH);
   /* Serialise concurrent creators on byte 0 of the header (the same byte
    * readers F_RDLCK). A dead writer's lock releases automatically on close. */
   struct flock fl;

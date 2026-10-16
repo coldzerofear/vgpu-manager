@@ -20,20 +20,25 @@ import (
 	"context"
 	"time"
 
-	client2 "github.com/coldzerofear/vgpu-manager/pkg/client"
+	pkgcli "github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/controller"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/types"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrc "sigs.k8s.io/controller-runtime/pkg/controller"
 	ctrm "sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/recorder"
 )
 
 const Name string = "Reschedule"
@@ -41,7 +46,7 @@ const Name string = "Reschedule"
 type RescheduleController struct {
 	nodeName string
 	client   client.Client
-	eviction client2.Eviction
+	eviction pkgcli.Eviction
 	recovery *recoveryController
 	recorder events.EventRecorder
 }
@@ -53,9 +58,37 @@ func init() {
 	controller.RegisterController(Name, NewRescheduleController)
 }
 
+func NewEventRecorderAdapter(recorder record.EventRecorder) recorder.EventRecorder {
+	return &eventRecorderAdapter{recorder: recorder}
+}
+
+type eventRecorderAdapter struct {
+	recorder record.EventRecorder
+}
+
+var _ recorder.EventRecorder = &eventRecorderAdapter{}
+
+func (a *eventRecorderAdapter) Eventf(regarding runtime.Object, _ runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
+	a.recorder.Eventf(regarding, eventtype, reason, note, args...)
+}
+
+func (a *eventRecorderAdapter) AnnotatedEventf(regarding runtime.Object, _ runtime.Object, annotations map[string]string, eventtype, reason, action, note string, args ...interface{}) {
+	a.recorder.AnnotatedEventf(regarding, annotations, eventtype, reason, note, args...)
+}
+
 func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfigSpec) (controller.Controller, error) {
-	recorder := manager.GetEventRecorder("re-schedule")
-	recovery, err := newRecoveryController(manager.GetClient(), recorder)
+	var eventRecorder recorder.EventRecorder
+	// The manager's own recorder writes to events.k8s.io. A cluster that does
+	// not serve that group has to be given the core/v1 recorder instead, which
+	// is the deprecated one: being deprecated is what makes it the fallback,
+	// not a reason to avoid it here.
+	if _, err := manager.GetClient().RESTMapper().ResourceFor(eventsv1.SchemeGroupVersion.WithResource("events")); err == nil {
+		eventRecorder = manager.GetEventRecorder("re-schedule")
+	} else {
+		//nolint:staticcheck // SA1019: the legacy recorder is the point of this branch.
+		eventRecorder = NewEventRecorderAdapter(manager.GetEventRecorderFor("re-schedule"))
+	}
+	recovery, err := newRecoveryController(manager.GetClient(), eventRecorder)
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +96,7 @@ func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfigSpec) 
 	if err != nil {
 		return nil, err
 	}
-	eviction, err := client2.NewEviction(kubeClient, config.GetNodeName())
+	eviction, err := pkgcli.NewEviction(kubeClient, config.GetNodeName())
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +104,7 @@ func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfigSpec) 
 		nodeName: config.GetNodeName(),
 		client:   manager.GetClient(),
 		eviction: eviction,
-		recorder: recorder,
+		recorder: eventRecorder,
 		recovery: recovery,
 	}, nil
 }
@@ -141,7 +174,13 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 }
 
 func (r *RescheduleController) RegisterToManager(manager ctrm.Manager) error {
-	err := builder.ControllerManagedBy(manager).For(&corev1.Pod{}).Named(Name).Complete(r)
+	err := builder.ControllerManagedBy(manager).
+		Named(Name).For(&corev1.Pod{}).
+		WithOptions(ctrc.Options{
+			NeedLeaderElection: new(false),
+			UsePriorityQueue:   new(true),
+		}).
+		Complete(r)
 	if err == nil {
 		err = manager.Add(r.recovery)
 	}

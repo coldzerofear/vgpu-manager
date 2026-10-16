@@ -1,0 +1,86 @@
+# The checks that need a real CUDA toolkit, which pull a multi-gigabyte image
+# and so are not worth a pull request's wait.
+#
+# Chiefly check_struct_layout.py: it compares the CUDA struct copies in
+# library/include/cuda-subset.h against the real <cuda.h>, which is how silent
+# ABI drift gets caught when NVIDIA extends a struct in a new CUDA release.
+# Without a toolkit that check SKIPs, so in CI it is reported as passing while
+# testing nothing - here it actually runs.
+name: Nightly CUDA checks
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The image has to come from versions.mk. It was pinned here instead, with a
+  # comment saying to keep the two in step by hand, and they went out of step
+  # in the very commit that moved the build to Rocky 8 - so this job kept
+  # pulling an Ubuntu 20.04 image whose apt repositories are gone, and every
+  # scheduled run since was cancelled at `apt-get update` on the 60 minute
+  # timeout. A container image cannot be computed inside the job that uses it,
+  # hence two jobs.
+  image:
+    name: Resolve the CUDA image
+    runs-on: ubuntu-24.04
+    outputs:
+      name: ${{ steps.resolve.outputs.name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Read CUDA_BASE_IMAGE
+        id: resolve
+        run: |
+          set -euo pipefail
+          name="$(make print-CUDA_BASE_IMAGE 2>/dev/null)"
+          case "${name}" in
+            nvidia/cuda:*) ;;
+            *) echo "versions.mk gave no usable image: '${name}'" >&2; exit 1 ;;
+          esac
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "CUDA image: ${name}"
+
+  cuda-checks:
+    name: Library checks against a CUDA toolkit
+    needs: [image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: ${{ needs.image.outputs.name }}
+    steps:
+      - name: Install build dependencies
+        # Rocky 8: dnf, and the same package set library/Dockerfile installs to
+        # build there. python3.12 because the hack/ scripts need 3.8 or newer
+        # and the image's python3 is 3.6; the Makefile picks whichever exists.
+        run: |
+          set -euo pipefail
+          dnf install -y --setopt=install_weak_deps=False \
+            make cmake gcc-c++ git binutils python3.12
+          dnf clean all
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+      - name: Static checks, struct layout included
+        run: make -C library check
+      - name: ABI signature classification
+        # Needs a real <cuda.h> (plus cudaGL.h / cudaVDPAU.h beside it), so it
+        # can only run here. --strict because the tables are complete: every
+        # versioned family is classified and every wrapper binds its own ABI,
+        # and anything new should stop the build rather than be reported into
+        # a log nobody reads.
+        run: make -C library check-abi-signatures ARGS=--strict
+      - name: Full build, CUDA-linked tools included
+        run: make -C library build-tests
+      - name: GPU-less tests
+        # They need no GPU, but running them here too proves the CUDA build of
+        # the same sources behaves.
+        run: make -C library test-nogpu
+      - name: Exported symbol surface
+        run: make -C library check-exports

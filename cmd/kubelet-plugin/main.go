@@ -61,6 +61,13 @@ func newApp() *cli.App {
 
 	cliFlags := []cli.Flag{
 		&cli.StringFlag{
+			Name:        "domain",
+			Usage:       "Set global domain name to replace all resource and annotation domains.",
+			Value:       util.NvidiaDomain,
+			Destination: &flags.Domain,
+			EnvVars:     []string{"DOMAIN"},
+		},
+		&cli.StringFlag{
 			Name:        "node-name",
 			Usage:       "The name of the node to be worked on.",
 			Required:    true,
@@ -70,7 +77,7 @@ func newApp() *cli.App {
 		&cli.StringFlag{
 			Name:        "cdi-root",
 			Usage:       "Absolute path to the directory where CDI files will be generated.",
-			Value:       "/etc/cdi",
+			Value:       util.CDIRoot,
 			Destination: &flags.CdiRoot,
 			EnvVars:     []string{"CDI_ROOT"},
 		},
@@ -188,6 +195,13 @@ func newApp() *cli.App {
 			Value:       100,
 			Destination: &flags.DeviceMemoryRatio,
 			EnvVars:     []string{"DEVICE_MEMORY_RATIO"},
+		},
+		&cli.UintFlag{
+			Name:        "device-memory-override",
+			Usage:       "Memory size (MiB) to use for GPUs that cannot report one, i.e. unified-memory parts such as GB10 where NVML has no device memory to query. 0 disables it.",
+			Value:       0,
+			Destination: &flags.DeviceMemoryOverride,
+			EnvVars:     []string{"DEVICE_MEMORY_OVERRIDE"},
 		},
 		&cli.StringFlag{
 			Name:        "nri-root",
@@ -371,6 +385,7 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 	}
 
 	if featuregates.Enabled(featuregates.VGPUSupport) {
+		util.MustInitGlobalDomain(flags.Domain)
 		if flags.HostManagerDir == "" {
 			return fmt.Errorf("--host-manager-dir is required when feature gate %s is enabled", featuregates.VGPUSupport)
 		}
@@ -382,6 +397,14 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 		}
 		if flags.DeviceMemoryRatio <= 0 {
 			return fmt.Errorf("invalid --device-memory-ratio %d: must be greater than or equal to 0", flags.DeviceCoresRatio)
+		}
+		if flags.DeviceMemoryOverride > 0 && flags.DeviceMemoryRatio > util.HundredCore {
+			// The override is only ever used for a GPU that shares one physical pool
+			// with the CPU, where it is a bookkeeping ceiling and not a physical one:
+			// overselling it hands out memory the host also needs and takes the node
+			// down instead of failing an allocation.
+			return fmt.Errorf("--device-memory-ratio must be %d when --device-memory-override is set: "+
+				"a unified-memory device shares its memory with the host and cannot be oversold", util.HundredCore)
 		}
 	}
 

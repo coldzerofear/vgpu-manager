@@ -27,16 +27,13 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes/scheme"
+	fake2 "k8s.io/client-go/kubernetes/fake"
 	kcache "k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestGetDeviceRequestsForPodClaim_LiveFallbackAndMutationCache(t *testing.T) {
 	ctx := context.Background()
-	testScheme := newTestScheme(t)
 
 	claim := &resourceapi.ResourceClaim{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "claim-a"},
@@ -45,8 +42,8 @@ func TestGetDeviceRequestsForPodClaim_LiveFallbackAndMutationCache(t *testing.T)
 		},
 	}
 
-	liveClient := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(claim).Build()
-	reader := NewResourceAPIReader(liveClient, newIndexer(), newIndexer(), newIndexer(), newIndexer(), time.Minute)
+	k8sClient := fake2.NewSimpleClientset(claim)
+	reader := NewResourceAPIReader(k8sClient, newIndexer(), newIndexer(), newIndexer(), newIndexer(), time.Minute)
 
 	podClaim := &corev1.PodResourceClaim{Name: "pc-a", ResourceClaimName: ptr.To("claim-a")}
 
@@ -55,7 +52,7 @@ func TestGetDeviceRequestsForPodClaim_LiveFallbackAndMutationCache(t *testing.T)
 	require.Len(t, requests, 1)
 	assert.Equal(t, "req-a", requests[0].Name)
 
-	require.NoError(t, liveClient.Delete(ctx, claim))
+	require.NoError(t, k8sClient.ResourceV1().ResourceClaims(claim.Namespace).Delete(ctx, claim.Name, metav1.DeleteOptions{}))
 
 	requests, err = reader.GetDeviceRequestsForPodClaim(ctx, "default", podClaim)
 	require.NoError(t, err)
@@ -65,7 +62,6 @@ func TestGetDeviceRequestsForPodClaim_LiveFallbackAndMutationCache(t *testing.T)
 
 func TestGetDeviceRequestsForPodClaim_TemplatePath(t *testing.T) {
 	ctx := context.Background()
-	testScheme := newTestScheme(t)
 
 	tpl := &resourceapi.ResourceClaimTemplate{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "tpl-a"},
@@ -76,8 +72,8 @@ func TestGetDeviceRequestsForPodClaim_TemplatePath(t *testing.T) {
 		},
 	}
 
-	cachedClient := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(tpl).Build()
-	reader := NewResourceAPIReader(cachedClient, newIndexer(), newIndexer(), newIndexer(), newIndexer(), time.Minute)
+	k8sClient := fake2.NewSimpleClientset(tpl)
+	reader := NewResourceAPIReader(k8sClient, newIndexer(), newIndexer(), newIndexer(), newIndexer(), time.Minute)
 
 	podClaim := &corev1.PodResourceClaim{Name: "pc-a", ResourceClaimTemplateName: ptr.To("tpl-a")}
 	requests, err := reader.GetDeviceRequestsForPodClaim(ctx, "default", podClaim)
@@ -94,14 +90,6 @@ func TestGetDeviceRequestsForPodClaim_NotFoundWhenNoClients(t *testing.T) {
 	_, err := reader.GetDeviceRequestsForPodClaim(ctx, "default", podClaim)
 	require.Error(t, err)
 	assert.True(t, apierrors.IsNotFound(err))
-}
-
-func newTestScheme(t *testing.T) *runtime.Scheme {
-	t.Helper()
-	testScheme := runtime.NewScheme()
-	require.NoError(t, scheme.AddToScheme(testScheme))
-	require.NoError(t, resourceapi.AddToScheme(testScheme))
-	return testScheme
 }
 
 func newIndexer() kcache.Indexer {

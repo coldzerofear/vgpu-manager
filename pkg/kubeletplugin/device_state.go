@@ -139,8 +139,8 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	devRoot := containerDriverRoot.GetDevRoot()
 	klog.Infof("Using devRoot=%v", devRoot)
 
-	hostRoot := nvidia.RootPath(config.Flags.HostRoot)
-	nvdevlib, err := newDeviceLib(containerDriverRoot, hostRoot)
+	nvdevlib, err := newDeviceLib(containerDriverRoot, config.Flags.HostRoot,
+		int(config.Flags.DeviceMemoryOverride))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
 	}
@@ -170,9 +170,8 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		WithCDIRoot(config.Flags.CdiRoot),
 		WithLogger(cdilogger),
 	}
-	var vfioCDIHandler *vfioCDIHandler
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		vfioCDIHandler, err = NewVfioCDIHandler(nvdevlib)
+	if featuregates.Enabled(featuregates.PassthroughSupport) && nvdevlib.IsVfioEnabled() {
+		vfioCDIHandler, err := NewVfioCDIHandler(nvdevlib)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create vfio CDI handler: %w", err)
 		}
@@ -209,11 +208,8 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	//	mpsManager = NewMpsManager(config, nvdevlib, hostDriverRoot, MpsControlDaemonTemplatePath)
 	//}
 
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		vfioPciManager, err = NewVfioPciManager(string(containerDriverRoot), string(hostDriverRoot), nvdevlib, true /* nvidiaEnabled */)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create vfio pci manager: %w", err)
-		}
+	if featuregates.Enabled(featuregates.PassthroughSupport) && nvdevlib.IsVfioEnabled() {
+		vfioPciManager = NewVfioPciManager(string(containerDriverRoot), hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
 	}
 
 	fmManager, err := newFabricManager(nvdevlib, containerDriverRoot)
@@ -390,7 +386,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	if exists && preparedClaim.CheckpointState == ClaimCheckpointStatePrepareStarted {
 		klog.V(4).Infof("Claim %s already in PrepareStarted state: attempt rollback before new prepare", ResourceClaimToString(claim))
 		if err := s.rollbackPartiallyPreparedClaim(ctx, claimUID, preparedClaim, checkpoint); err != nil {
-			return nil, fmt.Errorf("rollback failed for partially prepared claim %s failed: %w", PreparedClaimToString(&preparedClaim, claimUID), err)
+			return nil, fmt.Errorf("failed to roll back partially prepared claim %s: %w", PreparedClaimToString(&preparedClaim, claimUID), err)
 		}
 	}
 
@@ -413,10 +409,11 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	preparedDevices, err := s.prepareDevices(ctx, claim, checkpoint)
 	klog.V(6).Infof("t_prep_core %.3f s (claim %s)", time.Since(tprep0).Seconds(), ResourceClaimToString(claim))
 	if err != nil {
-		return nil, fmt.Errorf("prepare devices failed: %w", err)
+		return nil, fmt.Errorf("failed to prepare devices: %w", err)
 	}
 
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	// TODO: Remove this once partitionable device support is introduced for vfio devices.
+	if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 		for _, device := range preparedDevices.GetDevices() {
 			allocatableDevice := s.perGPUAllocatable.GetAllocatableDevice(device.DeviceName)
 			if allocatableDevice == nil {
@@ -551,7 +548,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 
 	checkpoint, err := s.getCheckpoint(ctx)
 	if err != nil {
-		return false, fmt.Errorf("unable to get checkpoint: %v", err)
+		return false, fmt.Errorf("failed to get checkpoint: %w", err)
 	}
 
 	claimUID := string(claimRef.UID)
@@ -569,19 +566,19 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 	switch pc.CheckpointState {
 	case ClaimCheckpointStatePrepareStarted:
 		if err := s.unpreparePartiallyPreparedClaim(ctx, claimUID, pc, checkpoint); err != nil {
-			return false, fmt.Errorf("unprepare failed for partially prepared claim %s failed: %w", claimRef.String(), err)
+			return false, fmt.Errorf("failed to unprepare partially prepared claim %s: %w", claimRef.String(), err)
 		}
 	case ClaimCheckpointStatePrepareCompleted:
 		taintRemoved, err = s.unprepareDevices(ctx, claimRef, pc.PreparedDevices, checkpoint)
 		if err != nil {
-			return false, fmt.Errorf("unprepare devices failed for claim %s: %w", claimRef.String(), err)
+			return false, fmt.Errorf("failed to unprepare devices for claim %s: %w", claimRef.String(), err)
 		}
 	default:
 		return false, fmt.Errorf("unsupported ClaimCheckpointState: %v", pc.CheckpointState)
 	}
 
 	// TODO: Remove this once partitionable device support is introduced for vfio devices.
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 		for _, device := range pc.PreparedDevices.GetDevices() {
 			allocatableDevice := s.perGPUAllocatable.GetAllocatableDevice(device.DeviceName)
 			if allocatableDevice == nil {
@@ -660,7 +657,7 @@ func (s *DeviceState) rollbackPartiallyPreparedClaim(ctx context.Context, cuid s
 
 			err := s.rollbackPartiallyPreparedMIGDevices(ctx, cuid, pc, checkpoint)
 			if err != nil {
-				return fmt.Errorf("rollback partially prepared MIG devices failed: %w", err)
+				return fmt.Errorf("failed to roll back partially prepared MIG devices: %w", err)
 			}
 		}
 	}
@@ -686,20 +683,20 @@ func (s *DeviceState) unpreparePartiallyPreparedClaim(ctx context.Context, cuid 
 
 			err := s.rollbackPartiallyPreparedMIGDevices(ctx, cuid, pc, checkpoint)
 			if err != nil {
-				return fmt.Errorf("rollback partially prepared MIG devices failed: %w", err)
+				return fmt.Errorf("failed to roll back partially prepared MIG devices: %w", err)
 			}
 		}
 	}
 
-	// Attempt rollback of VFIO devices if PassthroughSupport is enabled.
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	// Attempt rollback of VFIO devices if passthrough is available on this node.
+	if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 		vfioDevices := allocDevsForClaim.GetVfioDevices()
 		if len(vfioDevices) > 0 {
 			klog.V(2).Infof("unprepare: VFIO rollback for partially prepared claim %s (devices: %d)", PreparedClaimToString(&pc, cuid), len(vfioDevices))
 
 			err := s.rollbackPartiallyPreparedVFIODevices(ctx, vfioDevices)
 			if err != nil {
-				return fmt.Errorf("rollback partially prepared VFIO devices failed: %w", err)
+				return fmt.Errorf("failed to roll back partially prepared VFIO devices: %w", err)
 			}
 		}
 	}
@@ -790,6 +787,9 @@ func (s *DeviceState) rollbackPartiallyPreparedMIGDevices(ctx context.Context, c
 	}
 
 	for _, r := range pc.Status.Allocation.Devices.Results {
+		if r.Driver != util.DRADriverName {
+			continue
+		}
 		devname := r.Device
 		ms, err := NewMigSpecTupleFromCanonicalName(devname)
 		if err != nil {
@@ -802,7 +802,7 @@ func (s *DeviceState) rollbackPartiallyPreparedMIGDevices(ctx context.Context, c
 
 		klog.V(1).Infof("Device %s is a MIG device, DynamicMIG mode: deleteMigDevIfExistsAndNotUsedByCompletedClaim()", devname)
 		if err := s.deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms, devname, completedClaims); err != nil {
-			return fmt.Errorf("deleteMigDevIfExistsAndNotUsedByCompletedClaim failed: %w", err)
+			return fmt.Errorf("failed to delete unused MIG device %s (deleteMigDevIfExistsAndNotUsedByCompletedClaim): %w", devname, err)
 		}
 	}
 
@@ -1058,7 +1058,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		return nil, err
 	}
 
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 		vfioGroups := 0
 		for c := range configResultsMap {
 			if _, ok := c.(*configapi.VfioDeviceConfig); ok {
@@ -1335,7 +1335,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplug
 	var vGpuDevices PreparedDeviceList
 	for _, group := range devices {
 		// Unconfigure the vfio-pci devices.
-		if featuregates.Enabled(featuregates.PassthroughSupport) {
+		if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 			err := s.unprepareVfioDevices(ctx, group.Devices.VfioDevices())
 			if err != nil {
 				return false, err
@@ -1453,7 +1453,7 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) error {
 	switch device.Type() {
 	case GpuDeviceType:
-		if !device.Gpu.vfioEnabled {
+		if !featuregates.Enabled(featuregates.PassthroughSupport) || !s.nvdevlib.IsVfioEnabled() || !device.Gpu.vfioEnabled {
 			return nil
 		}
 		vfioAllocatable, err := s.nvdevlib.discoverVfioDevice(device.Gpu)
@@ -1504,6 +1504,9 @@ func (s *DeviceState) applyConfig(ctx context.Context, config configapi.Interfac
 		return s.applySharingConfig(ctx, castConfig.Sharing, claim, results, cp)
 	case *configapi.VfioDeviceConfig:
 		klog.V(7).Infof("applySharingConfig() for VfioDeviceConfig")
+		if !featuregates.Enabled(featuregates.PassthroughSupport) || !s.nvdevlib.IsVfioEnabled() {
+			return nil, errors.New("VFIO is unavailable on this node")
+		}
 		return s.applyVfioDeviceConfig(ctx, castConfig, claim, results)
 	default:
 		return nil, fmt.Errorf("unknown config type: %T", castConfig)
@@ -1660,7 +1663,7 @@ func (s *DeviceState) gpuInfosFromPreparedClaim(results []resourceapi.DeviceRequ
 		case VfioDeviceType:
 			gpus = append(gpus, device.Vfio.parent)
 		default:
-			klog.V(6).Infof("device %q has unsupported type %q; skipping for fabric partition", r.Device, device.Type())
+			klog.Warningf("device %q has unsupported type %q; skipping for fabric partition", r.Device, device.Type())
 		}
 	}
 	return gpus
@@ -1812,7 +1815,7 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 	}
 	partitionID, err := s.resolveFabricPartition(gpus)
 	if err != nil {
-		return fmt.Errorf("%v; refusing partition activation", err)
+		return fmt.Errorf("failed to resolve fabric partition activation: %w", err)
 	}
 	// ActivatePartition is idempotent: a retried Prepare (e.g. after a later
 	// step failed) that hits an already-active partition is a no-op rather than
@@ -2210,7 +2213,7 @@ func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpec
 	klog.V(1).Infof("Device '%s' is not in use by any completely prepared claim, find corresponding actual MIG device", dname)
 	mlt, err := s.nvdevlib.FindMigDevBySpec(ms)
 	if err != nil {
-		return fmt.Errorf("FindMigDevBySpecTuple() failed for %s: %s", dname, err)
+		return fmt.Errorf("failed to find MIG device %s (FindMigDevBySpec): %w", dname, err)
 	}
 
 	if mlt == nil {
@@ -2220,7 +2223,7 @@ func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpec
 
 	klog.V(1).Infof("MIG device corresponding to name %s found with UUID %s -- attempt to tear down", dname, mlt.MigUUID)
 	if err := s.nvdevlib.deleteMigDevice(mlt); err != nil {
-		return fmt.Errorf("MIG device deletion failed: %w", err)
+		return fmt.Errorf("failed to delete MIG device %s (deleteMigDevice): %w", dname, err)
 	}
 
 	return nil

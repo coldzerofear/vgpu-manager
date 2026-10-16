@@ -9,7 +9,7 @@ fullnameOverride: ""
 imagePullSecrets: []
 
 # Set up the image repository for vgpu-manager
-image: coldzerofear/vgpu-manager
+image: ghcr.io/coldzerofear/vgpu-manager
 # Overrides the image tag whose default is the chart appVersion.
 imageTag: ""
 imagePullPolicy: IfNotPresent
@@ -39,6 +39,13 @@ scheduler:
       effect: NoSchedule
     - key: CriticalAddonsOnly
       operator: Exists
+  # Rolling upgrade of components, and keeping at least one component running during
+  # the upgrade period without causing service interruption during the upgrade period.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   terminationGracePeriodSeconds: 30
   # HTTP timeout time for device extension scheduler, unit: seconds
   extenderHTTPTimeout: 30
@@ -172,6 +179,12 @@ devicePlugin:
   managerRoot: "/etc/vgpu-manager"
   # Cgroup driver for container environment, default program automatic detection (Supported values: systemd | cgroupfs)
   cgroupDriver: "auto"
+  # Memory size (MiB) to use for GPUs that cannot report one: a unified-memory
+  # part such as GB10 / DGX Spark, where NVML has no device memory to query and
+  # nvidia-smi shows "Memory-Usage: Not Supported". Applies only to those
+  # devices, and deviceMemoryScaling must stay 1 when it is set (a pool shared
+  # with the host cannot be oversold). 0 disables it.
+  deviceMemoryOverride: 0
   # Driver root for CDI spec generation. Only needed when the NVIDIA driver is NOT
   # installed directly on the host (e.g. the GPU-Operator driver container). Leave
   # empty (or "/") for the host-installed-driver case — nothing extra is mounted.
@@ -190,6 +203,12 @@ devicePlugin:
     securityContext:
       privileged: true
       runAsUser: 0
+  # Rollout strategy for the DaemonSet. As with the NVIDIA DRA driver, a node-critical GPU
+  # driver is rolled out with maxUnavailable 100% so all nodes update at once.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "100%"
   devicePlugin:
     env:
       - name: DP_ENABLE_HEALTHCHECKS
@@ -310,6 +329,9 @@ devicePlugin:
          deviceListStrategy: envvar
          deviceSplitCount: 5
          deviceMemoryScaling: 1
+         # Only for GPUs that cannot report their own size (unified memory, e.g. GB10).
+         # MiB; 0 disables. deviceMemoryScaling must stay 1 when it is set.
+         deviceMemoryOverride: 0
          deviceMemoryFactor: 1
          deviceCoresScaling: 1
          excludeDevices: "4..7"
@@ -324,6 +346,7 @@ devicePlugin:
 #          "deviceListStrategy": "envvar",
 #          "deviceSplitCount": 5,
 #          "deviceMemoryScaling": 1,
+#          "deviceMemoryOverride": 0,
 #          "deviceMemoryFactor": 1,
 #          "deviceCoresScaling": 1,
 #          "excludeDevices": "4-7",
@@ -368,6 +391,13 @@ webhook:
       effect: NoSchedule
     - key: CriticalAddonsOnly
       operator: Exists
+  # Rolling upgrade of components, and keeping at least one component running during
+  # the upgrade period without causing service interruption during the upgrade period.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   # Webhook will not be effective for resources under these namespaces.
   excludeNamespaces:
     - kube-system
