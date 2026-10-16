@@ -162,7 +162,7 @@ func TestVGpuAllocationMemoryEnvNeverRequestsZeroBytes(t *testing.T) {
 			prefix := fmt.Sprintf("%s_0=", util.CudaMemoryLimitEnv)
 			var got string
 			var found bool
-			for _, env := range edits.ContainerEdits.Env {
+			for _, env := range edits.Env {
 				assert.NotEqual(t, prefix+"0m", env, "a zero-byte quota is never a valid limit")
 				if strings.HasPrefix(env, prefix) {
 					got, found = strings.TrimPrefix(env, prefix), true
