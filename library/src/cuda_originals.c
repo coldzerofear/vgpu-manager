@@ -227,17 +227,8 @@ CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod,
 
 CUresult _cuModuleGetGlobal(CUdeviceptr *dptr, size_t *bytes, CUmodule hmod,
                            const char *name) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuModuleGetGlobal_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuModuleGetGlobal_v2,
-                           dptr, bytes, hmod, name);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuModuleGetGlobal))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuModuleGetGlobal,
-                           dptr, bytes, hmod, name);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuModuleGetGlobal_v2,
+                                 dptr, bytes, hmod, name);
 }
 
 CUresult cuModuleGetGlobal_v2(CUdeviceptr *dptr, size_t *bytes, CUmodule hmod,
@@ -312,17 +303,8 @@ CUresult cuLinkDestroy(CUlinkState state) {
 }
 
 CUresult _cuMemGetAddressRange(CUdeviceptr *pbase, size_t *psize, CUdeviceptr dptr) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetAddressRange_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetAddressRange_v2,
-                           pbase, psize, dptr);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetAddressRange))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetAddressRange,
-                           pbase, psize, dptr);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuMemGetAddressRange_v2,
+                                 pbase, psize, dptr);
 }
 
 CUresult cuMemGetAddressRange_v2(CUdeviceptr *pbase, size_t *psize, CUdeviceptr dptr) {
@@ -338,17 +320,8 @@ CUresult cuMemFreeHost(void *p) {
 }
 
 CUresult _cuMemHostGetDevicePointer(CUdeviceptr *pdptr, void *p, unsigned int Flags) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemHostGetDevicePointer_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry,  cuMemHostGetDevicePointer_v2,
-                           pdptr, p, Flags);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemHostGetDevicePointer))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemHostGetDevicePointer,
-                           pdptr, p, Flags);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuMemHostGetDevicePointer_v2,
+                                 pdptr, p, Flags);
 }
 
 CUresult cuMemHostGetDevicePointer_v2(CUdeviceptr *pdptr, void *p, unsigned int Flags) {
@@ -435,16 +408,8 @@ CUresult cuMemcpyHtoD_v2_ptds(CUdeviceptr dstDevice, const void *srcHost,
 }
 
 CUresult _cuMemcpyHtoD(CUdeviceptr dstDevice, const void *srcHost, size_t ByteCount) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyHtoD_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyHtoD_v2),
-                           dstDevice, srcHost, ByteCount);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyHtoD))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyHtoD, dstDevice, srcHost, ByteCount);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyHtoD_v2),
+                                 dstDevice, srcHost, ByteCount);
 }
 
 CUresult cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void *srcHost, size_t ByteCount) {
@@ -463,17 +428,8 @@ CUresult cuMemcpyHtoDAsync_v2_ptsz(CUdeviceptr dstDevice, const void *srcHost,
 
 CUresult _cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void *srcHost,
                            size_t ByteCount, CUstream hStream) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyHtoDAsync_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyHtoDAsync_v2),
-                           dstDevice, srcHost, ByteCount, hStream);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyHtoDAsync))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyHtoDAsync,
-                           dstDevice, srcHost, ByteCount, hStream);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyHtoDAsync_v2),
+                                 dstDevice, srcHost, ByteCount, hStream);
 }
 
 CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost,
@@ -493,17 +449,8 @@ CUresult cuMemcpyDtoH_v2_ptds(void *dstHost, CUdeviceptr srcDevice,
 }
 
 CUresult _cuMemcpyDtoH(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoH_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoH_v2),
-                                       dstHost, srcDevice, ByteCount);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyDtoH))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoH, dstHost,
-                                                srcDevice, ByteCount);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoH_v2),
+                                 dstHost, srcDevice, ByteCount);
 }
 
 
@@ -523,17 +470,8 @@ CUresult cuMemcpyDtoHAsync_v2_ptsz(void *dstHost, CUdeviceptr srcDevice,
 
 CUresult _cuMemcpyDtoHAsync(void *dstHost, CUdeviceptr srcDevice,
                            size_t ByteCount, CUstream hStream) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyDtoHAsync_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyDtoHAsync_v2), dstHost,
-                                              srcDevice, ByteCount, hStream);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyDtoHAsync))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoHAsync, dstHost,
-                                              srcDevice, ByteCount, hStream);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyDtoHAsync_v2),
+                                 dstHost, srcDevice, ByteCount, hStream);
 }
 
 CUresult cuMemcpyDtoHAsync_v2(void *dstHost, CUdeviceptr srcDevice,
@@ -554,17 +492,8 @@ CUresult cuMemcpyDtoD_v2_ptds(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
 
 CUresult _cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
                       size_t ByteCount) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoD_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoD_v2),
-                           dstDevice, srcDevice, ByteCount);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyDtoD))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoD,
-                           dstDevice, srcDevice, ByteCount);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoD_v2),
+                                 dstDevice, srcDevice, ByteCount);
 }
 
 
@@ -586,17 +515,8 @@ CUresult cuMemcpyDtoDAsync_v2_ptsz(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
 
 CUresult _cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
                            size_t ByteCount, CUstream hStream) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyDtoDAsync_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyDtoDAsync_v2),
-                                  dstDevice, srcDevice, ByteCount, hStream);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyDtoDAsync))){
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoDAsync, dstDevice,
-                                             srcDevice, ByteCount, hStream);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyDtoDAsync_v2),
+                                 dstDevice, srcDevice, ByteCount, hStream);
 }
 
 CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
@@ -615,15 +535,8 @@ CUresult cuMemcpy2DUnaligned_v2_ptds(const CUDA_MEMCPY2D *pCopy) {
 }
 
 CUresult _cuMemcpy2DUnaligned(const CUDA_MEMCPY2D *pCopy) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy2DUnaligned_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy2DUnaligned_v2), pCopy);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpy2DUnaligned))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy2DUnaligned, pCopy);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy2DUnaligned_v2),
+                                 pCopy);
 }
 
 CUresult cuMemcpy2DUnaligned_v2(const CUDA_MEMCPY2D *pCopy) {
@@ -640,15 +553,8 @@ CUresult cuMemcpy2DAsync_v2_ptsz(const CUDA_MEMCPY2D *pCopy, CUstream hStream) {
 }
 
 CUresult _cuMemcpy2DAsync(const CUDA_MEMCPY2D *pCopy, CUstream hStream) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpy2DAsync_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpy2DAsync_v2), pCopy, hStream);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpy2DAsync))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy2DAsync, pCopy, hStream);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpy2DAsync_v2),
+                                 pCopy, hStream);
 }
 
 CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *pCopy, CUstream hStream) {
@@ -664,15 +570,8 @@ CUresult cuMemcpy3D_v2_ptds(const CUDA_MEMCPY3D *pCopy) {
 }
 
 CUresult _cuMemcpy3D(const CUDA_MEMCPY3D *pCopy) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy3D_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy3D_v2), pCopy);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpy3D))){
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy3D, pCopy);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy3D_v2),
+                                 pCopy);
 }
 
 CUresult cuMemcpy3D_v2(const CUDA_MEMCPY3D *pCopy) {
@@ -689,15 +588,8 @@ CUresult cuMemcpy3DAsync_v2_ptsz(const CUDA_MEMCPY3D *pCopy, CUstream hStream) {
 }
 
 CUresult _cuMemcpy3DAsync(const CUDA_MEMCPY3D *pCopy, CUstream hStream) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpy3DAsync_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpy3DAsync_v2), pCopy, hStream);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpy3DAsync))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy3DAsync, pCopy, hStream);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpy3DAsync_v2),
+                                 pCopy, hStream);
 }
 
 
@@ -734,15 +626,8 @@ CUresult cuMemsetD8_v2_ptds(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
 }
 
 CUresult _cuMemsetD8(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD8_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD8_v2), dstDevice, uc, N);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemsetD8))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemsetD8, dstDevice, uc, N);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD8_v2),
+                                 dstDevice, uc, N);
 }
 
 CUresult cuMemsetD8_v2(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
@@ -773,17 +658,8 @@ CUresult cuMemsetD2D8_v2_ptds(CUdeviceptr dstDevice, size_t dstPitch,
 
 CUresult _cuMemsetD2D8(CUdeviceptr dstDevice, size_t dstPitch,
                        unsigned char uc, size_t Width, size_t Height) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD2D8_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD2D8_v2),
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD2D8_v2),
                                  dstDevice, dstPitch, uc, Width, Height);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemsetD2D8))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemsetD2D8, dstDevice,
-                                            dstPitch, uc, Width, Height);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
 }
 
 
@@ -829,17 +705,8 @@ CUresult cuFuncGetAttribute(int *pi, CUfunction_attribute attrib,
 
 CUresult _cuArrayGetDescriptor(CUDA_ARRAY_DESCRIPTOR *pArrayDescriptor,
                               CUarray hArray) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayGetDescriptor_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry,cuArrayGetDescriptor_v2,
-                                            pArrayDescriptor, hArray);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayGetDescriptor))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArrayGetDescriptor,
-                                            pArrayDescriptor, hArray);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuArrayGetDescriptor_v2,
+                                 pArrayDescriptor, hArray);
 }
 
 CUresult cuArrayGetDescriptor_v2(CUDA_ARRAY_DESCRIPTOR *pArrayDescriptor,
@@ -854,17 +721,8 @@ CUresult cuArrayGetDescriptor(CUDA_ARRAY_DESCRIPTOR *pArrayDescriptor,
 
 CUresult _cuArray3DGetDescriptor(CUDA_ARRAY3D_DESCRIPTOR *pArrayDescriptor,
                                 CUarray hArray) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DGetDescriptor_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry,cuArray3DGetDescriptor_v2,
-                                              pArrayDescriptor, hArray);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DGetDescriptor))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArray3DGetDescriptor,
-                                              pArrayDescriptor, hArray);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuArray3DGetDescriptor_v2,
+                                 pArrayDescriptor, hArray);
 }
 
 
@@ -917,17 +775,8 @@ CUresult cuTexRefSetMipmappedArray(CUtexref hTexRef,
 
 CUresult _cuTexRefSetAddress(size_t *ByteOffset, CUtexref hTexRef,
                              CUdeviceptr dptr, size_t bytes) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuTexRefSetAddress_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry,cuTexRefSetAddress_v2,
-                                  ByteOffset, hTexRef, dptr, bytes);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuTexRefSetAddress))){
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuTexRefSetAddress, ByteOffset,
-                                                hTexRef, dptr, bytes);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuTexRefSetAddress_v2,
+                                 ByteOffset, hTexRef, dptr, bytes);
 }
 
 
@@ -945,17 +794,14 @@ CUresult _cuTexRefSetAddress2D(CUtexref hTexRef,
                               const CUDA_ARRAY_DESCRIPTOR *desc,
                               CUdeviceptr dptr, size_t Pitch) {
   CUresult ret;
+  /* _v3 and _v2 both take the 64-bit form; the unversioned entry takes the
+   * pre-CUDA-4.0 one and is no longer reachable at this project's baseline. */
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuTexRefSetAddress2D_v3))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuTexRefSetAddress2D_v3,
                                         hTexRef, desc, dptr, Pitch);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuTexRefSetAddress2D_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuTexRefSetAddress2D_v2, 
-                                        hTexRef, desc, dptr, Pitch);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuTexRefSetAddress2D))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuTexRefSetAddress2D, 
-                                        hTexRef, desc, dptr, Pitch);
   } else {
-    ret = CUDA_ERROR_NOT_FOUND;
+    ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuTexRefSetAddress2D_v2,
+                                        hTexRef, desc, dptr, Pitch);
   }
   return ret;
 }
@@ -1494,17 +1340,8 @@ CUresult cuGLMapBufferObject_v2_ptds(CUdeviceptr *dptr, size_t *size,
 }
 
 CUresult _cuGLMapBufferObject(CUdeviceptr *dptr, size_t *size, GLuint buffer) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuGLMapBufferObject_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuGLMapBufferObject_v2),
-                           dptr, size, buffer);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGLMapBufferObject))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGLMapBufferObject,
-                           dptr, size, buffer);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuGLMapBufferObject_v2),
+                                 dptr, size, buffer);
 }
 
 CUresult cuGLMapBufferObject_v2(CUdeviceptr *dptr, size_t *size, GLuint buffer) {
@@ -1523,16 +1360,8 @@ CUresult cuGLMapBufferObjectAsync_v2_ptsz(CUdeviceptr *dptr, size_t *size,
 
 CUresult _cuGLMapBufferObjectAsync(CUdeviceptr *dptr, size_t *size,
                                    GLuint buffer, CUstream hStream) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuGLMapBufferObjectAsync_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuGLMapBufferObjectAsync_v2), dptr,
-                                               size, buffer, hStream);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGLMapBufferObjectAsync))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGLMapBufferObjectAsync, dptr, size, buffer, hStream);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuGLMapBufferObjectAsync_v2),
+                                 dptr, size, buffer, hStream);
 }
 
 CUresult cuGLMapBufferObjectAsync_v2(CUdeviceptr *dptr, size_t *size,
@@ -1644,17 +1473,8 @@ CUresult cuGraphicsResourceGetMappedMipmappedArray(CUmipmappedArray *pMipmappedA
 
 CUresult _cuGraphicsResourceGetMappedPointer(CUdeviceptr *pDevPtr, size_t *pSize,
                                             CUgraphicsResource resource) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphicsResourceGetMappedPointer_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphicsResourceGetMappedPointer_v2,
-                                                         pDevPtr, pSize, resource);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphicsResourceGetMappedPointer))){
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphicsResourceGetMappedPointer,
-                                                         pDevPtr, pSize, resource);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuGraphicsResourceGetMappedPointer_v2,
+                                 pDevPtr, pSize, resource);
 }
 
 CUresult cuGraphicsResourceGetMappedPointer_v2(CUdeviceptr *pDevPtr, size_t *pSize,
@@ -2032,15 +1852,8 @@ CUresult cuGraphicsResourceGetMappedEglFrame(CUeglFrame *eglFrame,
 //}
 
 CUresult _cuMemAllocHost(void **pp, size_t bytesize) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocHost_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocHost_v2, pp, bytesize);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocHost))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocHost, pp, bytesize);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuMemAllocHost_v2,
+                                 pp, bytesize);
 }
 
 
@@ -2053,15 +1866,8 @@ CUresult cuMemAllocHost(void **pp, size_t bytesize) {
 }
 
 CUresult _cuMemcpy2D(const CUDA_MEMCPY2D *pCopy) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy2D_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy2D_v2), pCopy);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpy2D))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy2D, pCopy);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy2D_v2),
+                                 pCopy);
 }
 
 CUresult cuMemcpy2D_v2(const CUDA_MEMCPY2D *pCopy) {
@@ -2088,17 +1894,8 @@ CUresult cuMemcpyAtoA_v2_ptds(CUarray dstArray, size_t dstOffset,
 
 CUresult _cuMemcpyAtoA(CUarray dstArray, size_t dstOffset, CUarray srcArray,
                        size_t srcOffset, size_t ByteCount) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoA_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoA_v2), dstArray,
-                               dstOffset, srcArray, srcOffset, ByteCount);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyAtoA))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyAtoA, dstArray,
-                               dstOffset, srcArray, srcOffset, ByteCount);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoA_v2),
+                                 dstArray, dstOffset, srcArray, srcOffset, ByteCount);
 }
 
 
@@ -2114,17 +1911,8 @@ CUresult cuMemcpyAtoA(CUarray dstArray, size_t dstOffset, CUarray srcArray,
 
 CUresult _cuMemcpyAtoD(CUdeviceptr dstDevice, CUarray srcArray,
                       size_t srcOffset, size_t ByteCount) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoD_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoD_v2), dstDevice, srcArray,
-                                                   srcOffset, ByteCount);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyAtoD))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyAtoD, dstDevice, srcArray,
-                                                   srcOffset, ByteCount);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoD_v2),
+                                 dstDevice, srcArray, srcOffset, ByteCount);
 }
 
 CUresult cuMemcpyAtoD_v2(CUdeviceptr dstDevice, CUarray srcArray,
@@ -2152,17 +1940,8 @@ CUresult cuMemcpyAtoH_v2_ptds(void *dstHost, CUarray srcArray, size_t srcOffset,
 
 CUresult _cuMemcpyAtoH(void *dstHost, CUarray srcArray, size_t srcOffset,
                       size_t ByteCount) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoH_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoH_v2), dstHost, srcArray,
-                                                    srcOffset, ByteCount);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyAtoH))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyAtoH, dstHost, srcArray,
-                                                    srcOffset, ByteCount);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoH_v2),
+                                 dstHost, srcArray, srcOffset, ByteCount);
 }
 
 CUresult cuMemcpyAtoH_v2(void *dstHost, CUarray srcArray, size_t srcOffset,
@@ -2184,17 +1963,8 @@ CUresult cuMemcpyAtoHAsync_v2_ptsz(void *dstHost, CUarray srcArray,
 
 CUresult _cuMemcpyAtoHAsync(void *dstHost, CUarray srcArray, size_t srcOffset,
                            size_t ByteCount, CUstream hStream) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyAtoHAsync_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyAtoHAsync_v2), dstHost,
-                                     srcArray, srcOffset, ByteCount, hStream);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyAtoHAsync))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry,  cuMemcpyAtoHAsync, dstHost,
-                                   srcArray, srcOffset, ByteCount, hStream);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyAtoHAsync_v2),
+                                 dstHost, srcArray, srcOffset, ByteCount, hStream);
 }
 
 CUresult cuMemcpyAtoHAsync_v2(void *dstHost, CUarray srcArray, size_t srcOffset,
@@ -2215,17 +1985,8 @@ CUresult cuMemcpyDtoA_v2_ptds(CUarray dstArray, size_t dstOffset,
 
 CUresult _cuMemcpyDtoA(CUarray dstArray, size_t dstOffset, CUdeviceptr srcDevice,
                       size_t ByteCount) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoA_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoA_v2), dstArray,
-                                               dstOffset, srcDevice, ByteCount);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyDtoA))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoA, dstArray, dstOffset,
-                                                           srcDevice, ByteCount);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoA_v2),
+                                 dstArray, dstOffset, srcDevice, ByteCount);
 }
 
 CUresult cuMemcpyDtoA_v2(CUarray dstArray, size_t dstOffset,
@@ -2246,17 +2007,8 @@ CUresult cuMemcpyHtoA_v2_ptds(CUarray dstArray, size_t dstOffset,
 
 CUresult _cuMemcpyHtoA(CUarray dstArray, size_t dstOffset, const void *srcHost,
                       size_t ByteCount) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyHtoA_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyHtoA_v2), dstArray,
-                                            dstOffset, srcHost, ByteCount);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyHtoA))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyHtoA, dstArray, dstOffset,
-                                                       srcHost, ByteCount);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyHtoA_v2),
+                                 dstArray, dstOffset, srcHost, ByteCount);
 }
 
 
@@ -2280,17 +2032,8 @@ CUresult cuMemcpyHtoAAsync_v2_ptsz(CUarray dstArray, size_t dstOffset,
 CUresult _cuMemcpyHtoAAsync(CUarray dstArray, size_t dstOffset,
                            const void *srcHost, size_t ByteCount,
                            CUstream hStream) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyHtoAAsync_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyHtoAAsync_v2), dstArray,
-                                       dstOffset, srcHost, ByteCount, hStream);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyHtoAAsync))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyHtoAAsync, dstArray,
-                                    dstOffset, srcHost, ByteCount, hStream);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyHtoAAsync_v2),
+                                 dstArray, dstOffset, srcHost, ByteCount, hStream);
 }
 
 
@@ -2313,15 +2056,8 @@ CUresult cuMemsetD16_v2_ptds(CUdeviceptr dstDevice, unsigned short us,
 }
 
 CUresult _cuMemsetD16(CUdeviceptr dstDevice, unsigned short us, size_t N) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD16_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD16_v2), dstDevice, us, N);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemsetD16))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemsetD16, dstDevice, us, N);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD16_v2),
+                                 dstDevice, us, N);
 }
 
 CUresult cuMemsetD16_v2(CUdeviceptr dstDevice, unsigned short us, size_t N) {
@@ -2352,17 +2088,8 @@ CUresult cuMemsetD2D16_v2_ptds(CUdeviceptr dstDevice, size_t dstPitch,
 
 CUresult _cuMemsetD2D16(CUdeviceptr dstDevice, size_t dstPitch,
                        unsigned short us, size_t Width, size_t Height) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD2D16_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD2D16_v2), dstDevice,
-                                             dstPitch, us, Width, Height);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemsetD2D16))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemsetD2D16, dstDevice,
-                                             dstPitch, us, Width, Height);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD2D16_v2),
+                                 dstDevice, dstPitch, us, Width, Height);
 }
 
 CUresult cuMemsetD2D16_v2(CUdeviceptr dstDevice, size_t dstPitch,
@@ -2397,17 +2124,8 @@ CUresult cuMemsetD2D32_v2_ptds(CUdeviceptr dstDevice, size_t dstPitch,
 
 CUresult _cuMemsetD2D32(CUdeviceptr dstDevice, size_t dstPitch,
                        unsigned int ui, size_t Width, size_t Height) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD2D32_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD2D32_v2), dstDevice,
-                                               dstPitch, ui, Width, Height);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemsetD2D32))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemsetD2D32, dstDevice,
-                                               dstPitch, ui, Width, Height);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD2D32_v2),
+                                 dstDevice, dstPitch, ui, Width, Height);
 }
 
 CUresult cuMemsetD2D32_v2(CUdeviceptr dstDevice, size_t dstPitch,
@@ -2439,15 +2157,8 @@ CUresult cuMemsetD32_v2_ptds(CUdeviceptr dstDevice, unsigned int ui, size_t N) {
 }
 
 CUresult _cuMemsetD32(CUdeviceptr dstDevice, unsigned int ui, size_t N) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD32_v2)))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD32_v2), dstDevice, ui, N);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemsetD32))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemsetD32, dstDevice, ui, N);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTDS(cuMemsetD32_v2),
+                                 dstDevice, ui, N);
 }
 
 CUresult cuMemsetD32_v2(CUdeviceptr dstDevice, unsigned int ui, size_t N) {
@@ -2651,15 +2362,8 @@ CUresult cuSurfRefGetArray(CUarray *phArray, CUsurfref hSurfRef) {
 }
 
 CUresult _cuTexRefGetAddress(CUdeviceptr *pdptr, CUtexref hTexRef) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuTexRefGetAddress_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuTexRefGetAddress_v2, pdptr, hTexRef);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuTexRefGetAddress))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuTexRefGetAddress, pdptr, hTexRef);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuTexRefGetAddress_v2,
+                                 pdptr, hTexRef);
 }
 
 CUresult cuTexRefGetAddress_v2(CUdeviceptr *pdptr, CUtexref hTexRef) {
