@@ -128,6 +128,11 @@ extern "C" {
  * sharing the directory cannot open it O_RDWR. No wider than the directory
  * it sits in. */
 #define VGPU_SHARED_FILE_MODE 0666
+/* Mode for a directory the library creates itself, matching what EnsureDir
+ * gives the ones the plugin provides. Only reached when the plugin did not
+ * provide the mount, in which case the directory lives in the container's
+ * own filesystem and the same cross-uid argument applies to it. */
+#define VGPU_SHARED_DIR_MODE 0777
 
 /* Applies the mode above to a file this library just created. Declared here
  * rather than as a local extern in each of the three callers, since the mode
@@ -135,6 +140,7 @@ extern "C" {
 void relax_shared_file_mode(int fd, const char *file_path);
 void relax_shared_file_mode_once(int fd, const char *file_path,
                                  unsigned char *slot);
+void relax_shared_dir_mode(const char *dir_path);
 
 #define TMP_DIR "/tmp"
 

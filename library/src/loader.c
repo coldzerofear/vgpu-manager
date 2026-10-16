@@ -1608,7 +1608,10 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
   }
 
   if (unlikely(file_exist(VMEMORY_NODE_PATH) != 0)) {
-    mkdir(VMEMORY_NODE_PATH, 0755);
+    if (mkdir(VMEMORY_NODE_PATH, 0755) == 0) {
+      /* Only when we created it; the plugin's own mount is already 0777. */
+      relax_shared_dir_mode(VMEMORY_NODE_PATH);
+    }
   }
 
   /* Unconditional O_CREAT, no file_exist() pre-check -- checking first would
@@ -1727,7 +1730,10 @@ static void sm_node_rebuild_locked(sm_node_region_t *r) {
 
 int open_sm_node_lock(void) {
   if (unlikely(file_exist(SM_NODE_PATH) != 0)) {
-    mkdir(SM_NODE_PATH, 0755);
+    if (mkdir(SM_NODE_PATH, 0755) == 0) {
+      /* Only when we created it; the plugin's own mount is already 0777. */
+      relax_shared_dir_mode(SM_NODE_PATH);
+    }
   }
   /* Zero-length file: it carries no data, only byte-range locks (one byte per
    * device, so devices are independent). Never ftruncate'd -- fcntl ranges do
@@ -1772,7 +1778,10 @@ int map_sm_node_region(sm_node_region_t **data) {
   }
 
   if (unlikely(file_exist(SM_NODE_PATH) != 0)) {
-    mkdir(SM_NODE_PATH, 0755);
+    if (mkdir(SM_NODE_PATH, 0755) == 0) {
+      /* Only when we created it; the plugin's own mount is already 0777. */
+      relax_shared_dir_mode(SM_NODE_PATH);
+    }
   }
 
   /* open(O_CREAT) unconditionally, no file_exist() pre-check -- that check is

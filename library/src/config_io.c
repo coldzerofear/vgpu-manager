@@ -108,7 +108,12 @@ int write_file_to_config_path(resource_data_t* data) {
    * mode the parent chain is <base>/<session>/config, which is deeper and not
    * rooted at VGPU_MANAGER_PATH. */
   if (unlikely(file_exist(VGPU_CONFIG_PATH) != 0)) {
-    session_mkdir_p(VGPU_CONFIG_PATH);
+    /* Reached only when the directory was absent, so this widens one we
+     * just made -- not the plugin's mount, and not a session root (those go
+     * through session_make_dirs on the GPU server, under one uid). */
+    if (session_mkdir_p(VGPU_CONFIG_PATH) == 0) {
+      relax_shared_dir_mode(VGPU_CONFIG_PATH);
+    }
   }
   /* Deliberately not O_TRUNC: truncation must happen after the write lock is
    * held, not at open() time, or a concurrent peer/reader races the empty

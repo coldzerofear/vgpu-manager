@@ -26,6 +26,7 @@ limitations under the License.
 #include <errno.h>
 #include <sched.h>
 #include <sys/file.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <signal.h>
 #include <time.h>
@@ -882,6 +883,28 @@ void relax_shared_file_mode(int fd, const char *file_path) {
                     "this directory may be unable to open it read-write",
            file_path, strerror(errno));
   }
+}
+
+/* The directory counterpart, for the directories the library creates itself
+ * when the plugin did not provide the mount. Same best-effort contract.
+ *
+ * Opened and fchmod'ed rather than chmod'ed by path, with O_NOFOLLOW: these
+ * directories sit in world-writable parents, which is the one place a
+ * path-based chmod is the wrong tool -- a directory swapped for a symlink
+ * under us is refused outright instead of followed. */
+void relax_shared_dir_mode(const char *dir_path) {
+  int fd = open(dir_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) {
+    LOGGER(VERBOSE, "could not open %s to relax its mode: %s",
+           dir_path, strerror(errno));
+    return;
+  }
+  if (fchmod(fd, VGPU_SHARED_DIR_MODE) != 0) {
+    LOGGER(VERBOSE, "could not relax the mode of %s: %s -- another uid sharing "
+                    "it may be unable to create files in it",
+           dir_path, strerror(errno));
+  }
+  close(fd);
 }
 
 /* As relax_shared_file_mode(), but at most once per process for a given slot.

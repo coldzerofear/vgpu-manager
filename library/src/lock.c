@@ -159,7 +159,12 @@ static void backoff_spin(long *interval_us, int attempt, long elapsed_ms,
  * a mutex there would carry. Any other errno is left to surface naturally
  * from lock_gpu_device()'s own open() call below. */
 static void ensure_create_lock_dir(void) {
-  if (mkdir(VGPU_LOCK_PATH, 0755) == 0) return;
+  if (mkdir(VGPU_LOCK_PATH, 0755) == 0) {
+    /* Only on the branch that created it: an existing directory is either the
+     * plugin's (already 0777) or someone else's, and neither is ours to widen. */
+    relax_shared_dir_mode(VGPU_LOCK_PATH);
+    return;
+  }
   if (errno == EEXIST) return;
   /* fall through; lock_gpu_device's open() will surface the real error */
 }

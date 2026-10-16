@@ -1,4 +1,5 @@
-/* Checks for relax_shared_file_mode() in src/util.c.
+/* Checks for relax_shared_file_mode() and relax_shared_dir_mode() in
+ * src/util.c.
  *
  * The plugin creates the directories holding the library's shared state 0777
  * so that a workload running as any uid can populate them, but the library
@@ -121,10 +122,78 @@ static void test_failure_is_survivable(void) {
   CHECK(slot != 0, "a failed attempt still counts as attempted");
 }
 
+static void test_dir_widens_past_the_umask(void) {
+  char path[64];
+  snprintf(path, sizeof(path), "/tmp/vgpu_shared_dir_test_XXXXXX");
+  if (mkdtemp(path) == NULL) {
+    printf("SKIP: mkdtemp failed\n");
+    return;
+  }
+  /* Start from what the library's own mkdir() asks for, under a umask that
+   * would have reduced it. */
+  mode_t saved = umask(077);
+  int rc = chmod(path, 0755);
+  umask(saved);
+  if (rc != 0) {
+    rmdir(path);
+    printf("SKIP: chmod failed\n");
+    return;
+  }
+
+  relax_shared_dir_mode(path);
+
+  CHECK(mode_of(path) == VGPU_SHARED_DIR_MODE,
+        "mode is %04o, expected %04o -- another uid sharing this directory "
+        "cannot create files in it",
+        mode_of(path), VGPU_SHARED_DIR_MODE);
+
+  rmdir(path);
+}
+
+static void test_dir_refuses_a_symlink(void) {
+  /* These directories sit in world-writable parents, so the helper opens with
+   * O_NOFOLLOW: a directory swapped for a symlink must be refused, not
+   * followed to whatever it points at. */
+  char target[64], link_path[80];
+  snprintf(target, sizeof(target), "/tmp/vgpu_symlink_target_XXXXXX");
+  if (mkdtemp(target) == NULL) {
+    printf("SKIP: mkdtemp failed\n");
+    return;
+  }
+  if (chmod(target, 0700) != 0) {
+    rmdir(target);
+    printf("SKIP: chmod failed\n");
+    return;
+  }
+  snprintf(link_path, sizeof(link_path), "%s.link", target);
+  if (symlink(target, link_path) != 0) {
+    rmdir(target);
+    printf("SKIP: symlink failed\n");
+    return;
+  }
+
+  relax_shared_dir_mode(link_path);
+
+  CHECK(mode_of(target) == 0700,
+        "the symlink was followed and the target became %04o",
+        mode_of(target));
+
+  unlink(link_path);
+  rmdir(target);
+}
+
+static void test_dir_failure_is_survivable(void) {
+  /* Nothing there at all: must stay quiet and return. */
+  relax_shared_dir_mode("/tmp/vgpu-no-such-directory-here");
+}
+
 int main(void) {
   test_widens_past_the_umask();
   test_once_runs_exactly_once();
   test_failure_is_survivable();
+  test_dir_widens_past_the_umask();
+  test_dir_refuses_a_symlink();
+  test_dir_failure_is_survivable();
 
   if (failures) {
     printf("%d check(s) failed\n", failures);
