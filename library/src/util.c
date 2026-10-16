@@ -865,6 +865,38 @@ int device_pid_in_same_container(unsigned int pid) {
   return 0;
 }
 
+/* Widens a shared-state file this library just created, so that another uid
+ * sharing the directory can still open it O_RDWR. Two reasons this is an
+ * fchmod and not a mode argument to open(): the mode passed to open() is
+ * masked by the process umask, so a hardened image's umask 077 would quietly
+ * produce 0600 whatever we asked for; and fchmod succeeds only for the file's
+ * owner, which makes this exactly the best-effort hardening it should be --
+ * when the file was created by a different uid there is nothing we may change
+ * and nothing we need to, and the caller is no worse off than before.
+ *
+ * Deliberately not reported as a failure: the mode is a courtesy to whoever
+ * comes next, never a precondition for the caller's own use of the fd. */
+void relax_shared_file_mode(int fd, const char *file_path) {
+  if (fchmod(fd, VGPU_SHARED_FILE_MODE) != 0) {
+    LOGGER(VERBOSE, "could not relax the mode of %s: %s -- another uid sharing "
+                    "this directory may be unable to open it read-write",
+           file_path, strerror(errno));
+  }
+}
+
+/* As relax_shared_file_mode(), but at most once per process for a given slot.
+ * The device lock paths reopen the same file on every allocation, and an
+ * unconditional fchmod there would undo the syscall economy try_lock_fd() is
+ * built around. Only whoever created the file can change its mode anyway, so
+ * every later open has nothing to do. The exchange means exactly one caller
+ * attempts it even if several threads arrive together. */
+void relax_shared_file_mode_once(int fd, const char *file_path,
+                                 unsigned char *slot) {
+  if (unlikely(!__atomic_exchange_n(slot, 1, __ATOMIC_RELAXED))) {
+    relax_shared_file_mode(fd, file_path);
+  }
+}
+
 int file_exist(const char *file_path) {
   return (access(file_path, F_OK) == 0) ? 0 : -1;
 }

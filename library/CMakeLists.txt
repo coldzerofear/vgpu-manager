@@ -294,6 +294,12 @@ if(BUILD_SM_NODE_TESTS)
     target_include_directories(test_cgroup_parse PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+    # Pins the mode the library leaves its shared state in, including the
+    # umask immunity that is the reason it is an fchmod and not an open() mode.
+    add_executable(test_shared_file_mode test/nogpu/test_shared_file_mode.c ${VGPU_NODRIVER_SRCS})
+    target_include_directories(test_shared_file_mode PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
     # Drives the provider ABI against a concurrent reader, so it needs the
     # provider too -- the rewrite it checks is the provider.s.
     add_executable(test_session_pids_concurrency
@@ -375,6 +381,7 @@ foreach(vgpu_nogpu_test
         test_session_paths
         test_session_pids_concurrency
         test_cgroup_parse
+        test_shared_file_mode
         test_delta_step
         test_delta_campaign
         test_dlsym_entry)

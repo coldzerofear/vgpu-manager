@@ -1619,6 +1619,8 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
     LOGGER(WARNING, "can't open %s: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
     return ret;
   }
+  /* Best effort, after the guard: the fd is usable either way. */
+  relax_shared_file_mode(fd, VMEMORY_NODE_FILE_PATH);
 
   /* Lock only byte 0 of the header, not the whole file -- the per-device
    * locks live at higher offsets, so a whole-file lock would needlessly
@@ -1736,6 +1738,8 @@ int open_sm_node_lock(void) {
            SM_NODE_LOCK_PATH, strerror(errno));
     return -1;
   }
+  /* Best effort, after the guard: the fd is usable either way. */
+  relax_shared_file_mode(fd, SM_NODE_LOCK_PATH);
   return fd;
 }
 
@@ -1780,6 +1784,8 @@ int map_sm_node_region(sm_node_region_t **data) {
     LOGGER(WARNING, "can't open %s: %s", SM_NODE_FILE_PATH, strerror(errno));
     return 1;
   }
+  /* Best effort, after the guard: the fd is usable either way. */
+  relax_shared_file_mode(fd, SM_NODE_FILE_PATH);
 
   /* Blocking lock, no timeout, deliberately: a late arriver just sleeps in
    * the kernel until the region is built, burning no CPU. Safe here (unlike

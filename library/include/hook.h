@@ -121,6 +121,21 @@ extern "C" {
 #define CGROUP_LINE_MAX 4096
 #define CGROUP_KEY_MAX  256
 
+/* Mode the library relaxes its own shared-state files to after creating them.
+ * The plugin already creates the enclosing directories 0777 so that a
+ * workload running as any uid can populate them; without this the intent
+ * stops at the first file, because the creator owns it 0644 and the next uid
+ * sharing the directory cannot open it O_RDWR. No wider than the directory
+ * it sits in. */
+#define VGPU_SHARED_FILE_MODE 0666
+
+/* Applies the mode above to a file this library just created. Declared here
+ * rather than as a local extern in each of the three callers, since the mode
+ * it applies is the only reason the constant exists. Defined in util.c. */
+void relax_shared_file_mode(int fd, const char *file_path);
+void relax_shared_file_mode_once(int fd, const char *file_path,
+                                 unsigned char *slot);
+
 #define TMP_DIR "/tmp"
 
 #define VGPU_LOCK_DIR "/.vgpu_lock"

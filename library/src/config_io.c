@@ -118,6 +118,8 @@ int write_file_to_config_path(resource_data_t* data) {
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     return ret;
   }
+  /* Best effort, after the guard: the fd is usable either way. */
+  relax_shared_file_mode(fd, CONTROLLER_CONFIG_FILE_PATH);
   /* Serialise concurrent creators on byte 0 of the header (the same byte
    * readers F_RDLCK). A dead writer's lock releases automatically on close. */
   struct flock fl;
