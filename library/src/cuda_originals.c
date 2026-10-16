@@ -3192,16 +3192,21 @@ CUresult cuGraphExecKernelNodeSetParams(CUgraphExec hGraphExec,
                          hGraphExec, hNode, nodeParams);
 }
 
+/* One argument against two, so each wrapper must reach the entry of its own
+ * name: cuda.h declares cuStreamBeginCapture(CUstream) and
+ * cuStreamBeginCapture_v2(CUstream, CUstreamCaptureMode) in its
+ * __CUDA_API_VERSION_INTERNAL block. Crossing them loses the caller's capture
+ * mode in one direction and reads it from an unset register in the other. */
 CUresult cuStreamBeginCapture(CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture_v2), hStream);
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture), hStream);
 }
 
 CUresult cuStreamBeginCapture_v2(CUstream hStream, CUstreamCaptureMode mode) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture), hStream, mode);
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture_v2), hStream, mode);
 }
 
 CUresult cuStreamBeginCapture_ptsz(CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamBeginCapture_ptsz, hStream);
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamBeginCapture_ptsz, hStream);
 }
 
 CUresult cuStreamBeginCapture_v2_ptsz(CUstream hStream, CUstreamCaptureMode mode) {

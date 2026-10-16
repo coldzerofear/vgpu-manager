@@ -277,8 +277,16 @@ def diff_lines(a: list[str], b: list[str]) -> list[tuple[str, str, str]]:
     def to_dict(lines):
         d: dict[str, str] = {}
         for l in lines:
-            # "struct NAME size=N" -> key "struct NAME", val "size=N"
-            m = re.match(r"(struct \S+|offset \S+)\s*(.*)$", l.strip())
+            # "struct NAME size=N"       -> key "struct NAME",       val "size=N"
+            # "offset NAME.FIELD=N"       -> key "offset NAME.FIELD", val "=N"
+            #
+            # [^=\s]+ rather than \S+: the offset probe puts no space before
+            # the '=', so a greedy \S+ swallowed the value into the key. Both
+            # sides then had different keys whenever an offset differed, the
+            # intersection dropped them, and the audit could only ever report
+            # that everything matched. It passed a CUgraphEdgeData whose
+            # to_port sat at 6 where the real header has 1.
+            m = re.match(r"(struct [^=\s]+|offset [^=\s]+)\s*(.*)$", l.strip())
             if m:
                 d[m.group(1)] = m.group(2)
         return d

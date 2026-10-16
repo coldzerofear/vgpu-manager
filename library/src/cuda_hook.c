@@ -2440,16 +2440,31 @@ nvmlReturn_t _nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device, unsigned
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2, device, infoCount, infos);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
-    nvmlProcessInfo_v1_t infoTemps[*infoCount];
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses, device, infoCount, infoTemps);
-    if (likely(ret == NVML_SUCCESS)) {
-      for (unsigned int i = 0; i < *infoCount; i++) {
-        infos[i].pid = infoTemps[i].pid;
-        infos[i].usedGpuMemory = infoTemps[i].usedGpuMemory;
-        infos[i].gpuInstanceId = 0;
-        infos[i].computeInstanceId = 0;
+    /* The v1 entry writes a shorter element than the caller's array holds, so
+     * it cannot be handed that array: it would stride by the wrong size.
+     * Translate through a correctly typed buffer, on the heap rather than a
+     * VLA - infoCount is the caller's capacity and nothing bounds it, so a
+     * generous one would size a stack frame to match. */
+    const unsigned int capacity = *infoCount;
+    nvmlProcessInfo_v1_t *infoTemps = capacity > 0
+        ? (nvmlProcessInfo_v1_t *)malloc((size_t)capacity * sizeof(*infoTemps))
+        : NULL;
+    if (unlikely(capacity > 0 && infoTemps == NULL)) {
+      ret = NVML_ERROR_MEMORY;
+    } else {
+      ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses, device, infoCount, infoTemps);
+      if (likely(ret == NVML_SUCCESS)) {
+        /* Never read past what the buffer held, whatever the entry reports. */
+        const unsigned int count = *infoCount < capacity ? *infoCount : capacity;
+        for (unsigned int i = 0; i < count; i++) {
+          infos[i].pid = infoTemps[i].pid;
+          infos[i].usedGpuMemory = infoTemps[i].usedGpuMemory;
+          infos[i].gpuInstanceId = 0;
+          infos[i].computeInstanceId = 0;
+        }
       }
     }
+    free(infoTemps);
   }
   return ret;
 }
@@ -2461,16 +2476,31 @@ nvmlReturn_t _nvmlDeviceGetGraphicsRunningProcesses(nvmlDevice_t device, unsigne
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2, device, infoCount, infos);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
-    nvmlProcessInfo_v1_t infoTemps[*infoCount];
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses, device, infoCount, infoTemps);
-    if (likely(ret == NVML_SUCCESS)) {
-      for (unsigned int i = 0; i < *infoCount; i++) {
-        infos[i].pid = infoTemps[i].pid;
-        infos[i].usedGpuMemory = infoTemps[i].usedGpuMemory;
-        infos[i].gpuInstanceId = 0;
-        infos[i].computeInstanceId = 0;
+    /* The v1 entry writes a shorter element than the caller's array holds, so
+     * it cannot be handed that array: it would stride by the wrong size.
+     * Translate through a correctly typed buffer, on the heap rather than a
+     * VLA - infoCount is the caller's capacity and nothing bounds it, so a
+     * generous one would size a stack frame to match. */
+    const unsigned int capacity = *infoCount;
+    nvmlProcessInfo_v1_t *infoTemps = capacity > 0
+        ? (nvmlProcessInfo_v1_t *)malloc((size_t)capacity * sizeof(*infoTemps))
+        : NULL;
+    if (unlikely(capacity > 0 && infoTemps == NULL)) {
+      ret = NVML_ERROR_MEMORY;
+    } else {
+      ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses, device, infoCount, infoTemps);
+      if (likely(ret == NVML_SUCCESS)) {
+        /* Never read past what the buffer held, whatever the entry reports. */
+        const unsigned int count = *infoCount < capacity ? *infoCount : capacity;
+        for (unsigned int i = 0; i < count; i++) {
+          infos[i].pid = infoTemps[i].pid;
+          infos[i].usedGpuMemory = infoTemps[i].usedGpuMemory;
+          infos[i].gpuInstanceId = 0;
+          infos[i].computeInstanceId = 0;
+        }
       }
     }
+    free(infoTemps);
   }
   return ret;
 }

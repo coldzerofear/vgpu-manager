@@ -325,6 +325,82 @@ def check_wrapper_bindings(families: dict[str, list[str]], body: dict, legacy: d
     return errors, expected, skipped
 
 
+
+# Seeing through __CUDA_API_PTDS/PTSZ(), which wrap the symbol name in the
+# call rather than being part of it.
+ENTRY_CALL_RE = re.compile(
+    r"CUDA_(?:FIND_ENTRY|ENTRY_CHECK\w*|INTERNAL_\w+)\(\s*cuda_library_entry,\s*"
+    r"(?:__CUDA_API_PT[DS][SZ]?\(\s*)?(\w+)")
+VERSION_SUFFIX_RE = re.compile(r"_v(\d+)(?:_pt[ds][sz])?$")
+
+
+def symbol_version(name: str) -> int:
+    """1 for an unversioned name, N for _vN, ignoring any _ptsz/_ptds tail."""
+    m = VERSION_SUFFIX_RE.search(name)
+    return int(m.group(1)) if m else 1
+
+
+def wrapper_body(name: str, source: str) -> str | None:
+    m = re.search(rf"^CUresult {re.escape(name)}\([^;{{]*\)\s*\{{(.*?)^\}}",
+                  source, re.S | re.M)
+    return m.group(1) if m else None
+
+
+def check_dispatch_targets(families: dict[str, list[str]], body: dict, legacy: dict,
+                           redirects: dict[str, str],
+                           roots: dict[str, str]) -> tuple[list[str], list[str]]:
+    """In an ABI-conflict family, a wrapper must reach the entry of its own name.
+
+    Comparing declarations does not cover this. Both wrappers can declare
+    exactly the right parameters and still call each other's entry, which is
+    what cuStreamBeginCapture did: the one-argument wrapper called the
+    two-argument entry and vice versa, so one caller's capture mode was
+    dropped and the other's was read from a register nobody set. Every
+    signature check passed.
+
+    Only ABI-conflict families are held to this, and within one only a target
+    whose own parameters DIFFER from the wrapper's counts. cuCtxCreate calling
+    cuCtxCreate_v2 is not a crossing worth reporting: cuda.h gives those two
+    the same three arguments, and the family is a conflict because of _v3 and
+    _v4. What matters is reaching an entry that would read the frame
+    differently, not reaching one with another number in its name.
+    """
+    source = "\n".join((ROOT / rel).read_text(errors="replace")
+                        for rel in WRAPPER_FILES if (ROOT / rel).is_file())
+    errors: list[str] = []
+    skipped: list[str] = []
+    for base, siblings in families.items():
+        if base not in ABI_CONFLICT_FAMILIES:
+            continue
+        for name in (base, *siblings):
+            body = wrapper_body(name, source)
+            if body is None:
+                skipped.append(name)
+                continue
+            trampoline = re.search(r"return (_cu\w+)\(", body)
+            if trampoline:
+                inner = wrapper_body(trampoline.group(1), source)
+                if inner is not None:
+                    body = inner
+            targets = ENTRY_CALL_RE.findall(body)
+            if not targets:
+                skipped.append(name)
+                continue
+            target = targets[0]
+            if symbol_version(target) == symbol_version(name):
+                continue
+            mine = elf_signature(name, base, body, legacy, redirects)
+            theirs = elf_signature(target, base, body, legacy, redirects)
+            if mine is None or theirs is None:
+                skipped.append(name)
+                continue
+            if canonical(mine, roots) != canonical(theirs, roots):
+                errors.append(
+                    f"[DISPATCH] wrapper {name} ({', '.join(mine)}) calls "
+                    f"{target} ({', '.join(theirs)})")
+    return errors, skipped
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cuda-home", default=None)
@@ -412,6 +488,12 @@ def main() -> int:
               f"{len(bind_expected)} deliberate (MODERN_ONLY_FAMILIES), "
               f"{len(bind_skipped)} name(s) not comparable")
         errors.extend(bind_errors)
+
+        disp_errors, disp_skipped = check_dispatch_targets(
+            families, body, legacy, redirects, roots)
+        print(f"[INFO] dispatch targets: {len(disp_errors)} crossed, "
+              f"{len(disp_skipped)} not followed")
+        errors.extend(disp_errors)
 
     print()
     for w in warnings:
