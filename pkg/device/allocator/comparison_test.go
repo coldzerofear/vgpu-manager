@@ -91,10 +91,11 @@ func oldAlgorithmPick(n *device.NodeInfo, store []*device.Device, need int) []*d
 	out := make([]*device.Device, 0, need)
 	for _, g := range got {
 		// A nil entry here is the old algorithm returning its internal PADDING
-		// as a real result — see Test_OldAlgorithm_CanReturnPadding. main
+		// as a real result — the defect described on
+		// Test_OldAlgorithm_NoLongerReturnsPadding, now fixed upstream. main
 		// dereferences these unguarded (resolveLinkDevices reads p.UUID), so
-		// this is a scheduler panic, not a bad placement. The harness reports
-		// it instead of crashing.
+		// this was a scheduler panic, not a bad placement. The guard stays so
+		// this harness reports a regression instead of crashing on it.
 		if g == nil {
 			return nil
 		}
@@ -315,41 +316,50 @@ func Test_Compare_RandomTopologies(t *testing.T) {
 			"the tier walk lost a structural property, not that a heuristic shifted")
 }
 
-// Test_OldAlgorithm_CanReturnPadding documents the latent defect the random
-// sweep uncovered in the algorithm being replaced.
+// Test_OldAlgorithm_NoLongerReturnsPadding guards the fix for the defect this
+// random sweep originally uncovered in the algorithm being replaced.
 //
-// bestEffortPolicy pads the candidate list so it divides evenly into sets of
-// the requested size, then captures the best PARTITION. Both the partition
-// accumulator and the per-set buffer are reused across the iteration, so the
-// captured partition aliases memory that keeps being rewritten — and the set it
-// finally hands back can contain the nil padding rather than real devices.
+// The defect: bestEffortPolicy pads the candidate list so it divides evenly
+// into sets of the requested size, then captures the best PARTITION. Both the
+// partition accumulator and the per-set buffer are reused across the iteration,
+// so the captured partition aliased memory that kept being rewritten — and the
+// set it finally handed back could contain the nil padding rather than real
+// devices. main dereferences the result without a nil check
+// (resolveLinkDevices reads p.UUID), so that was a scheduler-wide panic in the
+// Filter path, not merely a poor placement. It was reachable only on
+// topologies where scores tie at zero, which is why it survived: the fixtures
+// in the tree are all well-connected, and only this sweep hit it.
 //
-// main dereferences the result without a nil check (resolveLinkDevices reads
-// p.UUID), so this is a scheduler-wide panic in the Filter path, not merely a
-// poor placement. It is reachable only on topologies where scores tie at zero,
-// which is why it survived: the fixtures in the tree are all well-connected.
+// Both halves are now fixed in pkg/device/gpuallocator/besteffort_policy.go:
+// Allocate copies the winning partition out with slices.Clone (safe because
+// iterateGPUPartitions only ever rewrites the OUTER slice — each inner set is
+// freshly allocated), and the final filter drops any set with padding.
 //
-// The tiered selector cannot express this failure — it returns devices drawn
-// from the caller's own slice and never synthesises entries.
-func Test_OldAlgorithm_CanReturnPadding(t *testing.T) {
+// This test was written the other way round, asserting that the sweep COULD
+// reproduce the defect, as the evidence for replacing the algorithm. It is
+// inverted rather than deleted because besteffort_policy.go is vendored from
+// upstream: a future resync could silently reintroduce either half, and this
+// sweep is the only thing in the tree that reaches the shapes which expose it.
+//
+// The tiered selector cannot express this failure either way — it returns
+// devices drawn from the caller's own slice and never synthesises entries.
+func Test_OldAlgorithm_NoLongerReturnsPadding(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260806))
-	found := 0
-	for iter := 0; iter < 400 && found == 0; iter++ {
+	checked := 0
+	// No early exit: the point is now that NO input in the sweep produces
+	// padding, so every one of them has to be visited.
+	for iter := 0; iter < 400; iter++ {
 		size := []int{4, 6, 8}[rng.Intn(3)]
 		n, devs := randomTopology(t, rng, size, nil)
 		for need := 2; need <= 4 && need < size; need++ {
-			if oldAlgorithmReturnsPadding(n, devs, need) {
-				found++
-				t.Logf("reproduced: size=%d need=%d — bestEffort returned a set containing nil", size, need)
-				// The replacement must handle the very same input cleanly.
-				require.NotNil(t, newAlgorithmPick(n, devs, need, ""),
-					"the tiered selector must still place on this input")
-			}
+			checked++
+			require.False(t, oldAlgorithmReturnsPadding(n, devs, need),
+				"bestEffort returned a set containing nil padding (size=%d need=%d); "+
+					"the padding filter or the partition copy in besteffort_policy.go has regressed",
+				size, need)
 		}
 	}
-	require.Positive(t, found,
-		"expected the sweep to reproduce the padding defect; if this stops failing, "+
-			"re-check whether bestEffortPolicy was fixed upstream")
+	require.Positive(t, checked, "the sweep must exercise at least one request")
 }
 
 // ---------------------------------------------------------------------------

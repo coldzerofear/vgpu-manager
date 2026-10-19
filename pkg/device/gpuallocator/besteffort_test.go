@@ -546,12 +546,16 @@ func TestBestEffortDGX1VoltaGPUAllocEight(t *testing.T) {
 }
 
 func TestBestEffortAllocateExcludesPadding(t *testing.T) {
+	// Distinct UUIDs are required: DeviceSet (and so the Allocator's remaining
+	// and allocated sets) is keyed by UUID, so devices sharing the empty UUID
+	// collapse into one entry and the allocator subtest below would see a
+	// single available device instead of five.
 	node := DeviceList{
-		NewDevice(0, "", ""),
-		NewDevice(1, "", ""),
-		NewDevice(2, "", ""),
-		NewDevice(3, "", ""),
-		NewDevice(4, "", ""),
+		NewDevice(0, "GPU-0", "GPU-0"),
+		NewDevice(1, "GPU-1", "GPU-1"),
+		NewDevice(2, "GPU-2", "GPU-2"),
+		NewDevice(3, "GPU-3", "GPU-3"),
+		NewDevice(4, "GPU-4", "GPU-4"),
 	}
 	// The NVLink pair scores higher than the PCIe-connected triple. Keeping
 	// each group intact produces the highest total partition score.
