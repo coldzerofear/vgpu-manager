@@ -17,6 +17,7 @@ limitations under the License.
 package links
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -115,8 +116,19 @@ func TestCliqueKey(t *testing.T) {
 	// Each rejection below would otherwise produce a key that looks usable but
 	// does not describe the fabric's final shape.
 	t.Run("fabric still initialising is not an identity", func(t *testing.T) {
-		if _, err := cliqueKey(clusterA, 7, nvml.GPU_FABRIC_STATE_IN_PROGRESS, uint32(nvml.SUCCESS)); err == nil {
-			t.Fatal("expected an error for a fabric that has not completed")
+		for _, state := range []uint8{nvml.GPU_FABRIC_STATE_NOT_STARTED, nvml.GPU_FABRIC_STATE_IN_PROGRESS} {
+			_, err := cliqueKey(clusterA, 7, state, uint32(nvml.SUCCESS))
+			if !errors.Is(err, errFabricPending) {
+				t.Fatalf("state %d: err = %v, want errFabricPending", state, err)
+			}
+		}
+	})
+
+	// Only a fabric that is still coming up is worth the startup warning.
+	t.Run("an unsupported fabric is not pending", func(t *testing.T) {
+		_, err := cliqueKey(clusterA, 7, nvml.GPU_FABRIC_STATE_NOT_SUPPORTED, uint32(nvml.SUCCESS))
+		if err == nil || errors.Is(err, errFabricPending) {
+			t.Fatalf("err = %v, want a non-pending error", err)
 		}
 	})
 

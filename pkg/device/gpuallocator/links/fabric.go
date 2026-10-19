@@ -18,6 +18,7 @@ package links
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
@@ -57,16 +58,34 @@ func FabricCliques(nvmllib nvml.Interface, devs []device.Device) []string {
 		klog.V(4).Info("NVML exports no GPU fabric info; NVLink fabric identities are unknown on this node")
 		return keys
 	}
+	var pending []int
 	for i, dev := range devs {
 		key, err := read(dev)
 		if err != nil {
+			if errors.Is(err, errFabricPending) {
+				pending = append(pending, i)
+			}
 			klog.V(4).Infof("no NVLink fabric identity for GPU %d: %v", i, err)
 			continue
 		}
 		keys[i] = key
 	}
+	// Not waited for: on a node with one NVSwitch fabric an unknown identity
+	// gives exactly the answer a known one would, and the identities are read
+	// only at startup, so this is the one chance to say what was missed. A
+	// node with two fabrics in one chassis is the case that loses something --
+	// its fabrics stay merged until the process restarts.
+	if len(pending) > 0 {
+		klog.Warningf("NVLink fabric not yet initialised on GPUs %v, so their fabric identity is unknown; "+
+			"on a node with more than one NVSwitch fabric, restart this component once Fabric Manager is up, "+
+			"or the fabrics are reported as one", pending)
+	}
 	return keys
 }
+
+// errFabricPending marks a reading taken before the fabric finished coming up,
+// as opposed to one from a GPU with no fabric or a fabric that failed.
+var errFabricPending = errors.New("fabric not yet initialised")
 
 // fabricCliqueReader returns a reader backed by the newest fabric-info entry
 // point the loaded NVML actually exports, or nil when it exports neither.
@@ -109,7 +128,11 @@ func fabricCliqueReader(nvmllib nvml.Interface) func(device.Device) (string, err
 // up reports a cliqueId that does not describe its final shape, so treating it
 // as an identity would split GPUs that are about to be peers.
 func cliqueKey(clusterUUID [16]uint8, cliqueID uint32, state uint8, status uint32) (string, error) {
-	if state != nvml.GPU_FABRIC_STATE_COMPLETED {
+	switch state {
+	case nvml.GPU_FABRIC_STATE_COMPLETED:
+	case nvml.GPU_FABRIC_STATE_NOT_STARTED, nvml.GPU_FABRIC_STATE_IN_PROGRESS:
+		return "", fmt.Errorf("fabric state is %d: %w", state, errFabricPending)
+	default:
 		return "", fmt.Errorf("fabric state is %d, not completed", state)
 	}
 	if ret := nvml.Return(status); ret != nvml.SUCCESS {
