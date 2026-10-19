@@ -103,7 +103,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.VGPUDeviceClassName, "vgpu-device-class-name", o.VGPUDeviceClassName, "Specify the name of the vGPU device class for DRA conversion.")
 	pflag.BoolVar(&o.DRAAdmissionEnabled, "dra-admission-enabled", false, "Enable access verification for requests related to DRA resources.")
 	pflag.BoolVar(&o.DefaultConvertToDRA, "default-convert2-dra", false, "Enable the conversion of vGPU extended resources into DRA requests.")
-	pflag.BoolVar(&o.CombinedResourceClaim, "combined-resource-claim", false, "combine multiple claim requests into one resource claim. (need to enable `default-convert2-dra`)")
+	pflag.BoolVar(&o.CombinedResourceClaim, "combined-resource-claim", false, "combine multiple claim requests into one resource claim. (need to enable `default-convert2-dra`; caps how many multi-GPU containers one pod can have, see docs/feature_gates.md)")
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)
 }

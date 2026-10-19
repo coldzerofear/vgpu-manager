@@ -550,6 +550,29 @@ func applyTopologyTiers(request *resourceapi.DeviceRequest, tiers []topologyTier
 	return constraints
 }
 
+// CheckDeviceConstraintLimit refuses a claim spec with more device constraints
+// than the API server accepts (resourceapi.DeviceConstraintsMaxSize).
+//
+// Only a combined claim can get there: every multi-device request adds a
+// distinct-uuid constraint, one per topology tier, and a node pin for remote
+// access, so a non-strict `link` request takes 4 (5 remote) and enough
+// multi-GPU containers in one claim run out. The limit is reported as it is
+// rather than worked around by quietly dropping tiers, which would make what a
+// topology mode guarantees depend on how many containers share the claim; the
+// message says which knobs move the boundary.
+func CheckDeviceConstraintLimit(spec *resourceapi.ResourceClaimSpec, fldPath *field.Path) field.ErrorList {
+	n := len(spec.Devices.Constraints)
+	if n <= resourceapi.DeviceConstraintsMaxSize {
+		return nil
+	}
+	return field.ErrorList{field.Invalid(fldPath, n, fmt.Sprintf(
+		"the combined ResourceClaim would need %d device constraints, more than the %d Kubernetes allows: each "+
+			"multi-GPU container takes one per topology tier plus one for uuid exclusivity (and one more for "+
+			"remote access); use fewer multi-GPU containers, a \"-strict\" topology mode (one tier), or turn off "+
+			"--combined-resource-claim so each container gets its own claim",
+		n, resourceapi.DeviceConstraintsMaxSize))}
+}
+
 // isMultiDeviceRequest reports whether a request can hand out more than one
 // device, which is when constraints between its devices mean anything.
 func isMultiDeviceRequest(exact *resourceapi.ExactDeviceRequest) bool {

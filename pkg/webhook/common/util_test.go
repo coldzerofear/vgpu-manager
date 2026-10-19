@@ -17,6 +17,7 @@ limitations under the License.
 package common
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -26,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/utils/ptr"
 )
@@ -184,4 +186,54 @@ func TestBuildResourceClaimTopologyConstraint(t *testing.T) {
 		require.NotNil(t, claim.Spec.Devices.Requests[0].Exactly)
 		assert.Equal(t, []string{"gpus=" + nvlinkDomain}, matchAttributes(claim))
 	})
+}
+
+// The boundary is stated, not worked around: a combined claim either fits the
+// API server's constraint limit with every tier intact, or it is refused.
+func TestCheckDeviceConstraintLimit(t *testing.T) {
+	claimFor := func(mode util.TopologyMode, remoteAccess bool, containers int) *resourceapi.ResourceClaim {
+		annotations := map[string]string{util.DeviceTopologyModeAnnotation: string(mode)}
+		if remoteAccess {
+			annotations[util.VGPUAccessModeAnnotation] = util.AccessModeRemote
+		}
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Annotations: annotations}}
+		reqs := make([]resourceapi.DeviceRequest, containers)
+		for i := range reqs {
+			reqs[i] = resourceapi.DeviceRequest{
+				Name: fmt.Sprintf("c%d", i),
+				Exactly: &resourceapi.ExactDeviceRequest{
+					DeviceClassName: "vgpu-manager",
+					AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
+					Count:           2,
+				},
+			}
+		}
+		return BuildResourceClaim(pod, reqs, "c", "owner", "1")
+	}
+
+	for _, tc := range []struct {
+		name          string
+		mode          util.TopologyMode
+		remote        bool
+		maxContainers int
+	}{
+		{"non-strict link", util.LinkTopology, false, 8},
+		{"non-strict link, remote", util.LinkTopology, true, 6},
+		{"non-strict numa", util.NUMATopology, false, 16},
+		{"strict link", util.LinkTopologyStrict, false, 16},
+		{"strict link, remote", util.LinkTopologyStrict, true, 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := field.NewPath("spec").Child("containers")
+			fits := claimFor(tc.mode, tc.remote, tc.maxContainers)
+			assert.Empty(t, CheckDeviceConstraintLimit(&fits.Spec, path),
+				"%d multi-GPU containers must fit", tc.maxContainers)
+
+			over := claimFor(tc.mode, tc.remote, tc.maxContainers+1)
+			errs := CheckDeviceConstraintLimit(&over.Spec, path)
+			require.Len(t, errs, 1, "%d multi-GPU containers must be refused", tc.maxContainers+1)
+			assert.Contains(t, errs[0].Detail, "--combined-resource-claim")
+			assert.Equal(t, "spec.containers", errs[0].Field)
+		})
+	}
 }

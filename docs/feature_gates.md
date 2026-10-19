@@ -388,6 +388,25 @@ For remote GPUs (`nvidia.com/vgpu-access-mode: remote`) a request with a topolog
 on one GPU server, through the `nodeName` attribute remote devices carry: topology is not defined
 across nodes. Without a topology mode a request may span servers.
 
+**Limit with `--combined-resource-claim`.** Kubernetes allows at most 32 constraints per
+ResourceClaim, and each multi-GPU request takes one per tier above, one for uuid exclusivity, and
+one more for remote access. Without the flag every container gets its own claim and never comes
+near the limit; with it, all of a pod's containers share one claim, which caps how many multi-GPU
+containers a pod (or a Volcano task) can have:
+
+| Topology mode | Constraints per multi-GPU container (local / remote) | Max multi-GPU containers (local / remote) |
+|---|---|---|
+| `link` | 4 / 5 | 8 / 6 |
+| `pcie` | 3 / 4 | 10 / 8 |
+| `numa` | 2 / 3 | 16 / 10 |
+| any `-strict` mode | 2 / 3 | 16 / 10 |
+| none | 1 / 1 | 32 / 32 |
+
+Single-GPU containers take no constraints. A workload beyond its limit is refused at admission with
+an error saying so; the webhook does not drop tiers to make it fit, since what a topology mode
+guarantees would then depend on how many containers share the claim. Use fewer multi-GPU
+containers, a `-strict` mode, or turn the flag off.
+
 The connectivity thresholds are the same ones the scheduler-extender's link tiers use, so a `link`
 or `pcie` pod means the same thing on both paths.
 

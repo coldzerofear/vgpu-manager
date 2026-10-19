@@ -556,6 +556,11 @@ func (h *validateHandle) createCombinedResourceClaim(
 	ownerPod := fmt.Sprintf("%s-%s", pod.Namespace, pod.Name)
 	createTimestamp := fmt.Sprintf("%v", time.Now().UnixMilli())
 	resourceClaim := common.BuildResourceClaim(pod, resourceRequests, resourceClaimName, ownerPod, createTimestamp)
+	if errs := common.CheckDeviceConstraintLimit(&resourceClaim.Spec, field.NewPath("spec").Child("containers")); len(errs) > 0 {
+		err := apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, errs)
+		logger.V(3).Error(err, "")
+		return err
+	}
 
 	if !dryRun {
 		if err := h.client.Create(ctx, resourceClaim); err != nil {
