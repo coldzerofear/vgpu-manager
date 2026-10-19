@@ -26,9 +26,11 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 )
 
 // remotePublisher decides how this node's devices are announced with respect
@@ -98,6 +100,12 @@ func (rp *remotePublisher) apply(pool resourceslice.Pool) resourceslice.Pool {
 	spec := rp.currentSpec()
 	for i := range pool.Slices {
 		remote.Decorate(pool.Slices[i].Devices, spec)
+		if rp.enabled() {
+			attr := resourceapi.DeviceAttribute{StringValue: ptr.To(rp.nodeName)}
+			for j := range pool.Slices[i].Devices {
+				pool.Slices[i].Devices[j].Attributes[remote.AttrNodeName] = attr
+			}
+		}
 	}
 	if spec != nil {
 		pool.NodeSelector = remote.PoolNodeSelector(spec.Selector)

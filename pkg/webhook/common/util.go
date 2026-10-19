@@ -28,6 +28,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
 	"github.com/docker/go-units"
@@ -423,6 +424,13 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 				Requests:          []string{request.Name},
 				DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
 			})
+			if accessMode, _ := util.PodVGPUAccessMode(pod); accessMode == util.AccessModeRemote {
+				// TODO Cross node topology allocation is temporarily not supported under remote access.
+				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+					Requests:       []string{request.Name},
+					MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + remote.AttrNodeName),
+				})
+			}
 
 			// Multiple devices are matched and allocated according to defined topology patterns to ensure optimal performance.
 			switch topologyMode.BaseTopology() {

@@ -51,6 +51,7 @@ const (
 	// optional scheme/port, design D3/§6.1). Published only for remote, and
 	// only once the agent reported its routable address (design D26).
 	AttrAgentEndpoint = "agentEndpoint"
+	AttrNodeName      = "nodeName"
 
 	// TaintKeyRemoteUnavailable marks a remote device whose endpoints are
 	// not published yet (the agent has not answered, or lupine-server has
