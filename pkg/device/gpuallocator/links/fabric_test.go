@@ -17,10 +17,8 @@ limitations under the License.
 package links
 
 import (
-	"errors"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -117,18 +115,8 @@ func TestCliqueKey(t *testing.T) {
 	// Each rejection below would otherwise produce a key that looks usable but
 	// does not describe the fabric's final shape.
 	t.Run("fabric still initialising is not an identity", func(t *testing.T) {
-		for _, state := range []uint8{nvml.GPU_FABRIC_STATE_NOT_STARTED, nvml.GPU_FABRIC_STATE_IN_PROGRESS} {
-			_, err := cliqueKey(clusterA, 7, state, uint32(nvml.SUCCESS))
-			if !errors.Is(err, errFabricPending) {
-				t.Fatalf("state %d: err = %v, want errFabricPending", state, err)
-			}
-		}
-	})
-
-	t.Run("a fabric that is not supported is not pending", func(t *testing.T) {
-		_, err := cliqueKey(clusterA, 7, nvml.GPU_FABRIC_STATE_NOT_SUPPORTED, uint32(nvml.SUCCESS))
-		if err == nil || errors.Is(err, errFabricPending) {
-			t.Fatalf("err = %v, want a non-pending error", err)
+		if _, err := cliqueKey(clusterA, 7, nvml.GPU_FABRIC_STATE_IN_PROGRESS, uint32(nvml.SUCCESS)); err == nil {
+			t.Fatal("expected an error for a fabric that has not completed")
 		}
 	})
 
@@ -191,86 +179,6 @@ func TestFabricCliques(t *testing.T) {
 		got := FabricCliques(nil, []device.Device{&fabricDevice{}})
 		if len(got) != 1 || got[0] != "" {
 			t.Fatalf("FabricCliques = %q, want one unknown key", got)
-		}
-	})
-}
-
-// sequenceDevice answers GetGpuFabricInfo with the next canned reading on each
-// call, repeating the last one once they run out.
-type sequenceDevice struct {
-	device.Device
-	infos []nvml.GpuFabricInfo
-	calls int
-}
-
-func (s *sequenceDevice) GetGpuFabricInfo() (nvml.GpuFabricInfo, nvml.Return) {
-	info := s.infos[min(s.calls, len(s.infos)-1)]
-	s.calls++
-	return info, nvml.SUCCESS
-}
-
-func inState(state uint8) nvml.GpuFabricInfo {
-	return nvml.GpuFabricInfo{ClusterUuid: clusterA, CliqueId: 1, State: state, Status: uint32(nvml.SUCCESS)}
-}
-
-// shortSettle shrinks the settle wait for one test and counts the sleeps.
-func shortSettle(t *testing.T, timeout time.Duration) *int {
-	t.Helper()
-	oldTimeout, oldInterval, oldSleep := fabricSettleTimeout, fabricSettleInterval, sleep
-	t.Cleanup(func() { fabricSettleTimeout, fabricSettleInterval, sleep = oldTimeout, oldInterval, oldSleep })
-	sleeps := 0
-	fabricSettleTimeout, fabricSettleInterval = timeout, time.Millisecond
-	sleep = func(d time.Duration) { sleeps++; time.Sleep(d) }
-	return &sleeps
-}
-
-func TestFabricCliquesWaitsForInitialisingFabric(t *testing.T) {
-	t.Run("a fabric that completes while waiting gets its identity", func(t *testing.T) {
-		sleeps := shortSettle(t, time.Minute)
-		dev := &sequenceDevice{infos: []nvml.GpuFabricInfo{
-			inState(nvml.GPU_FABRIC_STATE_NOT_STARTED),
-			inState(nvml.GPU_FABRIC_STATE_IN_PROGRESS),
-			inState(nvml.GPU_FABRIC_STATE_COMPLETED),
-		}}
-		got := FabricCliques(nvmlExporting("nvmlDeviceGetGpuFabricInfo"), []device.Device{dev, attachedTo(clusterA, 1)})
-		if got[0] == "" || got[1] == "" {
-			t.Fatalf("FabricCliques = %q, want both identities", got)
-		}
-		if *sleeps != 2 {
-			t.Fatalf("slept %d times, want 2", *sleeps)
-		}
-	})
-
-	// Only the pending device is re-read; one already answered is not asked again.
-	t.Run("settled devices are not re-read", func(t *testing.T) {
-		shortSettle(t, time.Minute)
-		settled := &sequenceDevice{infos: []nvml.GpuFabricInfo{inState(nvml.GPU_FABRIC_STATE_COMPLETED)}}
-		pending := &sequenceDevice{infos: []nvml.GpuFabricInfo{
-			inState(nvml.GPU_FABRIC_STATE_IN_PROGRESS),
-			inState(nvml.GPU_FABRIC_STATE_COMPLETED),
-		}}
-		FabricCliques(nvmlExporting("nvmlDeviceGetGpuFabricInfo"), []device.Device{settled, pending})
-		if settled.calls != 1 {
-			t.Fatalf("settled device read %d times, want 1", settled.calls)
-		}
-	})
-
-	t.Run("a fabric that never completes is unknown after the timeout", func(t *testing.T) {
-		shortSettle(t, 5*time.Millisecond)
-		dev := &sequenceDevice{infos: []nvml.GpuFabricInfo{inState(nvml.GPU_FABRIC_STATE_IN_PROGRESS)}}
-		got := FabricCliques(nvmlExporting("nvmlDeviceGetGpuFabricInfo"), []device.Device{dev, attachedTo(clusterA, 1)})
-		if got[0] != "" || got[1] == "" {
-			t.Fatalf("FabricCliques = %q, want the pending device unknown and the other kept", got)
-		}
-	})
-
-	// A node without fabric support must not pay the settle wait.
-	t.Run("an unsupported fabric never waits", func(t *testing.T) {
-		sleeps := shortSettle(t, time.Minute)
-		dev := &sequenceDevice{infos: []nvml.GpuFabricInfo{inState(nvml.GPU_FABRIC_STATE_NOT_SUPPORTED)}}
-		FabricCliques(nvmlExporting("nvmlDeviceGetGpuFabricInfo"), []device.Device{dev})
-		if *sleeps != 0 {
-			t.Fatalf("slept %d times, want 0", *sleeps)
 		}
 	})
 }

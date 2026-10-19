@@ -18,9 +18,7 @@ package links
 
 import (
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"time"
 
 	"github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -45,29 +43,9 @@ func DifferentFabric(clique1, clique2 string) bool {
 	return clique1 != "" && clique2 != "" && clique1 != clique2
 }
 
-// errFabricPending marks a reading taken while the fabric is still coming up:
-// unlike every other failure it is expected to resolve on its own.
-var errFabricPending = errors.New("fabric not yet completed")
-
-// How long FabricCliques waits for fabrics that are still coming up. Package
-// variables so tests can shrink them; sleep likewise.
-var (
-	fabricSettleTimeout  = 30 * time.Second
-	fabricSettleInterval = 2 * time.Second
-	sleep                = time.Sleep
-)
-
 // FabricCliques returns the clique key of every device in devs, indexed the
 // same way. Devices whose fabric identity cannot be established get the empty
 // key.
-//
-// The result is read once, at startup, and kept for the life of the process,
-// so a fabric caught mid-initialisation -- the plugin started before Fabric
-// Manager finished -- would leave its identity unknown until the next restart,
-// and two NVSwitch fabrics in one chassis would be merged for all that time.
-// Devices reporting a fabric that has not started or is in progress are
-// therefore re-read for up to fabricSettleTimeout. Devices with no fabric
-// support never report that, so nodes without NVSwitch never wait.
 //
 // The accessor is resolved once for the whole node rather than per device: the
 // answer depends only on the loaded NVML, and probing per device would repeat
@@ -79,37 +57,15 @@ func FabricCliques(nvmllib nvml.Interface, devs []device.Device) []string {
 		klog.V(4).Info("NVML exports no GPU fabric info; NVLink fabric identities are unknown on this node")
 		return keys
 	}
-
-	pending := make([]int, 0, len(devs))
-	for i := range devs {
-		pending = append(pending, i)
+	for i, dev := range devs {
+		key, err := read(dev)
+		if err != nil {
+			klog.V(4).Infof("no NVLink fabric identity for GPU %d: %v", i, err)
+			continue
+		}
+		keys[i] = key
 	}
-	deadline := time.Now().Add(fabricSettleTimeout)
-	for {
-		var still []int
-		for _, i := range pending {
-			key, err := read(devs[i])
-			switch {
-			case err == nil:
-				keys[i] = key
-			case errors.Is(err, errFabricPending):
-				still = append(still, i)
-			default:
-				klog.V(4).Infof("no NVLink fabric identity for GPU %d: %v", i, err)
-			}
-		}
-		if len(still) == 0 {
-			return keys
-		}
-		if !time.Now().Before(deadline) {
-			klog.Warningf("NVLink fabric still initialising on GPUs %v after %v; treating their fabric identity as unknown "+
-				"until the next restart, so independent NVSwitch fabrics on this node may be reported as one", still, fabricSettleTimeout)
-			return keys
-		}
-		klog.V(2).Infof("Waiting for the NVLink fabric to finish initialising on GPUs %v", still)
-		pending = still
-		sleep(fabricSettleInterval)
-	}
+	return keys
 }
 
 // fabricCliqueReader returns a reader backed by the newest fabric-info entry
@@ -153,11 +109,7 @@ func fabricCliqueReader(nvmllib nvml.Interface) func(device.Device) (string, err
 // up reports a cliqueId that does not describe its final shape, so treating it
 // as an identity would split GPUs that are about to be peers.
 func cliqueKey(clusterUUID [16]uint8, cliqueID uint32, state uint8, status uint32) (string, error) {
-	switch state {
-	case nvml.GPU_FABRIC_STATE_COMPLETED:
-	case nvml.GPU_FABRIC_STATE_NOT_STARTED, nvml.GPU_FABRIC_STATE_IN_PROGRESS:
-		return "", fmt.Errorf("fabric state is %d: %w", state, errFabricPending)
-	default:
+	if state != nvml.GPU_FABRIC_STATE_COMPLETED {
 		return "", fmt.Errorf("fabric state is %d, not completed", state)
 	}
 	if ret := nvml.Return(status); ret != nvml.SUCCESS {
