@@ -33,9 +33,10 @@ them, not only when they are linked directly. For `pcie` that means a group join
 contain two GPUs whose own PCIe path crosses the host bridge — they still reach each other without
 it, over NVLink.
 
-> On the DRA path every topology mode becomes a `matchAttribute` constraint, which is always hard:
-> `link` behaves like `link-strict` there (and likewise for `pcie` and `numa`). See
-> [TopologyDeviceAttributes](./feature_gates.md#topologydeviceattributes).
+> On the DRA path a non-strict mode falls back the same way it does on the scheduler-extender path:
+> `link` tries NVLink, then the PCIe switch, then one NUMA node, then no constraint at all; `pcie`
+> starts at the PCIe switch and `numa` at the NUMA node. A `-strict` mode allows only its own tier.
+> See [TopologyDeviceAttributes](./feature_gates.md#topologydeviceattributes).
 
 > Cross-pod topology affinity (`nvidia.com/cross-pod-topology`) applies to `link` only: its
 > alignment keys are defined over NVLink components, so a `pcie` pod never anchors to a gang

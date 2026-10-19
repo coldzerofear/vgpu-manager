@@ -365,16 +365,28 @@ key for hand-written ResourceClaims that need one topology key shared with anoth
 example pinning GPUs and CPUs to the same root complex together with
 [dra-driver-cpu](https://github.com/kubernetes-sigs/dra-driver-cpu).
 
-The webhook converts a `nvidia.com/device-topology-mode: link` pod into a `matchAttribute`
-constraint on `nvlinkDomain`, and a `pcie` pod into one on `pcieDomain`, so **enable this gate on
-every node that should be able to satisfy either constraint**. A node without the attribute cannot
-satisfy one, and such pods stay Unschedulable there, so a cluster using these modes has to roll the
-gate out before the pods can land.
+The webhook turns a multi-GPU request of a pod with a topology mode into `matchAttribute`
+constraints on these attributes:
 
-A `matchAttribute` constraint is always hard, so on the DRA path the non-strict modes behave like
-their `-strict` variants: there is no fallback to an unconstrained allocation as there is on the
-scheduler-extender path. The shipped manifests therefore default the webhook to
-`--default-topology-mode=numa`.
+| Mode | `-strict` | Non-strict (`firstAvailable`, tried in order) |
+|---|---|---|
+| `link` | `nvlinkDomain` | `nvlink` (`nvlinkDomain`) → `pcie` (`pcieDomain`) → `numa` (`numaNode`) → `any` |
+| `pcie` | `pcieDomain` | `pcie` (`pcieDomain`) → `numa` (`numaNode`) → `any` |
+| `numa` | `numaNode` | `numa` (`numaNode`) → `any` |
+
+`-strict` keeps one exact request pinned to its tier, so a node that cannot offer it is refused — and
+a node without this gate can never offer `nvlinkDomain` or `pcieDomain`, so **enable this gate on
+every node that should satisfy `link-strict` or `pcie-strict`**. A non-strict mode becomes a
+`firstAvailable` list, one subrequest per tier plus an unconstrained `any`: the allocator takes the
+first one a node can satisfy, and the scheduler scores a node higher the earlier that subrequest is,
+so the tightest available tier wins without ever leaving the pod unschedulable. The subrequest
+names show up in the allocation result (`<request>/pcie`), which tells which tier a request got.
+This needs the Kubernetes `DRAPrioritizedList` feature, on by default since 1.34 and locked on since
+1.37. Pods without a topology mode are left as one exact, unconstrained request.
+
+For remote GPUs (`nvidia.com/vgpu-access-mode: remote`) a request with a topology mode is also kept
+on one GPU server, through the `nodeName` attribute remote devices carry: topology is not defined
+across nodes. Without a topology mode a request may span servers.
 
 The connectivity thresholds are the same ones the scheduler-extender's link tiers use, so a `link`
 or `pcie` pod means the same thing on both paths.

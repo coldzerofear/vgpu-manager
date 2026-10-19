@@ -17,6 +17,7 @@ limitations under the License.
 package common
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -26,84 +27,161 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
+	"k8s.io/utils/ptr"
 )
 
 func TestBuildResourceClaimTopologyConstraint(t *testing.T) {
-	podWithTopology := func(mode util.TopologyMode) *corev1.Pod {
-		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-			Namespace:   "default",
-			Annotations: map[string]string{util.DeviceTopologyModeAnnotation: string(mode)},
-		}}
+	podWith := func(mode util.TopologyMode, remoteAccess bool) *corev1.Pod {
+		annotations := map[string]string{util.DeviceTopologyModeAnnotation: string(mode)}
+		if remoteAccess {
+			annotations[util.VGPUAccessModeAnnotation] = util.AccessModeRemote
+		}
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Annotations: annotations}}
 	}
 	// A multi-device request is what triggers topology constraints at all.
 	requests := func(count int64) []resourceapi.DeviceRequest {
 		return []resourceapi.DeviceRequest{{
 			Name: "gpus",
 			Exactly: &resourceapi.ExactDeviceRequest{
-				AllocationMode: resourceapi.DeviceAllocationModeExactCount,
-				Count:          count,
+				DeviceClassName: "vgpu-manager",
+				AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
+				Count:           count,
 			},
 		}}
 	}
-	matchAttributes := func(claim *resourceapi.ResourceClaim) []resourceapi.FullyQualifiedName {
-		var got []resourceapi.FullyQualifiedName
+	build := func(mode util.TopologyMode, count int64) *resourceapi.ResourceClaim {
+		return BuildResourceClaim(podWith(mode, false), requests(count), "c", "owner", "1")
+	}
+	// matchAttributes renders every matchAttribute constraint as
+	// "<requests>=<attribute>", so a test states which request or subrequest
+	// each attribute binds.
+	matchAttributes := func(claim *resourceapi.ResourceClaim) []string {
+		var got []string
 		for _, c := range claim.Spec.Devices.Constraints {
 			if c.MatchAttribute != nil {
-				got = append(got, *c.MatchAttribute)
+				got = append(got, strings.Join(c.Requests, ",")+"="+string(*c.MatchAttribute))
 			}
 		}
 		return got
 	}
-	nvlinkDomain := resourceapi.FullyQualifiedName(util.DRADriverName + "/nvlinkDomain")
+	subRequests := func(claim *resourceapi.ResourceClaim) []string {
+		var got []string
+		for _, sub := range claim.Spec.Devices.Requests[0].FirstAvailable {
+			got = append(got, sub.Name)
+		}
+		return got
+	}
 
-	// link means NVLink connectivity. It used to match on pcieRoot, which is
-	// PCIe locality: it rejects NVLink peers under different roots and accepts
-	// PCIe-only GPUs with no NVLink at all.
-	t.Run("link matches on nvlinkDomain", func(t *testing.T) {
-		claim := BuildResourceClaim(podWithTopology(util.LinkTopology), requests(2), "c", "owner", "1")
-		require.Equal(t, []resourceapi.FullyQualifiedName{nvlinkDomain}, matchAttributes(claim))
+	const (
+		nvlinkDomain = util.DRADriverName + "/nvlinkDomain"
+		pcieDomain   = util.DRADriverName + "/pcieDomain"
+		numaNode     = string(deviceattribute.StandardDeviceAttributeNUMANode)
+		nodeName     = util.DRADriverName + "/nodeName"
+	)
+
+	// strict keeps the request exact and pins it to the mode's own tier, so a
+	// node that cannot offer it is refused.
+	for _, tc := range []struct {
+		mode util.TopologyMode
+		want string
+	}{
+		{util.LinkTopologyStrict, nvlinkDomain},
+		{util.PCIeTopologyStrict, pcieDomain},
+		{util.NUMATopologyStrict, numaNode},
+	} {
+		t.Run(string(tc.mode)+" stays exact on its own tier", func(t *testing.T) {
+			claim := build(tc.mode, 2)
+			require.NotNil(t, claim.Spec.Devices.Requests[0].Exactly)
+			assert.Empty(t, claim.Spec.Devices.Requests[0].FirstAvailable)
+			assert.Equal(t, []string{"gpus=" + tc.want}, matchAttributes(claim))
+		})
+	}
+
+	// Non-strict walks the extender's ladder tightest first and always ends
+	// in an unconstrained subrequest, so the pod stays schedulable.
+	for _, tc := range []struct {
+		mode      util.TopologyMode
+		wantSubs  []string
+		wantMatch []string
+	}{
+		{util.LinkTopology,
+			[]string{"nvlink", "pcie", "numa", "any"},
+			[]string{"gpus/nvlink=" + nvlinkDomain, "gpus/pcie=" + pcieDomain, "gpus/numa=" + numaNode}},
+		{util.PCIeTopology,
+			[]string{"pcie", "numa", "any"},
+			[]string{"gpus/pcie=" + pcieDomain, "gpus/numa=" + numaNode}},
+		{util.NUMATopology,
+			[]string{"numa", "any"},
+			[]string{"gpus/numa=" + numaNode}},
+	} {
+		t.Run(string(tc.mode)+" degrades tier by tier", func(t *testing.T) {
+			claim := build(tc.mode, 2)
+			request := claim.Spec.Devices.Requests[0]
+			require.Nil(t, request.Exactly, "a request is exact or firstAvailable, never both")
+			assert.Equal(t, tc.wantSubs, subRequests(claim))
+			assert.Equal(t, tc.wantMatch, matchAttributes(claim))
+			for _, sub := range request.FirstAvailable {
+				assert.Equal(t, int64(2), sub.Count)
+				assert.Equal(t, "vgpu-manager", sub.DeviceClassName)
+			}
+		})
+	}
+
+	// Without a topology mode there is nothing to fall back between.
+	for _, mode := range []util.TopologyMode{util.NoneTopology, "", "bogus"} {
+		t.Run("no topology mode "+string(mode)+" stays exact and unconstrained", func(t *testing.T) {
+			claim := build(mode, 2)
+			require.NotNil(t, claim.Spec.Devices.Requests[0].Exactly)
+			assert.Empty(t, claim.Spec.Devices.Requests[0].FirstAvailable)
+			assert.Empty(t, matchAttributes(claim))
+		})
+	}
+
+	t.Run("a single-device request is left alone", func(t *testing.T) {
+		claim := build(util.LinkTopology, 1)
+		require.NotNil(t, claim.Spec.Devices.Requests[0].Exactly)
+		assert.Empty(t, claim.Spec.Devices.Constraints)
 	})
 
-	t.Run("link-strict resolves to the same attribute", func(t *testing.T) {
-		claim := BuildResourceClaim(podWithTopology(util.LinkTopologyStrict), requests(2), "c", "owner", "1")
-		require.Equal(t, []resourceapi.FullyQualifiedName{nvlinkDomain}, matchAttributes(claim))
+	// Every multi-device request keeps its distinct-uuid constraint on the
+	// main request, which covers every subrequest too.
+	t.Run("multi-device requests stay mutually exclusive by uuid", func(t *testing.T) {
+		for _, mode := range []util.TopologyMode{util.NoneTopology, util.LinkTopology, util.LinkTopologyStrict} {
+			var distinct []string
+			for _, c := range build(mode, 2).Spec.Devices.Constraints {
+				if c.DistinctAttribute != nil {
+					distinct = append(distinct, strings.Join(c.Requests, ",")+"="+string(*c.DistinctAttribute))
+				}
+			}
+			assert.Equal(t, []string{"gpus=" + util.DRADriverName + "/uuid"}, distinct, "mode %q", mode)
+		}
 	})
 
-	// pcie means peer-to-peer DMA without crossing a host bridge, which the
-	// standard pcieRoot attribute does not express: a root complex also pairs
-	// GPUs that have to cross the bridge to talk.
-	pcieDomain := resourceapi.FullyQualifiedName(util.DRADriverName + "/pcieDomain")
-
-	t.Run("pcie matches on pcieDomain", func(t *testing.T) {
-		claim := BuildResourceClaim(podWithTopology(util.PCIeTopology), requests(2), "c", "owner", "1")
-		require.Equal(t, []resourceapi.FullyQualifiedName{pcieDomain}, matchAttributes(claim))
+	// Remote devices: a topology mode keeps one container on one server, since
+	// topology is not defined across nodes; without one a container may span
+	// servers.
+	t.Run("remote with a topology mode pins the request to one node", func(t *testing.T) {
+		for _, mode := range []util.TopologyMode{util.NUMATopology, util.NUMATopologyStrict} {
+			claim := BuildResourceClaim(podWith(mode, true), requests(2), "c", "owner", "1")
+			assert.Contains(t, matchAttributes(claim), "gpus="+nodeName, "mode %q", mode)
+		}
 	})
 
-	t.Run("pcie-strict resolves to the same attribute", func(t *testing.T) {
-		claim := BuildResourceClaim(podWithTopology(util.PCIeTopologyStrict), requests(2), "c", "owner", "1")
-		require.Equal(t, []resourceapi.FullyQualifiedName{pcieDomain}, matchAttributes(claim))
-	})
-
-	// numa is a separate axis and must keep its own attribute.
-	t.Run("numa still matches on the NUMA node attribute", func(t *testing.T) {
-		claim := BuildResourceClaim(podWithTopology(util.NUMATopology), requests(2), "c", "owner", "1")
-		require.Equal(t, []resourceapi.FullyQualifiedName{
-			resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributeNUMANode),
-		}, matchAttributes(claim))
-	})
-
-	t.Run("a single-device request gets no topology constraint", func(t *testing.T) {
-		claim := BuildResourceClaim(podWithTopology(util.LinkTopology), requests(1), "c", "owner", "1")
+	t.Run("remote without a topology mode may span nodes", func(t *testing.T) {
+		claim := BuildResourceClaim(podWith(util.NoneTopology, true), requests(2), "c", "owner", "1")
 		assert.Empty(t, matchAttributes(claim))
 	})
 
-	// Every multi-device request keeps its distinct-uuid constraint, so two
-	// devices in one request can never be the same physical GPU.
-	t.Run("multi-device requests stay mutually exclusive by uuid", func(t *testing.T) {
-		claim := BuildResourceClaim(podWithTopology(util.NoneTopology), requests(2), "c", "owner", "1")
-		require.Len(t, claim.Spec.Devices.Constraints, 1)
-		require.NotNil(t, claim.Spec.Devices.Constraints[0].DistinctAttribute)
-		assert.Equal(t, resourceapi.FullyQualifiedName(util.DRADriverName+"/uuid"),
-			*claim.Spec.Devices.Constraints[0].DistinctAttribute)
+	t.Run("local pods are never pinned by node name", func(t *testing.T) {
+		assert.NotContains(t, matchAttributes(build(util.NUMATopology, 2)), "gpus="+nodeName)
+	})
+
+	// A subrequest has no adminAccess field, so converting would drop it.
+	t.Run("an admin-access request is not converted", func(t *testing.T) {
+		reqs := requests(2)
+		reqs[0].Exactly.AdminAccess = ptr.To(true)
+		claim := BuildResourceClaim(podWith(util.LinkTopology, false), reqs, "c", "owner", "1")
+		require.NotNil(t, claim.Spec.Devices.Requests[0].Exactly)
+		assert.Equal(t, []string{"gpus=" + nvlinkDomain}, matchAttributes(claim))
 	})
 }

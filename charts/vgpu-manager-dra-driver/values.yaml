@@ -318,8 +318,9 @@ webhook:
     defaultDevicePolicy: ""
     # Default device list topology mode. Empty leaves pods without one.
     # (supported values: numa | link | pcie, each also with a "-strict" variant)
-    # link / pcie need the kubelet-plugin's TopologyDeviceAttributes gate on every node that should
-    # host such pods; on the DRA path every mode is a hard constraint, strict or not.
+    # link / pcie match on attributes published by the kubelet-plugin's TopologyDeviceAttributes
+    # gate. Non-strict modes fall back tier by tier (needs DRAPrioritizedList, on by default since
+    # Kubernetes 1.34); "-strict" modes refuse nodes without those attributes.
     defaultTopologyMode: numa
     # Default container runtimeClassName set on vGPU pods. Empty disables it. (code default: "")
     defaultRuntimeClass: ""

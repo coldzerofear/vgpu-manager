@@ -413,91 +413,35 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 	//	}
 	//}
 
+	tiers := topologyTiers(topologyMode.BaseTopology())
+	accessMode, _ := util.PodVGPUAccessMode(pod)
 	for i := range requests {
 		request := &requests[i]
-		if request.Exactly == nil {
+		if request.Exactly == nil || !isMultiDeviceRequest(request.Exactly) {
 			continue
 		}
-		// Handling multiple device allocation constraints
-		if (request.Exactly.Count > 1 && (request.Exactly.AllocationMode == "" ||
-			request.Exactly.AllocationMode == resourceapi.DeviceAllocationModeExactCount)) ||
-			request.Exactly.AllocationMode == resourceapi.DeviceAllocationModeAll {
-
-			// The uuids of multiple devices in a single request are mutually exclusive, ensuring that each physical device is only assigned once.
-			deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-				Requests:          []string{request.Name},
-				DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
-			})
-			if accessMode, _ := util.PodVGPUAccessMode(pod); accessMode == util.AccessModeRemote {
-				// TODO Cross node topology allocation is temporarily not supported under remote access.
-				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-					Requests:       []string{request.Name},
-					MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + remote.AttrNodeName),
-				})
-			}
-
-			if !strict {
-				request.FirstAvailable = []resourceapi.DeviceSubRequest{
-					requestConvertSubRequest(*request.Exactly, "first"),
-					requestConvertSubRequest(*request.Exactly, "second"),
-				}
-				request.Exactly = nil
-			}
-
-			// Multiple devices are matched and allocated according to defined topology patterns to ensure optimal performance.
-			switch topologyMode.BaseTopology() {
-			case util.LinkTopology:
-				if strict {
-					// nvlinkDomain, not pcieRoot: PCIe locality is not NVLink
-					// connectivity. On an NVSwitch board the GPUs are all NVLink
-					// peers yet sit under several roots, and a PCIe-only box
-					// satisfies pcieRoot while offering no NVLink at all.
-					deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-						Requests:       []string{request.Name},
-						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.NVLinkDomainDeviceAttribute),
-					})
-				} else {
-					request.FirstAvailable = append(request.FirstAvailable, requestConvertSubRequest(*request.Exactly, "third"))
-					deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-						Requests:       []string{request.Name + "/first"},
-						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.NVLinkDomainDeviceAttribute),
-					}, resourceapi.DeviceConstraint{
-						Requests:       []string{request.Name + "/second"},
-						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.PCIeDomainDeviceAttribute),
-					})
-				}
-			case util.PCIeTopology:
-				if strict {
-					// pcieDomain, not the standard pcieRoot: a root complex groups
-					// GPUs that may still have to cross the host bridge to talk,
-					// while the extender's pcie mode means peer-to-peer DMA that
-					// does not. pcieRoot stays available for hand-written claims
-					// that need one topology key shared with other DRA drivers.
-					deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-						Requests:       []string{request.Name},
-						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.PCIeDomainDeviceAttribute),
-					})
-				} else {
-					deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-						Requests:       []string{request.Name + "/first"},
-						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.PCIeDomainDeviceAttribute),
-					})
-				}
-			case util.NUMATopology:
-				if strict {
-					deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-						Requests:       []string{request.Name},
-						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributeNUMANode)),
-					})
-				} else {
-					deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-						Requests:       []string{request.Name + "/first"},
-						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.PCIeDomainDeviceAttribute),
-					})
-				}
-			}
-
+		// The uuids of multiple devices in a single request are mutually exclusive, ensuring that each physical device is only assigned once.
+		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+			Requests:          []string{request.Name},
+			DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
+		})
+		if len(tiers) == 0 {
+			// No topology asked for: the devices may come from anywhere, even
+			// from several remote GPU servers for one container.
+			continue
 		}
+		if accessMode == util.AccessModeRemote {
+			// TODO Cross node topology allocation is temporarily not supported under remote access.
+			// Pinned on the main request, so it holds for every subrequest
+			// below, the unconstrained last one included. numaNode in
+			// particular compares equal across nodes and would not keep the
+			// devices together on its own.
+			deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+				Requests:       []string{request.Name},
+				MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + remote.AttrNodeName),
+			})
+		}
+		deviceConstraints = append(deviceConstraints, applyTopologyTiers(request, tiers, strict)...)
 	}
 
 	var annotations map[string]string
@@ -533,6 +477,89 @@ func requestConvertSubRequest(request resourceapi.ExactDeviceRequest, subName st
 		Tolerations:       request.Tolerations,
 		Capacity:          request.Capacity,
 		DerivedAttributes: request.DerivedAttributes,
+	}
+}
+
+// topologyTier is one rung of a topology mode's fallback ladder: the
+// subrequest it becomes and the attribute its devices must share.
+type topologyTier struct {
+	subRequest string
+	attribute  resourceapi.FullyQualifiedName
+}
+
+// anyTierSubRequest names the last, unconstrained rung every non-strict
+// ladder ends in, so the request can still be placed when no topology holds.
+const anyTierSubRequest = "any"
+
+// topologyTiers is a topology mode's ladder, tightest first. It mirrors the
+// scheduler-extender's tier walk -- NVLink, then PCIe switch, then one NUMA
+// node -- so a mode means the same thing, and degrades the same way, on both
+// paths. nil for modes with no topology.
+//
+// The subrequest names are what the allocation result reports
+// ("<request>/pcie"), so they say which tier the request actually got.
+func topologyTiers(mode util.TopologyMode) []topologyTier {
+	nvlink := topologyTier{"nvlink", resourceapi.FullyQualifiedName(util.DRADriverName + "/" + util.NVLinkDomainDeviceAttribute)}
+	pcie := topologyTier{"pcie", resourceapi.FullyQualifiedName(util.DRADriverName + "/" + util.PCIeDomainDeviceAttribute)}
+	numa := topologyTier{"numa", resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributeNUMANode)}
+	switch mode {
+	case util.LinkTopology:
+		return []topologyTier{nvlink, pcie, numa}
+	case util.PCIeTopology:
+		return []topologyTier{pcie, numa}
+	case util.NUMATopology:
+		return []topologyTier{numa}
+	default:
+		return nil
+	}
+}
+
+// applyTopologyTiers shapes request for its topology ladder and returns the
+// constraints that go with it.
+//
+// strict keeps the request as it is and pins it to the first tier: anything
+// looser must refuse the node. Otherwise the request becomes a firstAvailable
+// list, one subrequest per tier plus the unconstrained "any", each constrained
+// to its own tier's attribute. The allocator takes the first subrequest a
+// node can satisfy, and the scheduler scores nodes higher the earlier that
+// subrequest is, so the tightest available tier wins without ever making the
+// pod unschedulable.
+//
+// nvlinkDomain and pcieDomain are published only with the kubelet plugin's
+// TopologyDeviceAttributes gate; a node without it simply never satisfies
+// those tiers and falls through to the next.
+func applyTopologyTiers(request *resourceapi.DeviceRequest, tiers []topologyTier, strict bool) []resourceapi.DeviceConstraint {
+	// A subrequest cannot carry adminAccess, so converting would silently drop it.
+	if strict || ptr.Deref(request.Exactly.AdminAccess, false) {
+		return []resourceapi.DeviceConstraint{{
+			Requests:       []string{request.Name},
+			MatchAttribute: ptr.To(tiers[0].attribute),
+		}}
+	}
+	constraints := make([]resourceapi.DeviceConstraint, 0, len(tiers))
+	subRequests := make([]resourceapi.DeviceSubRequest, 0, len(tiers)+1)
+	for _, tier := range tiers {
+		subRequests = append(subRequests, requestConvertSubRequest(*request.Exactly, tier.subRequest))
+		constraints = append(constraints, resourceapi.DeviceConstraint{
+			Requests:       []string{request.Name + "/" + tier.subRequest},
+			MatchAttribute: ptr.To(tier.attribute),
+		})
+	}
+	request.FirstAvailable = append(subRequests, requestConvertSubRequest(*request.Exactly, anyTierSubRequest))
+	request.Exactly = nil
+	return constraints
+}
+
+// isMultiDeviceRequest reports whether a request can hand out more than one
+// device, which is when constraints between its devices mean anything.
+func isMultiDeviceRequest(exact *resourceapi.ExactDeviceRequest) bool {
+	switch exact.AllocationMode {
+	case "", resourceapi.DeviceAllocationModeExactCount:
+		return exact.Count > 1
+	case resourceapi.DeviceAllocationModeAll:
+		return true
+	default:
+		return false
 	}
 }
 
