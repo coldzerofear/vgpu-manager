@@ -4,6 +4,8 @@
 package gpuallocator
 
 import (
+	"slices"
+
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"k8s.io/klog/v2"
 )
@@ -59,16 +61,18 @@ func (p *bestEffortPolicy) Allocate(available []*Device, required []*Device, siz
 		}
 		score := calculateGPUPartitionScore(candidate)
 		if score > bestScore || bestPartition == nil {
-			bestPartition = candidate
+			// The candidate may be overwritten by later iterations, so copy it out.
+			bestPartition = slices.Clone(candidate)
 			bestScore = score
 		}
 	})
 
 	// Filter the 'bestPartition' to only include sets containing all of the
-	// 'required' devices (which may be nil so all sets will be valid).
+	// 'required' devices and no padding. A padded set does not satisfy the
+	// requested allocation size, even if it has the highest score.
 	filteredBestPartition := [][]*Device{}
 	for _, set := range bestPartition {
-		if gpuSetContainsAll(set, required) {
+		if gpuSetContainsAll(set, required) && gpuSetCountPadding(set) == 0 {
 			filteredBestPartition = append(filteredBestPartition, set)
 		}
 	}

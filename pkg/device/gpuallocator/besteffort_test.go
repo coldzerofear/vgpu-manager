@@ -5,6 +5,9 @@ package gpuallocator
 import (
 	"sort"
 	"testing"
+
+	nvml "github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
+	"github.com/stretchr/testify/require"
 )
 
 func sortGPUSetOfSets(sos [][]*Device) {
@@ -342,6 +345,37 @@ func TestBestEffortIterateGPUPartitions(t *testing.T) {
 	}
 }
 
+// The partition passed to the iterateGPUPartitions callback may be overwritten
+// by later iterations, so Allocate must copy out the best partition it retains.
+// Whether this happens depends on how append() grows the partition slice; 7
+// sets (14 GPUs) is a case where sibling partitions share memory.
+func TestBestEffortAllocateRetainsBestPartition(t *testing.T) {
+	var node DeviceList
+	for i := 0; i < 14; i++ {
+		node = append(node, NewDevice(i, "", ""))
+	}
+	for i := 0; i < 12; i += 2 {
+		node.AddLink(i, i+1, nvml.TwoNVLINKLinks)
+		node.AddLink(i+1, i, nvml.TwoNVLINKLinks)
+	}
+	node.AddLink(12, 13, nvml.FourNVLINKLinks)
+	node.AddLink(13, 12, nvml.FourNVLINKLinks)
+	devices := node.Devices()
+
+	tests := []PolicyAllocTest{
+		{
+			"Best set is in the last slot of the best partition",
+			devices,
+			[]int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13},
+			[]int{},
+			2,
+			[]int{12, 13},
+		},
+	}
+
+	RunPolicyAllocTests(t, NewBestEffortPolicy(), tests)
+}
+
 func TestBestEffort4xRTX8000GPUAllocOne(t *testing.T) {
 	devices := New4xRTX8000Node().Devices()
 	policy := NewBestEffortPolicy()
@@ -509,4 +543,51 @@ func TestBestEffortDGX1VoltaGPUAllocEight(t *testing.T) {
 	}
 
 	RunAllocTests(t, allocator, tests)
+}
+
+func TestBestEffortAllocateExcludesPadding(t *testing.T) {
+	node := DeviceList{
+		NewDevice(0, "", ""),
+		NewDevice(1, "", ""),
+		NewDevice(2, "", ""),
+		NewDevice(3, "", ""),
+		NewDevice(4, "", ""),
+	}
+	// The NVLink pair scores higher than the PCIe-connected triple. Keeping
+	// each group intact produces the highest total partition score.
+	node.AddLink(0, 1, nvml.TwoNVLINKLinks)
+	node.AddLink(1, 0, nvml.TwoNVLINKLinks)
+	for i := range node {
+		for j := range node {
+			if i == j {
+				continue
+			}
+			linkType := nvml.P2PLinkCrossCPU
+			if (i < 2 && j < 2) || (i >= 2 && j >= 2) {
+				linkType = nvml.P2PLinkSingleSwitch
+			}
+			node.AddLink(i, j, linkType)
+		}
+	}
+	devices := node.Devices()
+	t.Run("policy", func(t *testing.T) {
+		allocated := NewBestEffortPolicy().Allocate(devices, nil, 3)
+		for _, device := range allocated {
+			require.NotNil(t, device, "allocation must not contain padding")
+		}
+		require.ElementsMatch(t, devices[2:], allocated)
+	})
+	t.Run("required device", func(t *testing.T) {
+		allocated := NewBestEffortPolicy().Allocate(devices, devices[2:3], 3)
+		require.ElementsMatch(t, devices[2:], allocated)
+	})
+	t.Run("allocator", func(t *testing.T) {
+		allocator := newAllocatorFrom(devices, NewBestEffortPolicy())
+		allocated := allocator.Allocate(3)
+		require.ElementsMatch(t, devices[2:], allocated)
+		require.ElementsMatch(t, devices[:2], allocator.Allocate(2))
+		require.Empty(t, allocator.Allocate(1))
+		allocator.Free(allocated...)
+		require.ElementsMatch(t, allocated, allocator.Allocate(3))
+	})
 }
