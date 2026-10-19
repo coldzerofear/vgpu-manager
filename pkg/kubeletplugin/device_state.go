@@ -1780,15 +1780,18 @@ func (s *DeviceState) activateNodeFabricPartition() error {
 
 	klog.V(2).Infof("Fabric Manager: activating node partition %d covering %d GPUs (VGPUSupport)", partitionID, len(gpus))
 	if err := s.fmManager.ActivatePartition(partitionID); err != nil {
-		// Same reasoning as above: failing here would crash-loop the plugin
-		// over an optimisation. The likeliest cause is a partition that
-		// overlaps this one still being active -- left behind by per-claim
-		// partitioning from before VGPUSupport was turned on, which nothing
-		// under VGPUSupport deactivates any more -- and only an operator can
-		// clear that safely.
-		klog.Warningf("Fabric Manager: activating node partition %d failed: %v; leaving the NVSwitch fabric as it is. "+
-			"If a partition overlapping it is still active (e.g. left by per-claim partitioning), deactivate it with "+
-			"Fabric Manager and restart this plugin", partitionID, err)
+		// Unlike a missing partition above, this fails startup. A transient
+		// refusal (Fabric Manager restarting) is retried by the container's
+		// restart backoff, which a warning would give up on for good; a lasting
+		// one belongs in CrashLoopBackOff, where it is seen, rather than in a
+		// log line under a plugin that looks healthy while multi-vGPU pods
+		// silently lose NVLink. The lasting cause is nearly always an
+		// overlapping partition still active -- left by per-claim partitioning
+		// from before VGPUSupport was turned on, which nothing under
+		// VGPUSupport deactivates any more -- so say how to clear it.
+		return fmt.Errorf("activating node fabric partition %d: %w (if a partition overlapping it is still active, "+
+			"e.g. one left by per-claim partitioning before VGPUSupport was enabled, deactivate it with Fabric Manager)",
+			partitionID, err)
 	}
 	return nil
 }

@@ -948,14 +948,17 @@ func TestNodeFabricPartitionUnderVGPUSupport(t *testing.T) {
 	})
 
 	// FM refuses activation while an overlapping partition is active, e.g. one
-	// left by per-claim partitioning before VGPUSupport was turned on. That must
-	// not crash-loop the plugin.
-	t.Run("a refused activation is not a startup failure", func(t *testing.T) {
+	// left by per-claim partitioning before VGPUSupport was turned on, or while
+	// it is restarting. Either way startup must fail: restart backoff retries
+	// the transient case, and CrashLoopBackOff surfaces the lasting one.
+	t.Run("a refused activation fails startup", func(t *testing.T) {
 		setVGPUSupport(t, true)
 		state, client := newState(t)
 		client.activateErr = errors.New("partition overlaps an active partition")
 
-		require.NoError(t, state.activateNodeFabricPartition())
+		err := state.activateNodeFabricPartition()
+		require.ErrorIs(t, err, client.activateErr)
+		require.ErrorContains(t, err, "deactivate it with Fabric Manager")
 		require.Empty(t, client.activatedIDs)
 	})
 

@@ -327,11 +327,11 @@ Enables Fabric Manager (NVSwitch) partition management. Requires Fabric Manager 
   devices allow multiple allocations, so claims hold overlapping rather than identical GPU sets and
   FM refuses to activate an overlapping partition. Fabric isolation between claims is given up,
   which vGPU cannot provide anyway since two claims may share one physical GPU. A node whose GPU
-  count is not a supported partition size, or where Fabric Manager refuses the activation (most often
-  because an overlapping partition is still active — for example one left by per-claim
-  partitioning before `VGPUSupport` was turned on, which must then be deactivated by hand), logs a
-  warning and leaves the fabric untouched; the `partitionN` attributes are still published either
-  way. The node partition is never deactivated,
+  count is not a supported partition size logs a warning and leaves the fabric untouched; the
+  `partitionN` attributes are still published either way. If Fabric Manager refuses the activation,
+  the plugin fails to start and is retried by its restart backoff. A refusal that persists is
+  nearly always an overlapping partition that is still active — for example one left by per-claim
+  partitioning before `VGPUSupport` was turned on — and has to be deactivated with Fabric Manager. The node partition is never deactivated,
   so a node that ran this combination keeps it active until it reboots.
 
 ### TopologyDeviceAttributes
