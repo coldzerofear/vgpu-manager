@@ -17,6 +17,7 @@ limitations under the License.
 package validate
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -80,7 +81,7 @@ func TestCheckClusterDNS(t *testing.T) {
 				HostNetwork: test.hostNetwork,
 				DNSConfig:   test.dnsConfig,
 			}}
-
+			assert.NoError(t, os.Setenv("CHECK_CLUSTER_DNS", "true"))
 			errs := checkClusterDNS(pod)
 
 			if test.wantField == "" {

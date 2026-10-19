@@ -391,7 +391,7 @@ func BuildTaskResourceClaimTemplate(task *vcv1alpha1.TaskSpec, requests []resour
 // BuildResourceClaim Build vGPU resource claims based on container requests.
 func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, resourceClaimName, ownerKey, timestamp string) *resourceapi.ResourceClaim {
 	var deviceConstraints []resourceapi.DeviceConstraint
-	topologyMode, _ := allocator.ParsePodTopologyMode(pod)
+	topologyMode, strict := allocator.ParsePodTopologyMode(pod)
 	// Handling multiple request device allocation constraints
 	//if len(requests) > 1 {
 	//	// All requests are mutually exclusive by device UUID to ensure that multiple requests are not assigned the same device
@@ -413,7 +413,11 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 	//	}
 	//}
 
-	for _, request := range requests {
+	for i := range requests {
+		request := &requests[i]
+		if request.Exactly == nil {
+			continue
+		}
 		// Handling multiple device allocation constraints
 		if (request.Exactly.Count > 1 && (request.Exactly.AllocationMode == "" ||
 			request.Exactly.AllocationMode == resourceapi.DeviceAllocationModeExactCount)) ||
@@ -432,33 +436,67 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 				})
 			}
 
+			if !strict {
+				request.FirstAvailable = []resourceapi.DeviceSubRequest{
+					requestConvertSubRequest(*request.Exactly, "first"),
+					requestConvertSubRequest(*request.Exactly, "second"),
+				}
+				request.Exactly = nil
+			}
+
 			// Multiple devices are matched and allocated according to defined topology patterns to ensure optimal performance.
 			switch topologyMode.BaseTopology() {
 			case util.LinkTopology:
-				// nvlinkDomain, not pcieRoot: PCIe locality is not NVLink
-				// connectivity. On an NVSwitch board the GPUs are all NVLink
-				// peers yet sit under several roots, and a PCIe-only box
-				// satisfies pcieRoot while offering no NVLink at all.
-				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-					Requests:       []string{request.Name},
-					MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.NVLinkDomainDeviceAttribute),
-				})
+				if strict {
+					// nvlinkDomain, not pcieRoot: PCIe locality is not NVLink
+					// connectivity. On an NVSwitch board the GPUs are all NVLink
+					// peers yet sit under several roots, and a PCIe-only box
+					// satisfies pcieRoot while offering no NVLink at all.
+					deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+						Requests:       []string{request.Name},
+						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.NVLinkDomainDeviceAttribute),
+					})
+				} else {
+					request.FirstAvailable = append(request.FirstAvailable, requestConvertSubRequest(*request.Exactly, "third"))
+					deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+						Requests:       []string{request.Name + "/first"},
+						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.NVLinkDomainDeviceAttribute),
+					}, resourceapi.DeviceConstraint{
+						Requests:       []string{request.Name + "/second"},
+						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.PCIeDomainDeviceAttribute),
+					})
+				}
 			case util.PCIeTopology:
-				// pcieDomain, not the standard pcieRoot: a root complex groups
-				// GPUs that may still have to cross the host bridge to talk,
-				// while the extender's pcie mode means peer-to-peer DMA that
-				// does not. pcieRoot stays available for hand-written claims
-				// that need one topology key shared with other DRA drivers.
-				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-					Requests:       []string{request.Name},
-					MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.PCIeDomainDeviceAttribute),
-				})
+				if strict {
+					// pcieDomain, not the standard pcieRoot: a root complex groups
+					// GPUs that may still have to cross the host bridge to talk,
+					// while the extender's pcie mode means peer-to-peer DMA that
+					// does not. pcieRoot stays available for hand-written claims
+					// that need one topology key shared with other DRA drivers.
+					deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+						Requests:       []string{request.Name},
+						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.PCIeDomainDeviceAttribute),
+					})
+				} else {
+					deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+						Requests:       []string{request.Name + "/first"},
+						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.PCIeDomainDeviceAttribute),
+					})
+				}
 			case util.NUMATopology:
-				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-					Requests:       []string{request.Name},
-					MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributeNUMANode)),
-				})
+				if strict {
+					deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+						Requests:       []string{request.Name},
+						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributeNUMANode)),
+					})
+				} else {
+					deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+						Requests:       []string{request.Name + "/first"},
+						MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + util.PCIeDomainDeviceAttribute),
+					})
+				}
 			}
+
 		}
 	}
 
@@ -482,6 +520,19 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 				Requests:    requests,
 			},
 		},
+	}
+}
+
+func requestConvertSubRequest(request resourceapi.ExactDeviceRequest, subName string) resourceapi.DeviceSubRequest {
+	return resourceapi.DeviceSubRequest{
+		Name:              subName,
+		DeviceClassName:   request.DeviceClassName,
+		Selectors:         request.Selectors,
+		AllocationMode:    request.AllocationMode,
+		Count:             request.Count,
+		Tolerations:       request.Tolerations,
+		Capacity:          request.Capacity,
+		DerivedAttributes: request.DerivedAttributes,
 	}
 }
 

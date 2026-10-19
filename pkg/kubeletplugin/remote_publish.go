@@ -63,7 +63,7 @@ type remotePublisher struct {
 }
 
 func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, error) {
-	rp := &remotePublisher{nodeName: config.Flags.NodeName}
+	rp := &remotePublisher{nodeName: config.NodeName}
 	if !featuregates.Enabled(featuregates.RemoteGPUSupport) {
 		return rp, nil
 	}
@@ -72,13 +72,12 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 	if err != nil {
 		return nil, err
 	}
-	rp.agentDial, err = remotegpu.ResolveAgentDial(ctx, config.Core.CoreV1().Nodes(), config.Flags.NodeName, config.Flags.RemoteAgentEndpoint)
+	rp.agentDial, err = remotegpu.ResolveAgentDial(ctx, config.Core.CoreV1().Nodes(), config.NodeName, config.RemoteAgentEndpoint)
 	if err != nil {
 		return nil, err
 	}
 	rp.spec = &remote.PublishSpec{Selector: reachable}
-	klog.V(2).Infof("Remote GPU publishing enabled: agent at %s, reachable-nodes=%q",
-		rp.agentDial, config.Flags.RemoteNodeSelector)
+	klog.V(2).Infof("Remote GPU publishing enabled: agent at %s, reachable-nodes=%q", rp.agentDial, config.RemoteNodeSelector)
 
 	// Ask the agent once right away so the first publish already carries
 	// the endpoints and the server's version when it is up. If not, the

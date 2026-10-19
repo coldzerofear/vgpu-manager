@@ -445,6 +445,9 @@ spec:
             - --default-convert2-dra
             - --combined-resource-claim
             - --v=4
+          env:
+            - name: CHECK_CLUSTER_DNS
+              value: "false"
           ports:
             - name: https
               containerPort: 9443

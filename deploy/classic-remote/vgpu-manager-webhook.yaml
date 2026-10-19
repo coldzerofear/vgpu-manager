@@ -224,6 +224,9 @@ spec:
             - --default-device-policy=binpack
             - --default-topology-mode=numa
             - --v=4
+          env:
+            - name: CHECK_CLUSTER_DNS
+              value: "false"
           ports:
             - name: https
               containerPort: 9443

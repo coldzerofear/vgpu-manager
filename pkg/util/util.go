@@ -559,7 +559,7 @@ func GetPercentageValue(x uint32) uint32 {
 	return x
 }
 
-func ValueEnabled(val string) bool {
+func valueEnabled(val string) bool {
 	val = strings.TrimSpace(val)
 	if val == "" {
 		return false
@@ -573,7 +573,7 @@ func PodContainerEnvEnabled(pod *corev1.Pod, containerName, envName string) bool
 	}
 	envEnabled := func(cont *corev1.Container) bool {
 		return slices.ContainsFunc(cont.Env, func(env corev1.EnvVar) bool {
-			return env.Name == envName && ValueEnabled(env.Value)
+			return env.Name == envName && valueEnabled(env.Value)
 		})
 	}
 	// Container names are unique across init and regular containers; search
@@ -674,7 +674,7 @@ func GenerateShortHash(input string, length int) string {
 
 func GetEnvEnabled(env string) bool {
 	if val, ok := os.LookupEnv(env); ok {
-		return ValueEnabled(val)
+		return valueEnabled(val)
 	}
 	return false
 }
