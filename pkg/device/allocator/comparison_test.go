@@ -314,6 +314,29 @@ func Test_Compare_RandomTopologies(t *testing.T) {
 	assert.Less(t, float64(c.worse)/float64(c.cases), 0.05,
 		"disagreement on arbitrary graphs should stay marginal; a jump here means "+
 			"the tier walk lost a structural property, not that a heuristic shifted")
+
+	// The bottleneck metric gets the SAME bound, for the same reason, and it is
+	// the more interesting of the two: the weakest link is the tier walk's OWN
+	// objective, so losing on it is the shape a structural regression would
+	// take. It is bounded rather than zeroed because the tier walk is coarse by
+	// construction — it buckets components by tier and only runs the
+	// fine-grained searchBestSubset when the tier is non-uniform, while the
+	// link tie-break applies solely to the one policy-equal run that overflows.
+	// A TierAny component can therefore legitimately contain a zero-score pair,
+	// and bestEffort's global enumeration can beat us on an unstructured graph.
+	// At the fixed seed this is 7 of 332 cases (~2%), one of them a full 100%
+	// deficit (our pick's weakest pair scores 0 where bestEffort found a set
+	// with no such pair).
+	//
+	// The individual deficit is deliberately NOT bounded. Capping it would mean
+	// claiming PairScore ratios are meaningful on graphs no hardware produces,
+	// and the one 100% case is an artifact of dividing by a small baseline, not
+	// of a worse placement in any physical sense. The case COUNT is the signal
+	// worth watching, which is what this asserts.
+	assert.Less(t, float64(bn.worse)/float64(bn.cases), 0.05,
+		"bottleneck regressions on arbitrary graphs should stay marginal; a jump here "+
+			"means the tier walk stopped protecting the weakest link, which is the "+
+			"property it exists to provide")
 }
 
 // Test_OldAlgorithm_NoLongerReturnsPadding guards the fix for the defect this

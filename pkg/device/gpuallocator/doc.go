@@ -23,10 +23,18 @@ limitations under the License.
 // LIVE — consumed by the scheduler on every topology-mode placement:
 //
 //	Device, DeviceList, NewDevice, NewDevices, WithNvmlLib, WithDeviceLib
-//	PairScore  (the per-pair link score every tier decision is ranked by)
+//	PairScore          (the per-pair link score every tier decision is ranked by)
+//	GetDeviceLinkMap   (pkg/device/manager: flattens a DeviceList's links for
+//	                    the node's advertised topology)
+//	gpuallocator/links (the P2PLinkType table PairScore and LinkTier are
+//	                    defined over)
+//
+// DeviceList is not an optional dependency: it is the type of NodeInfo's own
+// DeviceList field (pkg/device/types.go), and computeTieredComponents is
+// written against it. The topology data model of the scheduler lives here.
 //
 // RETAINED, NOT CALLED IN PRODUCTION — Allocator, Policy, NewAllocator,
-// NewBestEffortAllocator, NewBestEffortPolicy, DeviceSet:
+// NewBestEffortAllocator, NewBestEffortPolicy, NewSimplePolicy, DeviceSet:
 //
 // bestEffortPolicy WAS the link-allocation algorithm until the tiered selector
 // replaced it (see docs/link_topology_tiered_allocation_design.md). It is kept
@@ -37,6 +45,12 @@ limitations under the License.
 //     Deleting the policy deletes the proof along with it.
 //  2. These files are byte-compatible with upstream, which keeps a future
 //     re-sync a diff rather than a merge.
+//
+// Only tests reach this half, so it is dropped from the shipped binaries by
+// dead-code elimination: keeping it costs review time on a re-sync, not size.
+// DeviceSet is keyed by UUID — devices sharing a UUID (including the empty one
+// a hand-built fixture gets by default) collapse into a single entry, which is
+// a trap when writing tests against Allocator.
 //
 // So: if you are looking for the code that actually chooses GPUs today, it is
 // pkg/device/allocator/tiered.go, not here. Do not wire anything new to
