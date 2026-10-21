@@ -1155,3 +1155,5 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
      否则 `a.b` 与 `a-b` 会撞成同一个域名、把客户端引到另一台服务器。
      消费侧要求：校验 webhook 拒绝 `access-mode: remote` 且 `dnsPolicy: Default`、或 `hostNetwork` + `ClusterFirst`
      的 Pod（这两种解析不到集群域），`None` 要求自带 `dnsConfig.nameservers`。DRA 路径同一套机制、同样零代码改动。
+     该校验默认关闭（服务端用 hostNetwork、按节点 IP 寻址时 Pod 的 DNS 策略无关紧要），服务端按域名寻址时
+     需给 webhook 设置环境变量 `CHECK_CLUSTER_DNS=true` 开启。

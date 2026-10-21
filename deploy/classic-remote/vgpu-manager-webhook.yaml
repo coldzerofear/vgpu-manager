@@ -225,6 +225,8 @@ spec:
             - --default-topology-mode=numa
             - --v=4
           env:
+            # 远程 GPU 服务端按域名寻址（不允许 hostNetwork）时设为 "true"：
+            # 拒绝解析不到集群域名的 remote Pod（dnsPolicy Default、hostNetwork + ClusterFirst 等）。
             - name: CHECK_CLUSTER_DNS
               value: "false"
           ports:

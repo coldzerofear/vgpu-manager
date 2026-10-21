@@ -951,6 +951,9 @@ func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admi
 	return admission.Allowed("").WithWarnings(warnings...)
 }
 
+// checkClusterDNSEnv turns checkClusterDNS on.
+const checkClusterDNSEnv = "CHECK_CLUSTER_DNS"
+
 // checkClusterDNS refuses a remote vGPU pod that cannot resolve names in the
 // cluster. The GPU server it is given is addressed by whatever its node
 // publishes, and where hostNetwork is not allowed on the server side that is
@@ -965,34 +968,39 @@ func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admi
 //     DNS;
 //   - None is left to the author: it carries its own dnsConfig, and whether
 //     those servers answer for the cluster zone is not ours to judge.
+//
+// Off unless the webhook runs with CHECK_CLUSTER_DNS enabled: some clusters
+// reach their GPU servers by node IP (hostNetwork), where the pod's DNS
+// policy does not matter.
 func checkClusterDNS(pod *corev1.Pod) field.ErrorList {
-	if util.GetEnvEnabled("CHECK_CLUSTER_DNS") {
-		switch pod.Spec.DNSPolicy {
-		case corev1.DNSDefault:
+	if !util.GetEnvEnabled(checkClusterDNSEnv) {
+		return nil
+	}
+	switch pod.Spec.DNSPolicy {
+	case corev1.DNSDefault:
+		return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsPolicy"), pod.Spec.DNSPolicy,
+			"a remote vGPU pod resolves its GPU server through cluster DNS, which this policy does not use: use ClusterFirst, or ClusterFirstWithHostNet with spec.hostNetwork")}
+	case corev1.DNSClusterFirst:
+		if pod.Spec.HostNetwork {
 			return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsPolicy"), pod.Spec.DNSPolicy,
-				"a remote vGPU pod resolves its GPU server through cluster DNS, which this policy does not use: use ClusterFirst, or ClusterFirstWithHostNet with spec.hostNetwork")}
-		case corev1.DNSClusterFirst:
-			if pod.Spec.HostNetwork {
-				return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsPolicy"), pod.Spec.DNSPolicy,
-					"a host-network pod needs ClusterFirstWithHostNet to use cluster DNS, which a remote vGPU pod resolves its GPU server through")}
-			}
-		case corev1.DNSNone:
-			if pod.Spec.DNSConfig == nil || len(pod.Spec.DNSConfig.Nameservers) == 0 {
-				return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsConfig"), pod.Spec.DNSConfig,
-					"dnsPolicy None needs nameservers of its own, and they must answer for the cluster zone: a remote vGPU pod resolves its GPU server through it")}
-			}
-			if servers := clusterDNSServers(); len(servers) > 0 {
-				var hasClusterDNS bool
-				for _, nameserver := range pod.Spec.DNSConfig.Nameservers {
-					if slices.Contains(servers, nameserver) {
-						hasClusterDNS = true
-						break
-					}
+				"a host-network pod needs ClusterFirstWithHostNet to use cluster DNS, which a remote vGPU pod resolves its GPU server through")}
+		}
+	case corev1.DNSNone:
+		if pod.Spec.DNSConfig == nil || len(pod.Spec.DNSConfig.Nameservers) == 0 {
+			return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsConfig"), pod.Spec.DNSConfig,
+				"dnsPolicy None needs nameservers of its own, and they must answer for the cluster zone: a remote vGPU pod resolves its GPU server through it")}
+		}
+		if servers := clusterDNSServers(); len(servers) > 0 {
+			var hasClusterDNS bool
+			for _, nameserver := range pod.Spec.DNSConfig.Nameservers {
+				if slices.Contains(servers, nameserver) {
+					hasClusterDNS = true
+					break
 				}
-				if !hasClusterDNS {
-					return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsConfig").Child("nameservers"), pod.Spec.DNSConfig.Nameservers,
-						"dnsPolicy None needs nameservers of its own, and they must include cluster DNS: a remote vGPU pod resolves its GPU server through it")}
-				}
+			}
+			if !hasClusterDNS {
+				return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsConfig").Child("nameservers"), pod.Spec.DNSConfig.Nameservers,
+					"dnsPolicy None needs nameservers of its own, and they must include cluster DNS: a remote vGPU pod resolves its GPU server through it")}
 			}
 		}
 	}
