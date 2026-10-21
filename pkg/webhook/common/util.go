@@ -396,7 +396,20 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 	accessMode, _ := util.PodVGPUAccessMode(pod)
 	for i := range requests {
 		request := &requests[i]
-		if request.Exactly == nil || !isMultiDeviceRequest(request.Exactly) {
+		if request.Exactly == nil {
+			continue
+		}
+		if !isMultiDeviceRequest(request.Exactly) {
+			// One device is vacuously connected, so non-strict has nothing to
+			// ask for. Strict still means the card sits on its tier -- has an
+			// NVLink / PCIe peer, or a NUMA node -- as on the extender path,
+			// and the domain attributes are published only for such cards.
+			if strict && len(tiers) > 0 {
+				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+					Requests:       []string{request.Name},
+					MatchAttribute: ptr.To(tiers[0].attribute),
+				})
+			}
 			continue
 		}
 		// The uuids of multiple devices in a single request are mutually exclusive, ensuring that each physical device is only assigned once.

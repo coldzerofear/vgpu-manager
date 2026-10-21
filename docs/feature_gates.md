@@ -375,7 +375,8 @@ constraints on these attributes:
 | `pcie` | `pcieDomain` | `pcie` (`pcieDomain`) → `numa` (`numaNode`) → `any` |
 | `numa` | `numaNode` | `numa` (`numaNode`) → `any` |
 
-`-strict` keeps one exact request pinned to its tier, so a node that cannot offer it is refused — and
+`-strict` keeps one exact request pinned to its tier, so a node that cannot offer it is refused (a
+strict single-GPU request is pinned too, so its card must carry that tier's attribute) — and
 a node without this gate can never offer `nvlinkDomain` or `pcieDomain`, so **enable this gate on
 every node that should satisfy `link-strict` or `pcie-strict`**. A non-strict mode becomes a
 `firstAvailable` list, one subrequest per tier plus an unconstrained `any`: the allocator takes the
@@ -403,7 +404,7 @@ containers a pod (or a Volcano task) can have:
 | any `-strict` mode | 2 / 3 | 16 / 10 |
 | none | 1 / 1 | 32 / 32 |
 
-Single-GPU containers take no constraints. A workload beyond its limit is refused at admission with
+Single-GPU containers take none, or one under a `-strict` mode. A workload beyond its limit is refused at admission with
 an error saying so; the webhook does not drop tiers to make it fit, since what a topology mode
 guarantees would then depend on how many containers share the claim. Use fewer multi-GPU
 containers, a `-strict` mode, or turn the flag off.

@@ -139,11 +139,32 @@ func TestBuildResourceClaimTopologyConstraint(t *testing.T) {
 		})
 	}
 
-	t.Run("a single-device request is left alone", func(t *testing.T) {
-		claim := build(util.LinkTopology, 1)
-		require.NotNil(t, claim.Spec.Devices.Requests[0].Exactly)
-		assert.Empty(t, claim.Spec.Devices.Constraints)
+	t.Run("a non-strict single-device request is left alone", func(t *testing.T) {
+		for _, mode := range []util.TopologyMode{util.LinkTopology, util.PCIeTopology, util.NUMATopology, util.NoneTopology} {
+			claim := build(mode, 1)
+			require.NotNil(t, claim.Spec.Devices.Requests[0].Exactly)
+			assert.Empty(t, claim.Spec.Devices.Constraints, "mode %q", mode)
+		}
 	})
+
+	// A strict single card must still sit on its tier, as on the extender
+	// path: the attribute is published only for a card with a peer at that
+	// level (or a NUMA node), so a card without one is refused.
+	for _, tc := range []struct {
+		mode util.TopologyMode
+		want string
+	}{
+		{util.LinkTopologyStrict, nvlinkDomain},
+		{util.PCIeTopologyStrict, pcieDomain},
+		{util.NUMATopologyStrict, numaNode},
+	} {
+		t.Run(string(tc.mode)+" single-device request must sit on its tier", func(t *testing.T) {
+			claim := build(tc.mode, 1)
+			require.NotNil(t, claim.Spec.Devices.Requests[0].Exactly)
+			require.Len(t, claim.Spec.Devices.Constraints, 1, "no uuid exclusivity for one device")
+			assert.Equal(t, []string{"gpus=" + tc.want}, matchAttributes(claim))
+		})
+	}
 
 	// Every multi-device request keeps its distinct-uuid constraint on the
 	// main request, which covers every subrequest too.

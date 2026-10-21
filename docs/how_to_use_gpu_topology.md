@@ -70,6 +70,11 @@ sits on an NVLink fabric". So:
 `numa-strict` follows the same shape: a node whose GPUs all report `numa: -1`
 has no NUMA affinity to honour, so it is rejected rather than trivially accepted.
 
+The DRA path means the same thing: a strict single-GPU request is matched on its
+tier's attribute (`nvlinkDomain`, `pcieDomain` or `numaNode`), which is published
+only for a card with a peer at that level, or with a NUMA node. A non-strict
+single-GPU request carries no constraint there.
+
 > **Upgrade note.** Older releases skipped the topology dispatch entirely when a
 > pod asked for exactly one GPU, so `link-strict` and `numa-strict` were silently
 > ignored there and such pods scheduled anywhere. They are now enforced as above.
