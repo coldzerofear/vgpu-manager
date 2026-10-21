@@ -130,6 +130,9 @@ The rules it enforces:
 * `DynamicMIG` ⊗ `MPSSupport`
 * `PassthroughSupport` ⊗ `NVMLDeviceHealthCheck`
 
+`--plugin-mode=inject` additionally refuses `SharedSMUtilizationWatcher` and
+`TopologyDeviceAttributes`: an inject process publishes no devices.
+
 > Note: `DeviceMetadata` requires `PassthroughSupport`, which is mutually exclusive with
 > `VGPUSupport`. Since `VGPUSupport` is on by default, enabling `DeviceMetadata` also means turning
 > `VGPUSupport` off.
@@ -407,16 +410,41 @@ containers a pod (or a Volcano task) can have:
 | any `-strict` mode | 2 / 3 | 16 / 10 |
 | none | 1 / 1 | 32 / 32 |
 
-Single-GPU containers take none, or one under a `-strict` mode. A workload beyond its limit is refused at admission with
-an error saying so; the webhook does not drop tiers to make it fit, since what a topology mode
-guarantees would then depend on how many containers share the claim. Use fewer multi-GPU
-containers, a `-strict` mode, or turn the flag off.
+Single-GPU containers take none, or one under a `-strict` mode. A workload beyond its limit is
+refused at admission with an error saying so; the webhook does not drop tiers to make it fit, since
+what a topology mode guarantees would then depend on how many containers share the claim. Use fewer
+multi-GPU containers, a `-strict` mode, or turn the flag off. Well inside the limit, many multi-GPU
+containers in one claim still multiply the combinations the scheduler has to try (one ladder per
+container), so a pod with many of them schedules faster with a `-strict` mode or without the flag.
 
-The connectivity thresholds are the same ones the scheduler-extender's link tiers use, so a `link`
-or `pcie` pod means the same thing on both paths.
+**How this compares with the scheduler-extender path.** The connectivity thresholds are the same, so
+`link` means NVLink and `pcie` means the PCIe switch tier on both paths, but the grouping is not
+identical. The domains are components of the whole node, while the extender checks connectivity
+among the cards still free; on a board without full NVLink connectivity (for example a hybrid
+cube-mesh) a DRA request can be given two GPUs of one component that have no direct link. The NUMA
+tier also differs in source: `numaNode` here, the CPU-affinity link type on the extender path, which
+can disagree with sub-NUMA clustering on.
 
-Independent of `FabricManagerPartitioning` — it reads fabric identities from NVML and never talks to
-Fabric Manager.
+It reads fabric identities from NVML and never talks to Fabric Manager. The topology is read once,
+at plugin start, so it reflects the NVLinks that are up at that moment: with Fabric Manager in
+`FABRIC_MODE=1`, links may not be trained until a partition is activated, and a node using
+per-claim partitions (`FabricManagerPartitioning` without `VGPUSupport`) may then publish no
+`nvlinkDomain` at all. Under `VGPUSupport` the node partition is activated before the topology is
+read.
+
+**Upgrading.** These changes reach pods through the webhook, which relies on what the kubelet
+plugins publish, so upgrade the kubelet plugins (with this gate) before the webhook:
+
+* A non-strict mode used to be one hard constraint (`link` on `pcieRoot`, `numa` on `numaNode`) and
+  is now the fallback ladder above, ending unconstrained.
+* `link-strict` used to match `pcieRoot`, which every node publishes; it now needs `nvlinkDomain`, so
+  nodes without this gate stop satisfying it.
+* A remote request with a topology mode needs the GPU servers to publish `nodeName`, which they do
+  from this release on.
+* The shipped manifests and chart now default the webhook to `numa`, so remote multi-GPU containers
+  stay on one GPU server unless the pod sets `nvidia.com/device-topology-mode: none`.
+* With `FabricManagerPartitioning` and `VGPUSupport` both on, the plugin now activates the node
+  partition at startup and fails to start if Fabric Manager refuses it (see above).
 
 ### DeviceMetadata
 

@@ -1745,18 +1745,19 @@ func (s *DeviceState) perClaimFabricPartitioning() bool {
 // activateNodeFabricPartition activates the single FM partition covering every
 // GPU on this node. The caller must ensure fabricManagerPartitioningEnabled().
 //
-// Per-claim partitioning cannot survive vGPU sharing. vGPU devices allow
-// multiple allocations, so two claims routinely hold OVERLAPPING rather than
-// identical GPU sets, and FM refuses to activate a partition that overlaps an
-// active one. The sharpest case is also the most common one: the first
-// single-vGPU claim on a node activates that GPU's size-1 partition, and from
-// then on every multi-GPU partition containing that GPU is refused, so every
-// multi-vGPU pod fails Prepare and never starts.
+// The per-claim path never covered vGPU devices -- it only handles full GPUs
+// and VFIO -- so under VGPUSupport the fabric used to be left as Fabric
+// Manager configured it, which with FABRIC_MODE=1 means no partition and so
+// no NVLink for vGPU pods. Extending the per-claim path to vGPU would not
+// work: vGPU devices allow multiple allocations, so claims hold OVERLAPPING
+// GPU sets, and FM refuses to activate a partition that overlaps an active
+// one -- the first single-vGPU claim would lock out every multi-GPU
+// partition containing its GPU.
 //
-// One node-wide partition removes the conflict entirely — there is only ever
-// one partition, it never changes, and every vGPU claim gets the full NVLink
-// fabric. What is given up is fabric isolation between claims, which vGPU
-// cannot offer in the first place: two claims may share one physical GPU.
+// One node-wide partition has no such conflict: there is only ever one, it
+// never changes, and every vGPU claim gets the full NVLink fabric. What is
+// given up is fabric isolation between claims, which vGPU cannot offer in the
+// first place: two claims may share one physical GPU.
 //
 // The partition is never deactivated. Tearing it down would reprogram the
 // fabric underneath the containers still using it, so a plugin restart (or a

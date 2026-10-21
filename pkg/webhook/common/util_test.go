@@ -199,13 +199,29 @@ func TestBuildResourceClaimTopologyConstraint(t *testing.T) {
 		assert.NotContains(t, matchAttributes(build(util.NUMATopology, 2)), "gpus="+nodeName)
 	})
 
-	// A subrequest has no adminAccess field, so converting would drop it.
-	t.Run("an admin-access request is not converted", func(t *testing.T) {
-		reqs := requests(2)
-		reqs[0].Exactly.AdminAccess = ptr.To(true)
-		claim := BuildResourceClaim(podWith(util.LinkTopology, false), reqs, "c", "owner", "1")
-		require.NotNil(t, claim.Spec.Devices.Requests[0].Exactly)
-		assert.Equal(t, []string{"gpus=" + nvlinkDomain}, matchAttributes(claim))
+	// Admin access has no placement to steer, and a subrequest could not
+	// carry the field, so such a request gets no topology at all.
+	t.Run("an admin-access request is left without topology", func(t *testing.T) {
+		for _, mode := range []util.TopologyMode{util.LinkTopology, util.LinkTopologyStrict} {
+			for _, count := range []int64{1, 2} {
+				reqs := requests(count)
+				reqs[0].Exactly.AdminAccess = ptr.To(true)
+				claim := BuildResourceClaim(podWith(mode, true), reqs, "c", "owner", "1")
+				require.NotNil(t, claim.Spec.Devices.Requests[0].Exactly, "mode %q count %d", mode, count)
+				assert.Empty(t, matchAttributes(claim), "mode %q count %d", mode, count)
+			}
+		}
+	})
+
+	// The node pin sits on the main request, so it binds every tier of the
+	// ladder, the unconstrained "any" included.
+	t.Run("remote non-strict link pins the main request, not a tier", func(t *testing.T) {
+		claim := BuildResourceClaim(podWith(util.LinkTopology, true), requests(2), "c", "owner", "1")
+		require.Nil(t, claim.Spec.Devices.Requests[0].Exactly)
+		assert.Equal(t, []string{
+			"gpus=" + nodeName,
+			"gpus/nvlink=" + nvlinkDomain, "gpus/pcie=" + pcieDomain, "gpus/numa=" + numaNode,
+		}, matchAttributes(claim))
 	})
 }
 

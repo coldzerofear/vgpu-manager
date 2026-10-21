@@ -399,15 +399,21 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 		if request.Exactly == nil {
 			continue
 		}
+		requestTiers := tiers
+		if ptr.Deref(request.Exactly.AdminAccess, false) {
+			// Admin access reaches devices whatever holds them, so there is no
+			// placement to steer, and a subrequest could not carry the field.
+			requestTiers = nil
+		}
 		if !isMultiDeviceRequest(request.Exactly) {
 			// One device is vacuously connected, so non-strict has nothing to
 			// ask for. Strict still means the card sits on its tier -- has an
 			// NVLink / PCIe peer, or a NUMA node -- as on the extender path,
 			// and the domain attributes are published only for such cards.
-			if strict && len(tiers) > 0 {
+			if strict && len(requestTiers) > 0 {
 				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
 					Requests:       []string{request.Name},
-					MatchAttribute: ptr.To(tiers[0].attribute),
+					MatchAttribute: ptr.To(requestTiers[0].attribute),
 				})
 			}
 			continue
@@ -417,7 +423,7 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 			Requests:          []string{request.Name},
 			DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
 		})
-		if len(tiers) == 0 {
+		if len(requestTiers) == 0 {
 			// No topology asked for: the devices may come from anywhere, even
 			// from several remote GPU servers for one container.
 			continue
@@ -433,7 +439,7 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 				MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/" + remote.AttrNodeName),
 			})
 		}
-		deviceConstraints = append(deviceConstraints, applyTopologyTiers(request, tiers, strict)...)
+		deviceConstraints = append(deviceConstraints, applyTopologyTiers(request, requestTiers, strict)...)
 	}
 
 	var annotations map[string]string
@@ -521,8 +527,7 @@ func topologyTiers(mode util.TopologyMode) []topologyTier {
 // TopologyDeviceAttributes gate; a node without it simply never satisfies
 // those tiers and falls through to the next.
 func applyTopologyTiers(request *resourceapi.DeviceRequest, tiers []topologyTier, strict bool) []resourceapi.DeviceConstraint {
-	// A subrequest cannot carry adminAccess, so converting would silently drop it.
-	if strict || ptr.Deref(request.Exactly.AdminAccess, false) {
+	if strict {
 		return []resourceapi.DeviceConstraint{{
 			Requests:       []string{request.Name},
 			MatchAttribute: ptr.To(tiers[0].attribute),
@@ -560,8 +565,9 @@ func CheckDeviceConstraintLimit(spec *resourceapi.ResourceClaimSpec, fldPath *fi
 	return field.ErrorList{field.Invalid(fldPath, n, fmt.Sprintf(
 		"the combined ResourceClaim would need %d device constraints, more than the %d Kubernetes allows: each "+
 			"multi-GPU container takes one per topology tier plus one for uuid exclusivity (and one more for "+
-			"remote access); use fewer multi-GPU containers, a \"-strict\" topology mode (one tier), or turn off "+
-			"--combined-resource-claim so each container gets its own claim",
+			"remote access), and a single-GPU container one under a \"-strict\" mode; use fewer GPU containers, "+
+			"a \"-strict\" topology mode (one tier), or turn off --combined-resource-claim so each container "+
+			"gets its own claim",
 		n, resourceapi.DeviceConstraintsMaxSize))}
 }
 

@@ -888,10 +888,15 @@ func TestNormalizeAndValidateConfig(t *testing.T) {
 // all. Per-claim partitioning cannot work here because vGPU claims may hold
 // overlapping GPU sets, which Fabric Manager refuses to activate.
 func TestNodeFabricPartitionUnderVGPUSupport(t *testing.T) {
+	previous := map[string]bool{
+		string(featuregates.FabricManagerPartitioning): featuregates.Enabled(featuregates.FabricManagerPartitioning),
+		string(featuregates.ConsumableShares):          featuregates.Enabled(featuregates.ConsumableShares),
+	}
 	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
 		string(featuregates.FabricManagerPartitioning): true,
 		string(featuregates.ConsumableShares):          false,
 	}))
+	t.Cleanup(func() { require.NoError(t, featuregates.FeatureGates().SetFromMap(previous)) })
 
 	// Two GPUs, and the partitions Fabric Manager supports over them: one per
 	// GPU, plus the pair.
