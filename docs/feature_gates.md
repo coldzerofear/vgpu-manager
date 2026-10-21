@@ -358,7 +358,10 @@ them. Neither says anything about NUMA: NVLink crosses CPU sockets, so one `nvli
 `pcieDomain` routinely spans two NUMA nodes.
 
 A GPU with no peer at a level publishes no attribute for that level, so a `matchAttribute`
-constraint correctly refuses it.
+constraint correctly refuses it. The gate never stops the plugin from starting: a single-GPU node or
+one without NVLink simply publishes fewer attributes, a GPU pair whose link cannot be read is treated
+as unconnected, and if the topology cannot be read at all the node publishes none — each logged as a
+warning.
 
 `pcieDomain` is deliberately not the standard `resource.kubernetes.io/pcieRoot`: a root complex also
 groups GPUs that have to cross the host bridge to talk. `pcieRoot` stays untouched and is the right

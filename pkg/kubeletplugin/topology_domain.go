@@ -118,12 +118,7 @@ func (l *deviceLib) discoverTopologyDomains(nodeName string) (map[string]deviceT
 	}
 
 	cliques := links.FabricCliques(l.DeviceLib, devs)
-
-	strongest, err := strongestLinks(devs, cliques)
-	if err != nil {
-		return nil, err
-	}
-	return assembleTopologies(nodeName, uuids, cliques, strongest)
+	return assembleTopologies(nodeName, uuids, cliques, strongestLinks(devs, cliques))
 }
 
 // assembleTopologies turns the node's link matrix into per-GPU topology,
@@ -176,26 +171,44 @@ func assembleTopologies(nodeName string, uuids, cliques []string, strongest [][]
 //
 // Only i<j is probed and the result mirrored: the relation is symmetric and
 // each probe costs a full NVML link scan of both devices.
-func strongestLinks(devs []nvdev.Device, cliques []string) ([][]links.P2PLinkType, error) {
+//
+// A probe that fails leaves that link at zero, unconnected, instead of failing
+// the walk. The attributes are optional, and an unreadable link -- a
+// passthrough VM that cannot report a common ancestor, a GPU fallen off the
+// bus -- can then only leave GPUs out of a domain, never stop the plugin.
+// Failures are summarised in one warning.
+func strongestLinks(devs []nvdev.Device, cliques []string) [][]links.P2PLinkType {
 	matrix := make([][]links.P2PLinkType, len(devs))
 	for i := range matrix {
 		matrix[i] = make([]links.P2PLinkType, len(devs))
 	}
+	var failed []string
 	for i := 0; i < len(devs); i++ {
 		for j := i + 1; j < len(devs); j++ {
 			p2p, err := links.GetP2PLink(devs[i], devs[j])
 			if err != nil {
-				return nil, fmt.Errorf("error getting P2P link between GPU %d and %d: %w", i, j, err)
+				failed = append(failed, fmt.Sprintf("GPU %d-%d P2P: %v", i, j, err))
+				p2p = links.P2PLinkUnknown
 			}
 			nvlink, err := links.GetNVLinkWithCliques(devs[i], devs[j], cliques[i], cliques[j])
 			if err != nil {
-				return nil, fmt.Errorf("error getting NVLink between GPU %d and %d: %w", i, j, err)
+				failed = append(failed, fmt.Sprintf("GPU %d-%d NVLink: %v", i, j, err))
+				nvlink = links.P2PLinkUnknown
 			}
 			matrix[i][j] = max(p2p, nvlink)
 			matrix[j][i] = matrix[i][j]
 		}
 	}
-	return matrix, nil
+	if len(failed) > 0 {
+		const shown = 4
+		detail := strings.Join(failed[:min(len(failed), shown)], "; ")
+		if len(failed) > shown {
+			detail += fmt.Sprintf("; and %d more", len(failed)-shown)
+		}
+		klog.Warningf("Could not read %d GPU link(s); treating them as unconnected, so the GPUs involved may get "+
+			"smaller topology domains or none: %s", len(failed), detail)
+	}
+	return matrix
 }
 
 // peerSets returns, per device index, the indices of every device in the same

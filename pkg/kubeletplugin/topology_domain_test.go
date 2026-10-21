@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 
+	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -350,6 +352,85 @@ func TestAssembleTopologies(t *testing.T) {
 		}
 		if got := topos["GPU-0"]; got.Clique != "clique:aa.1" || got.NVLinkDomain != "" || got.PCIeDomain != "" {
 			t.Fatalf("topology = %+v, want only the clique", got)
+		}
+	})
+}
+
+// linkProbeDevice is a GPU with no NVLink whose common ancestor with each
+// peer (keyed by the peer's bus id) is canned; a missing peer makes the probe
+// fail. Every other nvdev.Device method is inherited from the nil embedded
+// interface and must not be called.
+type linkProbeDevice struct {
+	nvdev.Device
+	busID     string
+	ancestors map[string]nvml.GpuTopologyLevel
+}
+
+func (d *linkProbeDevice) GetTopologyCommonAncestor(peer nvml.Device) (nvml.GpuTopologyLevel, nvml.Return) {
+	level, ok := d.ancestors[peer.(*linkProbeDevice).busID]
+	if !ok {
+		return 0, nvml.ERROR_NOT_SUPPORTED
+	}
+	return level, nvml.SUCCESS
+}
+
+func (d *linkProbeDevice) GetNvLinkState(int) (nvml.EnableState, nvml.Return) {
+	return 0, nvml.ERROR_NOT_SUPPORTED
+}
+
+func (d *linkProbeDevice) GetPciInfo() (nvml.PciInfo, nvml.Return) {
+	var info nvml.PciInfo
+	for i, c := range []byte(d.busID) {
+		info.BusId[i] = int8(c)
+	}
+	return info, nvml.SUCCESS
+}
+
+// strongestLinks must never fail the walk: TopologyDeviceAttributes is not
+// allowed to stop the plugin from starting.
+func TestStrongestLinksNeverFails(t *testing.T) {
+	probe := func(busID string, ancestors map[string]nvml.GpuTopologyLevel) *linkProbeDevice {
+		return &linkProbeDevice{busID: busID, ancestors: ancestors}
+	}
+
+	t.Run("a single GPU is never probed", func(t *testing.T) {
+		got := strongestLinks([]nvdev.Device{probe("0000:01:00.0", nil)}, []string{""})
+		if len(got) != 1 || got[0][0] != 0 {
+			t.Fatalf("matrix = %v, want one unlinked GPU", got)
+		}
+	})
+
+	t.Run("PCIe-only GPUs are linked by their P2P level", func(t *testing.T) {
+		a := probe("0000:01:00.0", map[string]nvml.GpuTopologyLevel{"0000:02:00.0": nvml.TOPOLOGY_SINGLE})
+		b := probe("0000:02:00.0", nil)
+		got := strongestLinks([]nvdev.Device{a, b}, []string{"", ""})
+		if got[0][1] != links.P2PLinkSingleSwitch || got[1][0] != links.P2PLinkSingleSwitch {
+			t.Fatalf("matrix = %v, want a single-switch link both ways", got)
+		}
+	})
+
+	t.Run("an unreadable pair is unconnected and the rest still resolve", func(t *testing.T) {
+		// 0-1 share a switch; 0-2 and 1-2 cannot be read.
+		a := probe("0000:01:00.0", map[string]nvml.GpuTopologyLevel{"0000:02:00.0": nvml.TOPOLOGY_SINGLE})
+		b := probe("0000:02:00.0", nil)
+		c := probe("0000:03:00.0", nil)
+		got := strongestLinks([]nvdev.Device{a, b, c}, []string{"", "", ""})
+		if got[0][1] != links.P2PLinkSingleSwitch {
+			t.Fatalf("readable pair = %v, want single switch", got[0][1])
+		}
+		if got[0][2] != 0 || got[1][2] != 0 {
+			t.Fatalf("unreadable pairs = %v / %v, want unconnected", got[0][2], got[1][2])
+		}
+
+		topos, err := assembleTopologies("node-a", []string{"GPU-0", "GPU-1", "GPU-2"}, []string{"", "", ""}, got)
+		if err != nil {
+			t.Fatalf("assembleTopologies: %v", err)
+		}
+		if topos["GPU-0"].PCIeDomain == "" || topos["GPU-0"].PCIeDomain != topos["GPU-1"].PCIeDomain {
+			t.Fatal("the readable pair must still share a PCIe domain")
+		}
+		if topos["GPU-2"].PCIeDomain != "" {
+			t.Fatal("a GPU whose links could not be read must publish no PCIe domain")
 		}
 	})
 }

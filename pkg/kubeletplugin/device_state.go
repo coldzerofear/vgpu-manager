@@ -257,16 +257,20 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	}
 
 	// Resolve the node's interconnect topology and attach it to every discovered
-	// GPU. This fails startup rather than degrading quietly: the gate is
-	// opt-in, and a node that silently published no topology attributes would
-	// make every link/pcie-topology pod unschedulable with nothing to point at.
+	// GPU. The attributes are optional: a node whose topology cannot be read
+	// starts anyway and publishes none, which non-strict topology pods fall back
+	// past and strict ones are refused on, as on a node with no NVLink at all.
+	// Nothing here depends on an external service coming up, so a restart would
+	// not read any more than this one did.
 	if featuregates.Enabled(featuregates.TopologyDeviceAttributes) {
-		state.topologyDomains, err = nvdevlib.discoverTopologyDomains(config.NodeName)
+		domains, err := nvdevlib.discoverTopologyDomains(config.NodeName)
 		if err != nil {
-			return nil, fmt.Errorf("resolving interconnect topology: %w", err)
-		}
-		for _, gpu := range nvdevlib.gpuInfosByUUID {
-			state.attachTopologyDomains(gpu)
+			klog.Warningf("Resolving the GPU interconnect topology failed, publishing no topology attributes: %v", err)
+		} else {
+			state.topologyDomains = domains
+			for _, gpu := range nvdevlib.gpuInfosByUUID {
+				state.attachTopologyDomains(gpu)
+			}
 		}
 	}
 
