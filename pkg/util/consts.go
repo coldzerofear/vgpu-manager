@@ -348,14 +348,14 @@ const (
 // drift apart.
 const (
 	// NVLinkDomainDeviceAttribute is equal for the GPUs of one NVLink-connected
-	// component on one node; never equal across nodes. Published only with the kubelet plugin's
-	// TopologyDeviceAttributes feature gate.
+	// component on one node, and never equal across nodes. Published only with
+	// the kubelet plugin's TopologyDeviceAttributes feature gate.
 	NVLinkDomainDeviceAttribute = "nvlinkDomain"
-	// PCIeDomainDeviceAttribute is equal for the GPUs of one component
-	// connected by peer-to-peer DMA without crossing a PCIe host bridge
-	// (NVLink links included), on one node. It is
-	// NOT the standard pcieRoot attribute, which groups by root complex and
-	// so also pairs GPUs that have to cross the bridge to talk.
+	// PCIeDomainDeviceAttribute is equal for the GPUs of one component on one
+	// node connected by peer-to-peer DMA without crossing a PCIe host bridge
+	// (NVLink links included). It is NOT the standard pcieRoot attribute, which
+	// groups by root complex and so also pairs GPUs that have to cross the
+	// bridge to talk.
 	PCIeDomainDeviceAttribute = "pcieDomain"
 	// CliqueDeviceAttribute is the NVLink fabric identity, published
 	// alongside NVLinkDomainDeviceAttribute when the hardware reports one.

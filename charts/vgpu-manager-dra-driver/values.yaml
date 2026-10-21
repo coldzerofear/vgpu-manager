@@ -149,10 +149,9 @@ kubeletPlugin:
         TimeSlicingSettings: false
         PassthroughSupport: false
         FabricManagerPartitioning: false
-        # Publish each device's interconnect (`clique` / `nvlinkDomain` / `pcieDomain`). Required on
-        # every node that should be able to satisfy a `nvidia.com/device-topology-mode: link` or
-        # `pcie` pod, since the webhook converts those into matchAttribute constraints on those
-        # attributes. A node without them cannot satisfy such a pod at all.
+        # Publish each device's interconnect (`clique` / `nvlinkDomain` / `pcieDomain`), which the
+        # `link` and `pcie` topology modes match on. Without it a node can never satisfy
+        # `link-strict` / `pcie-strict`, and non-strict pods there fall back past those tiers.
         TopologyDeviceAttributes: true
         # Publish list-valued DRA device attributes
         DRAListTypeAttributes: false

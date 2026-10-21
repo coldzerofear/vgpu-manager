@@ -34,16 +34,16 @@ import (
 // The three fields answer different questions and are deliberately kept apart.
 // Clique is the hardware's own fabric identity and is only ever set when the
 // driver reports one, so a claim matching on it knows exactly what it got. The
-// two domains are the keys topology constraints match on, and each is equal
-// exactly for the GPUs that can reach each other at that level.
+// two domains are the keys topology constraints match on: each names one
+// connected component of this node's GPUs at that level.
 type deviceTopology struct {
 	// Clique identifies the NVLink fabric ("clique:<clusterUUID>.<cliqueID>"),
 	// empty when this GPU is not fabric-attached or the driver cannot say.
 	// Equal values across NODES are meaningful: on MNNVL systems one clique
 	// spans several hosts.
 	Clique string
-	// NVLinkDomain is equal exactly for GPUs on THIS node that can reach each
-	// other over NVLink. Empty when the GPU has no NVLink peer on this node.
+	// NVLinkDomain names this GPU's NVLink-connected component on THIS node.
+	// Empty when the GPU has no NVLink peer on this node.
 	//
 	// It is node-local even where Clique is not. A claim may draw devices from
 	// several nodes (remote-GPU pools are published with a NodeSelector), and
@@ -59,9 +59,7 @@ type deviceTopology struct {
 	//
 	// It is NOT the PCIe root complex: two GPUs under one root can still have
 	// to cross the host bridge to talk, and the standard pcieRoot attribute
-	// would call those a pair. NVLink peers are always included, since the
-	// tiers nest (NVLink links outrank switch links), so a GPU normally
-	// carries both domains.
+	// would call those a pair.
 	PCIeDomain string
 }
 
@@ -162,8 +160,6 @@ func assembleTopologies(nodeName string, uuids, cliques []string, strongest [][]
 			topo.NVLinkDomain = componentKey(topologyNVLinkPrefix, nodeName, nvlinkPeers[i], uuids)
 		}
 		if len(pciePeers[i]) > 0 {
-			// Always node-local: PCIe peer-to-peer never crosses a host, so
-			// unlike a clique this key must never compare equal across nodes.
 			topo.PCIeDomain = componentKey(topologyPCIePrefix, nodeName, pciePeers[i], uuids)
 		}
 		topologies[uuid] = topo

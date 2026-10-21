@@ -756,8 +756,8 @@ func (alloc *allocator) reportLinkDowngrade(pod *corev1.Pod, plan *linkPlan, nee
 		achieved += " (spanning multiple components)"
 	}
 
-	klog.V(3).InfoS("Link topology downgraded", "node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod),
-		"mode", mode, "want", floor.String(), "got", achieved, "devices", getDeviceUUIDs(plan.Devices))
+	klog.V(3).InfoS(topologyAttemptKind(mode)+" downgraded", "node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod),
+		"want", floor.String(), "got", achieved, "devices", getDeviceUUIDs(plan.Devices))
 
 	alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventTopologyFallback,
 		"%s downgraded on node %q: %d GPUs connected at %q, not %q; "+

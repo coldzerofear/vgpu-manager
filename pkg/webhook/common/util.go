@@ -392,27 +392,6 @@ func BuildTaskResourceClaimTemplate(task *vcv1alpha1.TaskSpec, requests []resour
 func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, resourceClaimName, ownerKey, timestamp string) *resourceapi.ResourceClaim {
 	var deviceConstraints []resourceapi.DeviceConstraint
 	topologyMode, strict := allocator.ParsePodTopologyMode(pod)
-	// Handling multiple request device allocation constraints
-	//if len(requests) > 1 {
-	//	// All requests are mutually exclusive by device UUID to ensure that multiple requests are not assigned the same device
-	//	deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-	//		Requests:          []string{}, // match all requests
-	//		DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
-	//	})
-	//	switch topologyMode.BaseTopology() {
-	//	case util.LinkTopology:
-	//		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-	//			Requests:       []string{}, // match all requests
-	//			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributePCIeRoot)),
-	//		})
-	//	case util.NUMATopology:
-	//		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-	//			Requests:       []string{}, // match all requests
-	//			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributeNUMANode)),
-	//		})
-	//	}
-	//}
-
 	tiers := topologyTiers(topologyMode.BaseTopology())
 	accessMode, _ := util.PodVGPUAccessMode(pod)
 	for i := range requests {

@@ -87,15 +87,14 @@ const (
 
 	// TopologyDeviceAttributes makes the kubelet plugin publish each device's
 	// interconnect as the `clique`, `nvlinkDomain` and `pcieDomain` attributes.
-	// `clique` is the hardware fabric identity (MNNVL cliques span nodes);
-	// `nvlinkDomain` names one NVLink-connected component on this node;
-	// `pcieDomain` names one component connected by peer-to-peer DMA without
-	// crossing a PCIe host bridge (NVLink included). Both are node-local and
-	// neither implies NUMA locality. The latter two
-	// are what the `link` and `pcie` topology modes constrain on. A GPU with no
-	// peer at a level publishes no attribute for it, so the constraint
-	// correctly refuses it. Independent of FabricManagerPartitioning: it reads
-	// fabric identities from NVML and never talks to Fabric Manager.
+	// `clique` is the hardware fabric identity (MNNVL cliques span nodes).
+	// `nvlinkDomain` names one NVLink-connected component on this node and
+	// `pcieDomain` one component connected by peer-to-peer DMA without crossing
+	// a PCIe host bridge (NVLink included); both are node-local, neither implies
+	// NUMA locality, and they are what the `link` and `pcie` topology modes
+	// constrain on. A GPU with no peer at a level publishes no attribute for it.
+	// Independent of FabricManagerPartitioning: it reads fabric identities from
+	// NVML and never talks to Fabric Manager.
 	TopologyDeviceAttributes featuregate.Feature = "TopologyDeviceAttributes"
 
 	// DRAListTypeAttributes allows the GPU kubelet plugin to publish list-valued

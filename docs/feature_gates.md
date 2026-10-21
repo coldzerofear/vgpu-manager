@@ -331,8 +331,9 @@ Enables Fabric Manager (NVSwitch) partition management. Requires Fabric Manager 
   `partitionN` attributes are still published either way. If Fabric Manager refuses the activation,
   the plugin fails to start and is retried by its restart backoff. A refusal that persists is
   nearly always an overlapping partition that is still active — for example one left by per-claim
-  partitioning before `VGPUSupport` was turned on — and has to be deactivated with Fabric Manager. The node partition is never deactivated,
-  so a node that ran this combination keeps it active until it reboots.
+  partitioning before `VGPUSupport` was turned on — and has to be deactivated with Fabric Manager.
+  The node partition is never deactivated, so a node that ran this combination keeps it active until
+  it reboots.
 
 ### TopologyDeviceAttributes
 
