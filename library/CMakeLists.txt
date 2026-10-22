@@ -321,6 +321,12 @@ if(BUILD_SM_NODE_TESTS)
     target_include_directories(test_delta_step PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+    # Header-only: the CUDA array descriptor sizing, against the byte sizes
+    # and zero-extent rules quoted from cuda.h in include/array_size.h.
+    add_executable(test_array_size test/nogpu/test_array_size.c)
+    target_include_directories(test_array_size PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
     # The dominance campaign: 55 GPU models x limits 1-100 x 3 workloads x
     # 2 delays, new step vs frozen old, asserting zero regressed cells.
     # -O2 keeps the 33000-cell grid to ~10 seconds regardless of build type.
@@ -383,6 +389,7 @@ foreach(vgpu_nogpu_test
         test_cgroup_parse
         test_shared_file_mode
         test_delta_step
+        test_array_size
         test_delta_campaign
         test_dlsym_entry)
     if(TARGET ${vgpu_nogpu_test})
