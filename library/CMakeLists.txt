@@ -439,4 +439,13 @@ if(VGPU_WITH_CUDA_TOOLS)
     target_link_libraries(mem_pool_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
     target_compile_options(mem_pool_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
+    # Asks the driver for the real byte size of each CUarray_format, to replace
+    # the conservative fallback in include/array_size.h with measured values.
+    # Needs dl for the cuArrayGetMemoryRequirements lookup; see the file comment
+    # for why that one symbol is resolved at runtime.
+    add_executable(array_size_probe tools/array_size_probe.c)
+    target_include_directories(array_size_probe PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
+    target_link_libraries(array_size_probe PRIVATE cuda ${CMAKE_DL_LIBS} ${STATIC_C_LIBRARIES})
+    target_compile_options(array_size_probe PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
+
 endif()
