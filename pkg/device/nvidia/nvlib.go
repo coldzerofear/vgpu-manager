@@ -575,7 +575,7 @@ func (l DeviceLib) GetMigInfosByDevice(device nvml.Device, gpuInfo *GpuInfo) (ma
 			Index:         i,
 			UUID:          uuid,
 			Memory:        memoryInfo,
-			Profile:       migProfile.Profile.String(),
+			Profile:       migProfile.String(),
 			Parent:        gpuInfo,
 			Placement:     &placement,
 			GiProfileInfo: giProfileInfo,

@@ -39,6 +39,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/lister"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
+	"github.com/docker/go-units"
 	"github.com/opencontainers/cgroups"
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
@@ -144,14 +145,14 @@ var (
 		"Node virtual GPU devices total memory (sum of physical GPU memory + unified memory)",
 		[]string{"node"}, nil,
 	)
-	nodeVGPUTotalPhysicalMemory = prometheus.NewDesc(
-		"node_vgpu_device_total_physical_memory_in_bytes",
-		"Node virtual GPU devices total physical memory (sum of physical GPU memory)",
-		[]string{"node"}, nil,
-	)
 	nodeVGPUAssignedMemory = prometheus.NewDesc(
 		"node_vgpu_device_assigned_memory_in_bytes",
 		"Node virtual GPU devices assigned memory (sum of physical GPU memory + unified memory)",
+		[]string{"node"}, nil,
+	)
+	nodeVGPUTotalPhysicalMemory = prometheus.NewDesc(
+		"node_vgpu_device_total_physical_memory_in_bytes",
+		"Node virtual GPU devices total physical memory (sum of physical GPU memory)",
 		[]string{"node"}, nil,
 	)
 	nodeVGPUAssignedPhysicalMemory = prometheus.NewDesc(
@@ -185,14 +186,14 @@ var (
 		"Virtual GPU device total memory (sum of physical GPU memory + unified memory)",
 		[]string{"node", "device_idx", "device_uuid", "device_type", "access_mode"}, nil,
 	)
-	vGPUTotalPhysicalMemory = prometheus.NewDesc(
-		"vgpu_device_total_physical_memory_in_bytes",
-		"Virtual GPU device total physical memory (only physical GPU memory)",
-		[]string{"node", "device_idx", "device_uuid", "device_type", "access_mode"}, nil,
-	)
 	vGPUAssignedMemory = prometheus.NewDesc(
 		"vgpu_device_assigned_memory_in_bytes",
 		"Virtual GPU device assigned memory (sum of physical GPU memory + unified memory)",
+		[]string{"node", "device_idx", "device_uuid", "device_type", "access_mode"}, nil,
+	)
+	vGPUTotalPhysicalMemory = prometheus.NewDesc(
+		"vgpu_device_total_physical_memory_in_bytes",
+		"Virtual GPU device total physical memory (only physical GPU memory)",
 		[]string{"node", "device_idx", "device_uuid", "device_type", "access_mode"}, nil,
 	)
 	vGPUAssignedPhysicalMemory = prometheus.NewDesc(
@@ -206,15 +207,14 @@ var (
 		"Container's virtual GPU device total memory limit (sum of physical GPU memory + unified memory)",
 		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
-	containerVGPUPhysicalMemoryLimit = prometheus.NewDesc(
-		"container_vgpu_device_physical_memory_limit_in_bytes",
-		"Container's virtual GPU device physical memory limit (only physical GPU memory)",
-		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
-	)
-
 	containerVGPUMemoryUsage = prometheus.NewDesc(
 		"container_vgpu_device_memory_usage_in_bytes",
 		"Container's virtual GPU device memory usage (sum of physical GPU memory + unified memory)",
+		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
+	)
+	containerVGPUPhysicalMemoryLimit = prometheus.NewDesc(
+		"container_vgpu_device_physical_memory_limit_in_bytes",
+		"Container's virtual GPU device physical memory limit (only physical GPU memory)",
 		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 	containerVGPUPhysicalMemoryUsage = prometheus.NewDesc(
@@ -234,25 +234,36 @@ var (
 		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 
-	migDeviceTotalMemory = prometheus.NewDesc(
-		"mig_device_total_memory_in_bytes",
-		"MIG device total memory (bytes)",
-		[]string{"node", "device_idx", "device_uuid", "parent_uuid", "ci_id", "gi_id", "profile"}, nil,
+	migDeviceHealthStatus = prometheus.NewDesc(
+		"mig_device_health_status",
+		"MIG device health status (1 for healthy, 0 for unhealthy)",
+		[]string{"node", "mig_idx", "mig_uuid", "device_uuid", "ci_id", "gi_id", "ci_profile_id", "gi_profile_id", "profile"}, nil,
 	)
-	migDeviceMemoryUsage = prometheus.NewDesc(
-		"mig_device_memory_usage_in_bytes",
-		"MIG device memory usage (bytes)",
-		[]string{"node", "device_idx", "device_uuid", "parent_uuid", "ci_id", "gi_id", "profile"}, nil,
+	migDeviceGiProfileMemory = prometheus.NewDesc(
+		"mig_device_gi_profile_memory_in_bytes",
+		"MIG device GI profile memory (bytes)",
+		[]string{"node", "mig_idx", "mig_uuid", "device_uuid", "ci_id", "gi_id", "ci_profile_id", "gi_profile_id", "profile"}, nil,
 	)
-	migDeviceMemoryUtilRate = prometheus.NewDesc(
-		"mig_device_memory_utilization_percent",
-		"MIG device memory utilization percentage (0-100)",
-		[]string{"node", "device_idx", "device_uuid", "parent_uuid", "ci_id", "gi_id", "profile"}, nil,
+	migDeviceGiProfileSMCount = prometheus.NewDesc(
+		"mig_device_gi_profile_sm_count",
+		"MIG device GI profile SM count",
+		[]string{"node", "mig_idx", "mig_uuid", "device_uuid", "ci_id", "gi_id", "ci_profile_id", "gi_profile_id", "profile"}, nil,
 	)
-	containerMIGAllocationInfo = prometheus.NewDesc(
-		"container_mig_device_allocation_info",
-		"Container's MIG device allocation information",
-		[]string{"node", "device_idx", "device_uuid", "parent_uuid", "pod_namespace", "pod_name", "container_name"}, nil,
+
+	containerMIGMemoryLimit = prometheus.NewDesc(
+		"container_mig_device_memory_limit_in_bytes",
+		"Container's MIG device total memory limit (only physical MIG memory)",
+		[]string{"node", "mig_idx", "mig_uuid", "device_uuid", "pod_namespace", "pod_name", "container_name"}, nil,
+	)
+	containerMIGMemoryUsage = prometheus.NewDesc(
+		"container_mig_device_memory_usage_in_bytes",
+		"Container's MIG device memory usage (only physical MIG memory)",
+		[]string{"node", "mig_idx", "mig_uuid", "device_uuid", "pod_namespace", "pod_name", "container_name"}, nil,
+	)
+	containerMIGMemoryUtilRate = prometheus.NewDesc(
+		"container_mig_device_memory_utilization_percent",
+		"Container's MIG device memory utilization percentage (0-100)",
+		[]string{"node", "mig_idx", "mig_uuid", "device_uuid", "pod_namespace", "pod_name", "container_name"}, nil,
 	)
 )
 
@@ -285,10 +296,12 @@ func (c nodeGPUCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- containerVGPUPhysicalMemoryLimit
 	ch <- containerVGPUMemoryUtilRate
 	ch <- containerVGPUCoreUtilRate
-	ch <- migDeviceTotalMemory
-	ch <- migDeviceMemoryUsage
-	ch <- migDeviceMemoryUtilRate
-	ch <- containerMIGAllocationInfo
+	ch <- migDeviceHealthStatus
+	ch <- migDeviceGiProfileMemory
+	ch <- migDeviceGiProfileSMCount
+	ch <- containerMIGMemoryLimit
+	ch <- containerMIGMemoryUsage
+	ch <- containerMIGMemoryUtilRate
 }
 
 type procInfoList map[uint32]nvml.ProcessInfo_v1
@@ -693,35 +706,40 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		migIdx := strconv.Itoa(migInfo.Index)
 		ciId := fmt.Sprintf("%d", migInfo.CiInfo.Id)
 		giId := fmt.Sprintf("%d", migInfo.GiInfo.Id)
-		//isHealthy := fmt.Sprint(vGpuHealthMap[parentUUID])
-		podResourcesResp = listMigPodResourcesFunc()
-		podInfoP, _ := c.podResource.GetPodInfoByMatchFunc(podResourcesResp, func(devices *v1alpha1.ContainerDevices) bool {
-			return devices.GetResourceName() == mig.GetMigResourceName(migInfo) && slices.Contains(devices.GetDeviceIds(), migInfo.UUID)
+		ciProfileId := fmt.Sprintf("%d", migInfo.CiProfileInfo.Id)
+		giProfileId := fmt.Sprintf("%d", migInfo.GiProfileInfo.Id)
+		podInfoP, _ := c.podResource.GetPodInfoByMatchFunc(listMigPodResourcesFunc(), func(d *v1alpha1.ContainerDevices) bool {
+			return d.GetResourceName() == mig.GetMigResourceName(migInfo) && slices.Contains(d.GetDeviceIds(), migInfo.UUID)
 		})
 		if podInfoP != nil {
-			ch <- prometheus.MustNewConstMetric(containerMIGAllocationInfo,
-				prometheus.GaugeValue, float64(1), c.nodeName, migIdx, migInfo.UUID,
-				parentUUID, podInfoP.PodNamespace, podInfoP.PodName, podInfoP.ContainerName)
-		}
-		ch <- prometheus.MustNewConstMetric(migDeviceTotalMemory,
-			prometheus.GaugeValue, float64(migInfo.Memory.Total),
-			c.nodeName, migIdx, migInfo.UUID, parentUUID, ciId, giId, migInfo.Profile)
-
-		ch <- prometheus.MustNewConstMetric(migDeviceMemoryUsage,
-			prometheus.GaugeValue, float64(migInfo.Memory.Used),
-			c.nodeName, migIdx, migInfo.UUID, parentUUID, ciId, giId, migInfo.Profile)
-
-		memoryUtilRate := int64(0)
-		if migInfo.Memory.Total > 0 {
-			memoryUtilRate = int64(float64(migInfo.Memory.Used) / float64(migInfo.Memory.Total) * 100)
-			if memoryUtilRate > 100 {
-				memoryUtilRate = 100
+			memoryUtilRate := int64(0)
+			if migInfo.Memory.Total > 0 {
+				memoryUtilRate = int64(float64(migInfo.Memory.Used) / float64(migInfo.Memory.Total) * 100)
+				if memoryUtilRate > 100 {
+					memoryUtilRate = 100
+				}
 			}
+
+			ch <- prometheus.MustNewConstMetric(containerMIGMemoryLimit, prometheus.GaugeValue, float64(migInfo.Memory.Total),
+				c.nodeName, migIdx, migInfo.UUID, parentUUID, podInfoP.PodNamespace, podInfoP.PodName, podInfoP.ContainerName)
+			ch <- prometheus.MustNewConstMetric(containerMIGMemoryUsage, prometheus.GaugeValue, float64(migInfo.Memory.Used),
+				c.nodeName, migIdx, migInfo.UUID, parentUUID, podInfoP.PodNamespace, podInfoP.PodName, podInfoP.ContainerName)
+			ch <- prometheus.MustNewConstMetric(containerMIGMemoryUtilRate, prometheus.GaugeValue, float64(memoryUtilRate),
+				c.nodeName, migIdx, migInfo.UUID, parentUUID, podInfoP.PodNamespace, podInfoP.PodName, podInfoP.ContainerName)
 		}
 
-		ch <- prometheus.MustNewConstMetric(migDeviceMemoryUtilRate,
-			prometheus.GaugeValue, float64(memoryUtilRate), c.nodeName,
-			migIdx, migInfo.UUID, parentUUID, ciId, giId, migInfo.Profile)
+		totalMemory := float64(migInfo.GiProfileInfo.MemorySizeMB) * float64(units.MiB)
+		ch <- prometheus.MustNewConstMetric(migDeviceGiProfileMemory, prometheus.GaugeValue, totalMemory,
+			c.nodeName, migIdx, migInfo.UUID, parentUUID, ciId, giId, ciProfileId, giProfileId, migInfo.Profile)
+
+		count := migInfo.GiProfileInfo.MultiprocessorCount
+		ch <- prometheus.MustNewConstMetric(migDeviceGiProfileSMCount, prometheus.GaugeValue, float64(count),
+			c.nodeName, migIdx, migInfo.UUID, parentUUID, ciId, giId, ciProfileId, giProfileId, migInfo.Profile)
+
+		status := float64(devHealthMap[parentUUID])
+		ch <- prometheus.MustNewConstMetric(migDeviceHealthStatus, prometheus.GaugeValue, status,
+			c.nodeName, migIdx, migInfo.UUID, parentUUID, ciId, giId, ciProfileId, giProfileId, migInfo.Profile)
+
 	})
 
 }
@@ -823,17 +841,15 @@ collecProcessInfo:
 	devProcUtilMap[uuid] = processUtilList
 }
 
-func FlattenMigInfosMapEach(migInfosMap map[string][]*nvidia.MigInfo,
-	fn func(parentUuid string, mig *nvidia.MigInfo)) {
+func FlattenMigInfosMapEach(migInfosMap map[string][]*nvidia.MigInfo, fn func(parentUuid string, mig *nvidia.MigInfo)) {
 	if fn == nil {
 		return
 	}
 	for parentUUID, migInfos := range migInfosMap {
 		for _, migInfo := range migInfos {
-			if migInfo == nil {
-				continue
+			if migInfo != nil {
+				fn(parentUUID, migInfo)
 			}
-			fn(parentUUID, migInfo)
 		}
 	}
 }

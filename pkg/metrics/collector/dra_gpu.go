@@ -143,10 +143,12 @@ func (c draGPUCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- containerVGPUCoreUtilRate
 	// MIG devices are not reported on the DRA path yet; see node_gpu.go for the
 	// device-plugin equivalent.
-	//ch <- migDeviceTotalMemory
-	//ch <- migDeviceMemoryUsage
-	//ch <- migDeviceMemoryUtilRate
-	//ch <- containerMIGAllocationInfo
+	//ch <- migDeviceHealthStatus
+	//ch <- migDeviceGiProfileMemory
+	//ch <- migDeviceGiProfileSMCount
+	//ch <- containerMIGMemoryLimit
+	//ch <- containerMIGMemoryUsage
+	//ch <- containerMIGMemoryUtilRate
 }
 
 // listManagerResourceSlices returns every ResourceSlice this node's driver
