@@ -100,6 +100,10 @@ func (rp *remotePublisher) apply(pool resourceslice.Pool) resourceslice.Pool {
 	for i := range pool.Slices {
 		remote.Decorate(pool.Slices[i].Devices, spec)
 		if rp.enabled() {
+			// Always within a DRA string attribute's 64 characters: kubelet
+			// names the node after its hostname and labels it
+			// kubernetes.io/hostname with the same value, so a node longer
+			// than a 63-character label value never registers.
 			attr := resourceapi.DeviceAttribute{StringValue: ptr.To(rp.nodeName)}
 			for j := range pool.Slices[i].Devices {
 				pool.Slices[i].Devices[j].Attributes[remote.AttrNodeName] = attr
