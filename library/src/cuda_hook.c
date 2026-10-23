@@ -35,6 +35,7 @@
 #include "include/metrics.h"
 #include "include/nvml-helper.h"
 #include "include/sm_delta.h"
+#include "include/array_size.h"
 
 #define DEVICE_BATCH_SIZE        4
 
@@ -314,7 +315,7 @@ typedef enum {
 } memory_path_t;
 
 static void get_used_gpu_memory(void *, CUdevice);
-static size_t get_array_base_size(int format);
+static void note_unsized_array(const char *api, int format, int sized);
 static int load_limited_memory_view(CUdevice device, int *host_index,
                                     int *lock_fd, size_t *used,
                                     size_t *vmem_used);
@@ -379,14 +380,48 @@ static int load_limited_memory_view(CUdevice device,
   return 1;
 }
 
-static size_t get_array_request_size(const CUDA_ARRAY_DESCRIPTOR *desc) {
-  size_t base_size = get_array_base_size(desc->Format);
-  return base_size * desc->NumChannels * desc->Height * desc->Width;
-}
+/* Sizing the array hooks' budget request lives in include/array_size.h, which
+ * documents where each rule comes from in cuda.h and is exercised directly by
+ * test/nogpu/test_array_size.c. note_unsized_array() below is the one piece
+ * that cannot live in that pure header: the logging. */
 
-static size_t get_array3d_request_size(const CUDA_ARRAY3D_DESCRIPTOR *desc) {
-  size_t base_size = get_array_base_size(desc->Format);
-  return base_size * desc->NumChannels * desc->Height * desc->Width * desc->Depth;
+/* Log a descriptor the arithmetic could not size, and one whose format is not
+ * in the exact table -- both are silent accounting gaps otherwise. Rate-limited
+ * to the first occurrence per format because these sit on the allocation path.
+ *
+ * The format index is the key rather than a single global flag so a workload
+ * mixing, say, BC7 textures with NV12 surfaces reports both. Keyed per format
+ * and NOT per API: the three array hooks share the table, so the first one to
+ * see a format speaks for all of them -- one line per unknown format in the
+ * log is the point.
+ */
+static void note_unsized_array(const char *api, int format, int sized) {
+  /* Two tables so an unsizable descriptor and an unknown-but-sizable format
+   * are not mistaken for each other: they are different conditions at
+   * different severities, and seeing one must not suppress the other.
+   *
+   * Formats are small enough to index directly (cuda.h tops out at 0xc0-odd);
+   * anything wider shares the last slot, which only costs a repeated log.
+   * Claimed with an atomic exchange rather than a plain store: these hooks run
+   * on every allocating thread, and a racing pair of plain accesses on the
+   * same byte is a data race even when the only stake is a duplicate line. */
+  static uint8_t logged_unsizable[256];
+  static uint8_t logged_unknown[256];
+  uint8_t *table = sized ? logged_unknown : logged_unsizable;
+  unsigned idx = (unsigned)format & 0xff;
+
+  if (__atomic_exchange_n(&table[idx], (uint8_t)1, __ATOMIC_RELAXED) != 0) {
+    return;
+  }
+  if (!sized) {
+    LOGGER(VERBOSE, "%s: descriptor cannot be sized (format 0x%x); forwarding to "
+                    "the driver without a budget check", api, format);
+  } else {
+    LOGGER(WARNING, "%s: array format 0x%x is not in the exact size table; "
+                    "charging the %zu-byte upper bound per channel, which may "
+                    "over-count block-compressed or planar formats",
+                    api, format, VGPU_ARRAY_UNKNOWN_FORMAT_BYTES);
+  }
 }
 
 /** internal function definition */
@@ -3617,31 +3652,6 @@ DONE:
   return ret;
 }
 
-static size_t get_array_base_size(int format) {
-  size_t base_size = 0;
-
-  switch (format) {
-  case CU_AD_FORMAT_UNSIGNED_INT8:
-  case CU_AD_FORMAT_SIGNED_INT8:
-    base_size = 8;
-    break;
-  case CU_AD_FORMAT_UNSIGNED_INT16:
-  case CU_AD_FORMAT_SIGNED_INT16:
-  case CU_AD_FORMAT_HALF:
-    base_size = 16;
-    break;
-  case CU_AD_FORMAT_UNSIGNED_INT32:
-  case CU_AD_FORMAT_SIGNED_INT32:
-  case CU_AD_FORMAT_FLOAT:
-    base_size = 32;
-    break;
-  default:
-    base_size = 32;
-  }
-
-  return base_size;
-}
-
 
 CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
   CUresult ret;
@@ -3652,12 +3662,14 @@ CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocate
    * initializer between it and the label, and the driver-OOM metric at CALL
    * reads host_index. */
   int host_index = -1;
+  size_t request_size = 0;
   /* NULL-arg fast path: forward to the driver so the caller sees the
-   * canonical CUDA_ERROR_INVALID_VALUE instead of a segfault inside
-   * get_array_request_size (which dereferences pAllocateArray->Format with
-   * no NULL check). NVIDIA OptiX/Aftermath fallback init paths probe with
-   * NULL during early init; without this guard, libvgpu-control.so crashes
-   * Isaac Sim Kit at startup. */
+   * canonical CUDA_ERROR_INVALID_VALUE. NVIDIA OptiX/Aftermath fallback init
+   * paths probe with NULL during early init; without this guard,
+   * libvgpu-control.so crashed Isaac Sim Kit at startup back when the sizing
+   * helper dereferenced the descriptor unchecked. vgpu_array_size() now
+   * handles NULL itself, but the fast path stays: it is also what keeps the
+   * canonical driver error for a probe, rather than one of ours. */
   if (unlikely(pAllocateArray == NULL)) {
     goto CALL;
   }
@@ -3665,7 +3677,17 @@ CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocate
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  size_t request_size = get_array_request_size(pAllocateArray);
+  /* An unsizable descriptor (malformed, or a product that would overflow)
+   * forwards unchecked rather than being rejected here: the driver owns the
+   * verdict on a bad descriptor, and nothing it refuses can consume memory.
+   * See include/array_size.h for why one slipped request cannot accumulate. */
+  if (unlikely(!vgpu_array_size(pAllocateArray, &request_size))) {
+    note_unsized_array("cuArrayCreate", (int)pAllocateArray->Format, 0);
+    goto CALL;
+  }
+  if (unlikely(!vgpu_array_format_is_known((int)pAllocateArray->Format))) {
+    note_unsized_array("cuArrayCreate", (int)pAllocateArray->Format, 1);
+  }
   path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
@@ -3703,6 +3725,7 @@ CUresult _cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllo
   memory_path_t path;
   /* Declared before `goto CALL`; see _cuArrayCreate. */
   int host_index = -1;
+  size_t request_size = 0;
   /* NULL-arg fast path; same rationale as _cuArrayCreate above. */
   if (unlikely(pAllocateArray == NULL)) {
     goto CALL;
@@ -3711,7 +3734,14 @@ CUresult _cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllo
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  size_t request_size = get_array3d_request_size(pAllocateArray);
+  /* Unsizable forwards unchecked; see _cuArrayCreate. */
+  if (unlikely(!vgpu_array3d_size(pAllocateArray, &request_size))) {
+    note_unsized_array("cuArray3DCreate", (int)pAllocateArray->Format, 0);
+    goto CALL;
+  }
+  if (unlikely(!vgpu_array_format_is_known((int)pAllocateArray->Format))) {
+    note_unsized_array("cuArray3DCreate", (int)pAllocateArray->Format, 1);
+  }
   path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
@@ -3751,6 +3781,7 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
   memory_path_t path;
   /* Declared before `goto CALL`; see _cuArrayCreate. */
   int host_index = -1;
+  size_t request_size = 0;
   /* NULL-arg fast path; same rationale as _cuArrayCreate above. */
   if (unlikely(pMipmappedArrayDesc == NULL)) {
     goto CALL;
@@ -3759,7 +3790,15 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  size_t request_size = get_array3d_request_size(pMipmappedArrayDesc);
+  /* Base level only, and unsizable forwards unchecked; see _cuArrayCreate and
+   * the vgpu_array3d_size() comment on the mip tail. */
+  if (unlikely(!vgpu_array3d_size(pMipmappedArrayDesc, &request_size))) {
+    note_unsized_array("cuMipmappedArrayCreate", (int)pMipmappedArrayDesc->Format, 0);
+    goto CALL;
+  }
+  if (unlikely(!vgpu_array_format_is_known((int)pMipmappedArrayDesc->Format))) {
+    note_unsized_array("cuMipmappedArrayCreate", (int)pMipmappedArrayDesc->Format, 1);
+  }
   path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
