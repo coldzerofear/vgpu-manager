@@ -403,7 +403,7 @@ extern resource_data_t *g_vgpu_config;
  * auto_external_util_threshold: external util percent above which the
  *                     device is considered "shared with other Pods".
  * delta_increment_divisor: seed divisor -- delta's minimum step is
- *                     total*MIN_INCREMENT/R, its granularity. 81920 default;
+ *                     total*MIN_INCREMENT/R, its granularity. 1310720 default;
  *                     see include/sm_delta.h.
  * delta_ramp_floor_divisor: delta()'s grow/cut step is floored at
  *                     g_total*diff/(up_limit*N); N sets the bulk-ramp length in

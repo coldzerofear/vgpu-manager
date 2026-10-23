@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include "include/hook.h"
+#include "include/sm_delta.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -123,7 +124,7 @@ limitations under the License.
 /* Seed divisor R in delta(): the minimum step is total*MIN_INCREMENT/R -- the
  * controller's GRANULARITY. A step coarser than a light workload's per-tick
  * consumption pins util at 100% (the share cannot express a small enough
- * refill), so R errs fine: 81920 ~= 0.006% of the pool. Response speed is
+ * refill), so R errs fine: 1310720 ~= 0.0004% of the pool. Response speed is
  * owned by the share-proportional term, not this knob. See sm_delta.h. */
 #define CUDA_SM_DELTA_INCREMENT_DIVISOR_ENV "CUDA_SM_DELTA_INCREMENT_DIVISOR"
 
@@ -571,7 +572,7 @@ int get_delta_ramp_floor_divisor(int *out) {
  * include/sm_delta.h). Positive only -- 0 would divide by zero and a negative
  * value would invert the controller; bad values fall back to the default. */
 int get_delta_increment_divisor(int *out) {
-  return get_positive_int_env(CUDA_SM_DELTA_INCREMENT_DIVISOR_ENV, 81920, out);
+  return get_positive_int_env(CUDA_SM_DELTA_INCREMENT_DIVISOR_ENV, DELTA_INCREMENT_DIVISOR_DEFAULT, out);
 }
 
 /* AIMD deadband lower edge / 1000. Caller MUST additionally check

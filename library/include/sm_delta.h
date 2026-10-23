@@ -22,9 +22,11 @@ limitations under the License.
  * selected by closed-loop simulation, not argument: 55 real GPU models (GTX
  * 1050 through B300, 5 to 188 SMs, 1024/1536/2048 threads per SM), every
  * core limit from 1 to 100, three workload intensities, two feedback delays
- * -- 33000 cells against a frozen replica of the previous sm^2 formula. See
- * test/nogpu/test_delta_campaign.c (the grid, asserted in CI) and
- * docs/sm_delta_validation.md (the campaign report).
+ * -- 33000 cells against a frozen replica of the previous sm^2 formula; then
+ * the generation after it against a frozen replica of THAT, over a load range
+ * five decades wider and 64 parts including synthetic future ones. See
+ * test/nogpu/test_delta_campaign.c and test/nogpu/test_delta_gen_campaign.c
+ * (both asserted in CI) and docs/sm_delta_validation.md (the report).
  *
  * THE STEP:
  *
@@ -32,13 +34,15 @@ limitations under the License.
  *   grow  (util <= target):
  *     boot & share small  -> share = pool*target/6400   (one-shot jump-start)
  *     step = max(seed, share*err/(damp*target)), damp = starved ? 4 : 6
+ *     util == 0 & starved -> step >= sqrt(2*seed*share)   (escape)
  *     capped at pool/10 per tick
  *   cut   (util > target):
  *     blowout (util > 2*target, err >= 5):
  *          step = max(share*err/(6*target), seed, pool*err/(target*64))
  *     otherwise:
  *          step = share*err/(6*target), scaled by
- *                 max( share/(share+bucket),  err/100 )
+ *                 max( share/(share+bucket),  err/100 ),
+ *          at least 1 token unless bucket >= share
  *
  * where seed = max(1, pool*MIN_INCREMENT/inc_divisor) and err = |target-util|.
  *
@@ -56,9 +60,25 @@ limitations under the License.
  * measurement delay (share/2-scale steps blow up at 4).
  *
  * THE SEED is the escape from share=0 and the granularity at the setpoint:
- * ~0.006% of the pool, below even a pool-drained-over-minutes consumption
- * rate. Floored at 1 token so an absurd env divisor degrades granularity
- * instead of freezing the controller.
+ * ~0.0004% of the pool. It must sit below the per-tick consumption of the
+ * lightest workload that matters, and that is set by software, not by the
+ * card: a kernel that fills the GPU for 10 ms with 1024-thread blocks
+ * consumes pool/32768 per tick under grid charging, and a small kernel on a
+ * bigger future part consumes less still. The previous seed (pool/16384) was
+ * twice that GEMM's whole demand -- the share could only bang between 0 and
+ * seed multiples, util pinned at 100% most ticks (HAMi-core #360). Floored at
+ * 1 token so an absurd env divisor degrades granularity instead of freezing
+ * the controller.
+ *
+ * THE ESCAPE pays for that fineness. After the boot jump overshoots a light
+ * workload, the bucket drains for a while and share decays toward zero; with
+ * a coarse seed the climb back was linear and quick, with a fine one it would
+ * crawl. A zero reading off a starved bucket proves share < consumption/100,
+ * so the grow floor becomes sqrt(2*seed*share) -- what a seed growing by one
+ * seed per tick would give: quadratic, not exponential (exponential climbs
+ * ring against delayed feedback), and it fades out once share passes
+ * 32*seed, where the proportional term is larger. No absolute pool-relative
+ * quantum is added; any such kick reproduced #360 at the light end.
  *
  * THE JUMP-START (boot, first two controller cycles per device) answers the
  * old formula's one legitimate advantage: it reached the target in a tick or
@@ -82,10 +102,25 @@ limitations under the License.
  * keeps a runaway share (share > consumption, bucket pinned full) cuttable
  * -- without it that state would hold forever.
  *
+ * THE 1-TOKEN TRIM. Near the target with a small share, both mild-cut terms
+ * truncate to 0 and util parks a few points over the limit for good -- a
+ * dead zone the previous generation had too, escaping it only when its
+ * coarse grow steps happened to land close. Trimming by the integer
+ * resolution closes it. Not while bucket >= share: there the overshoot is the
+ * backlog draining (the anti-windup case), and walking share down to 0
+ * during a long drain leaves nothing to climb back from.
+ *
  * THE EMERGENCY FLOOR handles true blowouts (util beyond twice the target),
  * where share may be tiny against the excess and proportional cuts stall.
  * The err >= MIN_INCREMENT gate keeps it out of single-digit targets where
  * integer utilization flaps across the 2x line constantly.
+ *
+ * GENERATIONAL RESULT (v14: seed pool*5/1310720 + escape + 1-token trim, vs
+ * v13 with seed pool*5/81920; 333234 cells): steady MAE 134304 better / 10
+ * worse by >0.5, aggregate 1.35x lower; p95 89731 / 2; cold-start 41710 / 1.
+ * Zero regressions on v13's three loads; every load-decade x limit-band
+ * region at least as good on average; the isolated cells are integer limit
+ * cycles, worst +0.6 / +2 / +1.53 (docs/sm_delta_validation.md section 7).
  *
  * CAMPAIGN RESULT (v13, vs the old formula, 33000 cells): steady-state MAE
  * 31223 better / 1777 equal / 0 worse (aggregate 8.2x lower); p95 sawtooth
@@ -105,11 +140,29 @@ extern "C" {
 #endif
 
 #define MIN_INCREMENT                    5
-#define DELTA_INCREMENT_DIVISOR_DEFAULT  81920
+#define DELTA_INCREMENT_DIVISOR_DEFAULT  1310720
 #define DELTA_GROW_CAP_DIVISOR           10
 #define DELTA_REL_DAMPING                6
 #define DELTA_STARVED_DAMPING            4
 #define DELTA_BOOT_JUMP_DIVISOR          6400
+
+/* floor(sqrt(n)), bit-by-bit: exact, branch-bounded at 32 iterations. */
+static inline uint64_t sm_delta_isqrt(uint64_t n) {
+  uint64_t r = 0, bit = 1ULL << 62;
+  while (bit > n) {
+    bit >>= 2;
+  }
+  while (bit) {
+    if (n >= r + bit) {
+      n -= r + bit;
+      r = (r >> 1) + bit;
+    } else {
+      r >>= 1;
+    }
+    bit >>= 2;
+  }
+  return r;
+}
 
 static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_current,
                                     int64_t share, int64_t bucket, int boot,
@@ -142,6 +195,16 @@ static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_curren
     int64_t increment = share * (int64_t)raw_diff / (damp * up);
     if (increment < seed) {
       increment = seed;
+    }
+    /* Escape: a zero reading off a starved bucket means share is below 1%
+     * of consumption. Climb quadratically out of the seed scale (what a
+     * seed growing by one seed per tick would do) instead of crawling. */
+    if (user_current == 0 && bucket <= 0) {
+      __int128 q = (__int128)2 * seed * share;
+      int64_t escape = (int64_t)sm_delta_isqrt(q > INT64_MAX ? INT64_MAX : (uint64_t)q);
+      if (increment < escape) {
+        increment = escape;
+      }
     }
     int64_t grow_cap = total / DELTA_GROW_CAP_DIVISOR;
     if (increment > grow_cap) {
@@ -179,6 +242,13 @@ static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_curren
   int64_t by_cause = (int64_t)((__int128)prop * share / (share + backlog + 1));
   int64_t by_error = prop * (int64_t)raw_diff / 100;
   int64_t increment = by_cause > by_error ? by_cause : by_error;
+  /* Both terms truncate to 0 for a small share near the target, which would
+   * park util a few points over it for good. Trim by the integer resolution
+   * -- unless the backlog explains the overshoot, where holding share is
+   * the design (trimming it there empties share while the bucket drains). */
+  if (increment < 1 && backlog < share) {
+    increment = 1;
+  }
   return (share - increment) < 0 ? 0 : (share - increment);
 }
 

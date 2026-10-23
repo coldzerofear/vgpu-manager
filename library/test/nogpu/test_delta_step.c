@@ -354,6 +354,84 @@ static void test_invariants(void) {
       printf("  [ok] step >= 1 from share=0 under any divisor (no bootstrap deadlock)\n");
     }
   }
+
+  /* #360: a kernel filling the GPU for 10 ms with 1024-thread blocks
+   * consumes pool/32768 per tick under grid charging. The seed must sit well
+   * under it on every pool, or the share can only bang between 0 and seed
+   * multiples. Pool-relative, so checking the extremes checks them all. */
+  {
+    int64_t pools[] = {5LL * 2048 * 32, 188LL * 1536 * 32, 1024LL * 4096 * 32};
+    int ok = 1;
+    for (int i = 0; i < 3; i++) {
+      int64_t seed = sm_delta_step(pools[i], 50, 50, 0, pools[i], 0, DIV, 64);
+      if (seed * 4 > pools[i] / 32768) {
+        ok = 0;
+      }
+    }
+    if (!ok) {
+      printf("  [FAIL] seed not 4x under a 10 ms GEMM's per-tick consumption\n");
+      failures++;
+    } else {
+      printf("  [ok] seed >= 4x under a 10 ms GEMM's per-tick consumption (#360)\n");
+    }
+  }
+
+  /* The escape's integer square root is exact everywhere it can be fed. */
+  {
+    int ok = 1;
+    for (uint64_t n = 0; n < 200000 && ok; n++) {
+      uint64_t r = sm_delta_isqrt(n);
+      ok = r * r <= n && (r + 1) * (r + 1) > n;
+    }
+    uint64_t edge[] = {UINT64_MAX >> 1, (1ULL << 62) - 1, 1ULL << 62,
+                       4294967295ULL * 4294967295ULL};
+    for (int i = 0; i < 4 && ok; i++) {
+      unsigned __int128 r = sm_delta_isqrt(edge[i]);
+      ok = r * r <= edge[i] && (r + 1) * (r + 1) > edge[i];
+    }
+    if (!ok) {
+      printf("  [FAIL] sm_delta_isqrt is not floor(sqrt(n))\n");
+      failures++;
+    } else {
+      printf("  [ok] sm_delta_isqrt exact on [0, 2e5) and at the 64-bit edges\n");
+    }
+  }
+
+  /* Escape: only a zero reading off a starved bucket climbs at
+   * sqrt(2*seed*share); a full bucket or a nonzero reading keeps the plain
+   * step, and an absurd divisor cannot overflow it. */
+  {
+    int64_t total = 108LL * 2048 * 32;
+    int64_t seed = total * MIN_INCREMENT / DIV, share = 4 * seed;
+    int64_t want = (int64_t)sm_delta_isqrt((uint64_t)(2 * seed * share));
+    int64_t esc = sm_delta_step(total, 50, 0, share, 0, 0, DIV, 64) - share;
+    int64_t full = sm_delta_step(total, 50, 0, share, total, 0, DIV, 64) - share;
+    int64_t warm = sm_delta_step(total, 50, 1, share, 0, 0, DIV, 64) - share;
+    int64_t wild = sm_delta_step(total, 50, 0, total / 2, 0, 0, 1, 64);
+    if (esc != want || full >= want || warm >= want || wild < total / 2 || wild > total) {
+      printf("  [FAIL] escape: %ld (want %ld), full %ld, warm %ld, wild %ld\n",
+             (long)esc, (long)want, (long)full, (long)warm, (long)wild);
+      failures++;
+    } else {
+      printf("  [ok] escape sqrt(2*seed*share)=%ld only on a starved zero reading\n", (long)want);
+    }
+  }
+
+  /* 1-token trim: a small share just over the target must move down (the
+   * proportional cut truncates to 0 there), but not while the bucket's
+   * backlog explains the overshoot. */
+  {
+    int64_t total = 5LL * 2048 * 32;
+    int64_t parked = sm_delta_step(total, 50, 53, 56, 1, 0, DIV, 64);
+    int64_t backlog = sm_delta_step(total, 50, 53, 56, 56, 0, DIV, 64);
+    if (parked != 55 || backlog != 56) {
+      printf("  [FAIL] trim: parked share 56 -> %ld (want 55), backlog case -> %ld (want 56)\n",
+             (long)parked, (long)backlog);
+      failures++;
+    } else {
+      printf("  [ok] 1-token trim un-parks a small share, holds it while the backlog drains\n");
+    }
+  }
 }
 
 /* ---- Part 2: closed loop ---- */

@@ -606,7 +606,7 @@ dynamic_config_t g_dynamic_config = {
   .aimd_md_cooldown_cycles      = 3,
   .auto_debounce_cycles         = 10,
   .auto_external_util_threshold = 1,
-  .delta_increment_divisor      = 81920,
+  .delta_increment_divisor      = DELTA_INCREMENT_DIVISOR_DEFAULT,
   .delta_ramp_floor_divisor     = 64,
   .sm_shared_bucket             = 0,     /* per-process bucket (historical) */
 };

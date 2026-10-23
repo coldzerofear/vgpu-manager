@@ -329,6 +329,16 @@ if(BUILD_SM_NODE_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_options(test_delta_campaign PRIVATE -O2)
 
+    # The generational campaign: the shipped step vs a frozen replica of the
+    # generation it replaced, 51 card shapes x R/pool 1e-7..2 x limits 1-99 x
+    # 2 delays. ~2 CPU-minutes, spread over all cores (pthreads) to stay well
+    # inside make test-nogpu's per-test timeout; libm for pow/llround.
+    add_executable(test_delta_gen_campaign test/nogpu/test_delta_gen_campaign.c)
+    target_include_directories(test_delta_gen_campaign PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_options(test_delta_gen_campaign PRIVATE -O2)
+    target_link_libraries(test_delta_gen_campaign PRIVATE m)
+
     # Exercises src/dlsym_entry.S with the real symbol predicates from
     # hook.h. Three pieces, because the bug only appears when the library
     # asking for RTLD_NEXT is loaded after the interceptor:
@@ -384,6 +394,7 @@ foreach(vgpu_nogpu_test
         test_shared_file_mode
         test_delta_step
         test_delta_campaign
+        test_delta_gen_campaign
         test_dlsym_entry)
     if(TARGET ${vgpu_nogpu_test})
         target_link_libraries(${vgpu_nogpu_test} PRIVATE
