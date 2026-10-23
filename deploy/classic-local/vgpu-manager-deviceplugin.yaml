@@ -158,7 +158,7 @@ spec:
             # docs/how_to_use_unified_memory_gpu.md
 #            - --device-memory-override=65536
             - --node-config-path=/config/nodeConfig.json
-            - --open-kernel-modules=false
+            - --open-kernel-modules=true
             # CDI device injection (set deviceListStrategy to cdi-annotations and/or
             # cdi-cri in the node config to enable). The nvidia-cdi-hook binary is
             # bundled in the image and installed to $HOST_MANAGER_DIR/nvidia-cdi-hook

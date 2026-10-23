@@ -212,7 +212,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers that request NVIDIA GPU resources are started with GPUDirect Storage support.")
 	pflag.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers that request NVIDIA GPU resources are started with MOFED support.")
 	pflag.BoolVar(&o.GDRCopyEnabled, "gdrcopy-enabled", o.GDRCopyEnabled, "Ensure that containers that request NVIDIA GPU resources are started with GDRCopy support.")
-	pflag.BoolVar(&o.OpenKernelModules, "open-kernel-modules", o.OpenKernelModules, "If using the open-gpu-kernel-modules, open it and enable compatibility mode.")
+	pflag.BoolVar(&o.OpenKernelModules, "open-kernel-modules", true, "If an open GPU kernel module or new version driver is installed, enable it to improve vGPU library compatibility.")
 	pflag.StringVar(&o.MigStrategy, "mig-strategy", o.MigStrategy, "Strategy for starting MIG device plugin service. (supported values: \"none\" | \"single\" | \"mixed\")")
 	pflag.IntSliceVar(&o.ImexChannelIDs, "imex-channel-ids", o.ImexChannelIDs, "A list of IMEX channels to inject.")
 	pflag.BoolVar(&o.ImexRequired, "imex-required", o.ImexRequired, "The specified IMEX channels are required.")

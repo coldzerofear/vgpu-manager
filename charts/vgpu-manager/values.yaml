@@ -248,8 +248,8 @@ devicePlugin:
       mofedEnabled: false
       # Ensure that containers that request NVIDIA GPU resources are started with GDRCopy support.
       gdrcopyEnabled: false
-      # If using the open-gpu-kernel-modules, open it and enable compatibility mode. (default: false)
-      openKernelModules: false
+      # If using the open-gpu-kernel-modules, open it and enable compatibility mode. (default: true)
+      openKernelModules: true
       # Strategy for starting MIG device plugin service (supported values: "none" | "single" | "mixed")
       migStrategy: mixed
       # Configure as a map of gate name -> bool, e.g. { TopologyAwareGPUAllocation: true }.
@@ -337,7 +337,7 @@ devicePlugin:
          excludeDevices: "4..7"
          gdsEnabled: false
          mofedEnabled: false
-         openKernelModules: false
+         openKernelModules: true
 #    json: |
 #      [
 #        {
@@ -352,7 +352,7 @@ devicePlugin:
 #          "excludeDevices": "4-7",
 #          "gdsEnabled": false,
 #          "mofedEnabled": false,
-#          "openKernelModules": false
+#          "openKernelModules": true
 #        }
 #      ]
 

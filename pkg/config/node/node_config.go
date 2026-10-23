@@ -499,7 +499,7 @@ func WithDeviceSplitCountOption(deviceSplitCount int) Option {
 
 func WithDeviceListStrategyOption(deviceListStrategy []string) Option {
 	return func(spec *NodeConfigSpec) {
-		spec.DeviceListStrategy = ptr.To[util.DeviceListStrategies](util.DeviceListStrategies(deviceListStrategy))
+		spec.DeviceListStrategy = ptr.To[util.DeviceListStrategies](deviceListStrategy)
 	}
 }
 
