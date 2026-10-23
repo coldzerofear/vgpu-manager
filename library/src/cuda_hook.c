@@ -444,7 +444,7 @@ static void initialization();
 
 static void rate_limiter(int grids, int blocks, int host_index);
 
-static void change_token(int64_t, int);
+static int64_t change_token(int64_t, int);
 
 static int64_t delta(int up_limit, int user_current, int64_t share, int host_index);
 
@@ -641,7 +641,7 @@ dynamic_config_t g_dynamic_config = {
   .aimd_md_cooldown_cycles      = 3,
   .auto_debounce_cycles         = 10,
   .auto_external_util_threshold = 1,
-  .delta_increment_divisor      = 81920,
+  .delta_increment_divisor      = DELTA_INCREMENT_DIVISOR_DEFAULT,
   .delta_ramp_floor_divisor     = 64,
   .sm_shared_bucket             = 0,     /* per-process bucket (historical) */
 };
@@ -651,7 +651,10 @@ dynamic_config_t g_dynamic_config = {
  * locally removes any ordering dependency on the shared region being populated
  * (a transiently-zero shared ceiling would clamp the bucket to 0 and throttle
  * the whole container). The region's total_cuda_cores is observability only. */
-static void change_token(int64_t delta, int host_index) {
+/* Returns the change this call actually applied (after - before of the CAS
+ * that landed, so clamping included). The watcher adds it to the refill mark
+ * (see g_delta_mark). */
+static int64_t change_token(int64_t delta, int host_index) {
   int64_t cuda_cores_before = 0, cuda_cores_after = 0;
   volatile int64_t *bucket = sm_bucket_of(host_index);
 
@@ -666,6 +669,7 @@ static void change_token(int64_t delta, int host_index) {
       cuda_cores_after = 0;
     }
   } while (!CAS(bucket, cuda_cores_before, cuda_cores_after));
+  return cuda_cores_after - cuda_cores_before;
 }
 
 static void rate_limiter(int grids, int blocks, int host_index) {
@@ -708,6 +712,33 @@ static void rate_limiter(int grids, int blocks, int host_index) {
  * repeated-large-step flooding the jump exists to avoid. */
 static int g_delta_calls[MAX_DEVICE_COUNT] = {0};
 
+/* Refill mark: the bucket as delta() read it, plus every change this cycle's
+ * winner then applied (drain, refill). The next cycle's mark - bucket is
+ * then exactly what the container launched since that read -- launches that
+ * race the read-to-refill window included, which a plain post-refill
+ * snapshot would drop. Used by sm_delta_observe.
+ *
+ * mark/valid are controller state: loaded from / published to the shared
+ * region around the election winner's block like shares[], since the next
+ * winner may be another process. fresh is per-cycle and per-process: set
+ * when delta() lays the baseline this cycle, so a cycle run by another
+ * controller (auto routing to AIMD) invalidates the mark instead of adding
+ * a refill to a stale baseline. */
+static int64_t g_delta_mark[MAX_DEVICE_COUNT]       = {0};
+static int     g_delta_mark_valid[MAX_DEVICE_COUNT] = {0};
+static int     g_delta_mark_fresh[MAX_DEVICE_COUNT] = {0};
+
+/* After the winner's refill (or bypass store): finish this cycle's mark. */
+static void delta_mark_refill(int host_index, int64_t applied) {
+  if (g_delta_mark_fresh[host_index]) {
+    g_delta_mark[host_index] += applied;
+    g_delta_mark_valid[host_index] = 1;
+  } else {
+    g_delta_mark_valid[host_index] = 0;
+  }
+  g_delta_mark_fresh[host_index] = 0;
+}
+
 /* Thin binding of the pure step (include/sm_delta.h) to this process's
  * per-device state. The formula and the reasons each branch exists live with
  * the math so the no-GPU tests exercise the exact shipped code rather than a
@@ -719,10 +750,23 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
     g_delta_calls[host_index]++;
     boot = 1;
   }
-  return sm_delta_step(g_total_cuda_cores[host_index], up_limit, user_current, share,
-                       *sm_bucket_of(host_index), boot,
-                       g_dynamic_config.delta_increment_divisor,
-                       g_dynamic_config.delta_ramp_floor_divisor);
+  /* One read: the step's starved/backlog tests and the consumption below
+   * must describe the same bucket. */
+  int64_t bucket = *sm_bucket_of(host_index);
+  int64_t consumed = g_delta_mark_valid[host_index] ? g_delta_mark[host_index] - bucket : -1;
+  int drain = 0;
+  int64_t next = sm_delta_control(g_total_cuda_cores[host_index], up_limit, user_current,
+                                  share, bucket, boot, consumed,
+                                  g_dynamic_config.delta_increment_divisor,
+                                  g_dynamic_config.delta_ramp_floor_divisor, &drain);
+  g_delta_mark[host_index] = bucket;
+  g_delta_mark_fresh[host_index] = 1;
+  if (drain) {
+    /* Through change_token's CAS so concurrent deductions are not undone;
+     * a stale `bucket` only makes the result clamp at 0, which is the aim. */
+    g_delta_mark[host_index] += change_token(-bucket, host_index);
+  }
+  return next;
 }
 
 /* ---- Pluggable SM throttle controller ---- *
@@ -1372,6 +1416,8 @@ static void sm_ctl_load(int host_index) {
    * never-advanced cooldown of 0 -- and share collapses by md_divisor^N. That
    * avalanche is the exact failure the cooldown exists to prevent. */
   g_aimd_md_cooldown[host_index]         = d->md_cooldown;
+  g_delta_mark[host_index]               = d->delta_mark;
+  g_delta_mark_valid[host_index]         = d->delta_mark_valid;
 }
 
 static void sm_ctl_publish(int host_index) {
@@ -1388,6 +1434,8 @@ static void sm_ctl_publish(int host_index) {
   d->excl_streak       = g_exclusive_pending_streak[host_index];
   d->lost_excl_pending = g_lost_exclusivity_pending[host_index];
   d->md_cooldown       = g_aimd_md_cooldown[host_index];
+  d->delta_mark        = g_delta_mark[host_index];
+  d->delta_mark_valid  = g_delta_mark_valid[host_index];
   __atomic_store_n(&d->share, shares[host_index], __ATOMIC_RELEASE);  /* publish */
 }
 
@@ -1499,6 +1547,8 @@ static void *utilization_watcher(void *arg) {
 
     is[host_index] = 0;
     shares[host_index] = 0;
+    g_delta_mark_valid[host_index] = 0;
+    g_delta_mark_fresh[host_index] = 0;
     sys_frees[host_index] = 0;
     avg_sys_frees[host_index] = 0;
     pre_external_process_nums[host_index] = 0;
@@ -1649,9 +1699,14 @@ static void *utilization_watcher(void *arg) {
              * bit the old behaviour. */
             volatile int64_t *bucket = sm_bucket_of(host_index);
             int64_t cur = __atomic_load_n(bucket, __ATOMIC_RELAXED);
-            change_token(bypass_target - cur, host_index);
+            delta_mark_refill(host_index, change_token(bypass_target - cur, host_index));
           } else {
+            /* Plain store, so no applied delta to add: the store itself is the
+             * mark. Racing launches are lost here anyway (historical path). */
             g_dev_hot[host_index].cur_cuda_cores = bypass_target;
+            g_delta_mark[host_index] = bypass_target;
+            g_delta_mark_valid[host_index] = g_delta_mark_fresh[host_index];
+            g_delta_mark_fresh[host_index] = 0;
           }
           /* The controller ran, so it may have advanced md_cooldown or the
            * exclusivity FSM. Publish before the continue or those advances are
@@ -1761,7 +1816,7 @@ static void *utilization_watcher(void *arg) {
           shares[host_index] = g_sm_controller(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
         }
       }
-      change_token(shares[host_index], host_index);
+      delta_mark_refill(host_index, change_token(shares[host_index], host_index));
       sm_ctl_publish(host_index);
       if ((g_share_log_tick[host_index]++ % WATCHER_UTIL_LOG_STRIDE) == 0) {
         g_share_log_tick[host_index] = 1;

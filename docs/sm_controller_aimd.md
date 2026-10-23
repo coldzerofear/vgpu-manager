@@ -19,7 +19,7 @@
 > AIMD 的步长公式线性于 sm_num,与池容量同阶,架构上不存在此缺陷,是当时的现成规避。
 >
 > **后续(同日):delta 已重构修复(v13)**——核心步长 share·相对误差/阻尼(阻尼 6,桶空时 4),粒度种子
-> pool·5/81920,一次性 boot 跳升 pool·目标/6400,涨侧封顶 pool/10;砍侧按 share/(share+bucket) 平滑抗积分,
+> pool·5/81920(2026-10 代际战役后细化为 pool·5/1310720,见 sm_delta_validation.md),一次性 boot 跳升 pool·目标/6400,涨侧封顶 pool/10;砍侧按 share/(share+bucket) 平滑抗积分,
 > 仅在 util>2×目标且误差≥5 时启用绝对应急 floor(include/sm_delta.h,每个常量的由来见头文件注释)。
 > 全谱系战役仿真(55 种真实卡型 GTX1050→B300 × 限额 1-100 × 3 档负载 × 2 档延迟 = 33000 格,
 > test/nogpu/test_delta_campaign.c,CI 断言):稳态 MAE 与 p95 锯齿 **0 负格**,误差聚合降 8.2 倍,

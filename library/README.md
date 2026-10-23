@@ -59,7 +59,7 @@ Using [LUPINE](https://github.com/lupinemachines/lupine) to unlock remote GPU vi
   every card/workload cell in the simulated closed loop (test/nogpu/test_delta_step.c; hardware
   validation via test/ablation pending). aimd remains available; see docs/sm_controller_aimd.md
 * CUDA_SM_AIMD_MD_DIVISOR / _EFF_RATIO / _AI_BASE_DIV / _DEADBAND_RATIO / _MD_COOLDOWN_CYCLES: AIMD tunables
-* CUDA_SM_DELTA_INCREMENT_DIVISOR: delta seed divisor R (min step = pool*5/R). Default 81920; the
+* CUDA_SM_DELTA_INCREMENT_DIVISOR: delta seed divisor R (min step = pool*5/R). Default 1310720; the
   granularity knob, not a speed knob -- see include/sm_delta.h
 * CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR: delta emergency cut floor divisor, active only when util exceeds
   twice the target - default 64, <=0 disables

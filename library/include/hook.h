@@ -403,7 +403,7 @@ extern resource_data_t *g_vgpu_config;
  * auto_external_util_threshold: external util percent above which the
  *                     device is considered "shared with other Pods".
  * delta_increment_divisor: seed divisor -- delta's minimum step is
- *                     total*MIN_INCREMENT/R, its granularity. 81920 default;
+ *                     total*MIN_INCREMENT/R, its granularity. 1310720 default;
  *                     see include/sm_delta.h.
  * delta_ramp_floor_divisor: delta()'s grow/cut step is floored at
  *                     g_total*diff/(up_limit*N); N sets the bulk-ramp length in
@@ -593,7 +593,7 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
 /* BUMP THIS whenever any field below changes type, order, or offset.
  * The guard compares it and rebuilds the region on mismatch; forgetting to
  * bump it means a new library silently reads an old layout's bytes. */
-#define SM_NODE_LAYOUT_VERSION 3U   /* v3: + sample_interval_ns (adaptive staleness) */
+#define SM_NODE_LAYOUT_VERSION 4U   /* v4: + delta_mark / delta_mark_valid (observed consumption) */
 
 /* No volatile, no _Atomic. volatile provides no concurrency guarantee (today's
  * correctness comes entirely from the CAS macro), and _Atomic risks a
@@ -667,7 +667,17 @@ typedef struct {
    * sampling, and the extra NVML load would make the owner slower still --
    * a feedback loop that ends with centralisation providing nothing. */
   int64_t sample_interval_ns;
-  uint8_t _pad[CACHELINE_SIZE - 104];
+  /* The bucket right after the last refill, written by that cycle's election
+   * winner. The next winner -- often a different process -- reads
+   * delta_mark - bucket as the tokens the whole container launched in
+   * between (include/sm_delta.h, sm_delta_observe). Controller integrator
+   * state like the fields above, so it must live here for the same reason:
+   * a per-process copy would be the bucket of whichever cycle THIS process
+   * last won, and the difference would be garbage. valid is 0 until the
+   * first refill after a rebuild. */
+  int64_t delta_mark;
+  int32_t delta_mark_valid;
+  uint8_t _pad[CACHELINE_SIZE - 116];
 } __attribute__((aligned(CACHELINE_SIZE))) sm_node_dev_t;
 
 typedef struct {
