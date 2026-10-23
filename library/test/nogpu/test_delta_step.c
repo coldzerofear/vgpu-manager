@@ -434,25 +434,35 @@ static void test_invariants(void) {
     }
   }
 
-  /* Bucket ceiling: two cycles of share; the pool when there is no share to
-   * scale from (a zero ceiling would starve the escape from share = 0) or
-   * when two shares would exceed it -- including shares big enough that the
-   * doubling itself would overflow. */
+  /* Consumption-observed cut: it fires only on a persistent, measurable
+   * over-supply well over the target, caps share at consumed*target/util and
+   * asks for a drain -- and every gate alone keeps it off. */
   {
-    int64_t total = 108LL * 2048 * 32;
-    int ok = sm_delta_bucket_ceiling(total, 0) == total
-          && sm_delta_bucket_ceiling(total, -5) == total
-          && sm_delta_bucket_ceiling(total, 1) == 2
-          && sm_delta_bucket_ceiling(total, 1000) == 2000
-          && sm_delta_bucket_ceiling(total, total / 2) == total
-          && sm_delta_bucket_ceiling(total, total / 2 + 1) == total
-          && sm_delta_bucket_ceiling(total, total) == total
-          && sm_delta_bucket_ceiling(INT64_MAX, INT64_MAX / 2 + 1) == INT64_MAX;
+    /* Firing state: target 50, util 80, consumed 3000 < share 10000,
+     * bucket 100000 > 8 * share. */
+    int drain = 0;
+    int64_t fired = sm_delta_observe(50, 80, 10000, 9000, 100000, 3000, &drain);
+    int ok = fired == 3000 * 50 / 80 && drain == 1;
+    /* never raises the step's own result */
+    ok &= sm_delta_observe(50, 80, 10000, 1000, 100000, 3000, &drain) == 1000 && drain == 1;
+    struct { int up, util; int64_t share, bucket, consumed; } off[] = {
+      {100, 100, 10000, 100000, 3000},   /* unlimited                         */
+      {50, 59, 10000, 100000, 3000},     /* overshoot < 10 points             */
+      {50, 80, 10000, 100000, 99},       /* consumption below 1 token/point   */
+      {50, 80, 10000, 100000, -1},       /* unknown (no refill yet)           */
+      {50, 80, 3000, 100000, 3000},      /* supply was binding (consumed=share)*/
+      {50, 80, 10000, 80000, 3000},      /* backlog not above 8 cycles: pause */
+    };
+    for (unsigned i = 0; i < sizeof(off) / sizeof(off[0]); i++) {
+      int64_t r = sm_delta_observe(off[i].up, off[i].util, off[i].share, 7777, off[i].bucket,
+                                   off[i].consumed, &drain);
+      ok &= r == 7777 && drain == 0;
+    }
     if (!ok) {
-      printf("  [FAIL] bucket ceiling is not min(pool, 2*share) with the share<=0 escape\n");
+      printf("  [FAIL] consumption-observed cut: wrong cap, drain, or a gate that lets it through\n");
       failures++;
     } else {
-      printf("  [ok] bucket ceiling = min(pool, 2*share); pool when share <= 0; no overflow\n");
+      printf("  [ok] observed cut caps at consumed*target/util + drain; each gate alone keeps it off\n");
     }
   }
 }

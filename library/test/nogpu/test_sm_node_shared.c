@@ -13,6 +13,8 @@
  *   [5] the owner wins refills, without the refill RATE collapsing.
  *   [6] the staleness limit follows the owner's real cadence, so a
  *       slow-but-alive owner is not mistaken for a stopped one.
+ *   [7] the refill mark measures consumption exactly when the winner is a
+ *       different process every cycle, drains included.
  *
  * Run via `make test` (which builds and runs this first) or `make test-nogpu`.
  */
@@ -332,6 +334,127 @@ static int test_adaptive_staleness(void) {
   return ok ? 0 : 1;
 }
 
+/* ---- 7. consumption measured through the shared refill mark ------------
+ * sm_delta_observe trusts `delta_mark - bucket` to be what the container
+ * launched since the last refill. With the shared bucket the refill winner
+ * changes process from cycle to cycle, so this only holds if the mark travels
+ * with the controller state, and only if launches racing the window between
+ * the controller's bucket read and its refill CAS are not dropped -- which is
+ * why the mark is "the read plus every change the winner applied", not a
+ * post-refill snapshot (the snapshot version of this test lost 100-200
+ * tokens per run). Consumers mirror rate_limiter (deduct while the bucket is
+ * non-negative, else back off); winners mirror the watcher (claim,
+ * sm_ctl_load, read + measure, optional drain, refill, sm_ctl_publish).
+ * Measured must equal deducted exactly, with and without drains. */
+#define MARK_DEV 5
+
+/* Mirrors change_token: returns the change actually applied. */
+static int64_t mirror_change_token(volatile int64_t *bucket, int64_t delta, int64_t total) {
+  int64_t before, after;
+  do {
+    before = *bucket;
+    after = before + delta;
+    if (after > total) after = total;
+    else if (after < 0) after = 0;
+  } while (!CAS_(bucket, before, after));
+  return after - before;
+}
+
+static int run_mark_trial(sm_node_region_t *r, int with_drain, int64_t *measured_out,
+                          int64_t *deducted_out) {
+  const int NCONS = 6, NWIN = 3;
+  const int64_t TOTAL = 1000000, SHARE = 40000;
+  const int64_t RUN_NS = 600LL * 1000000LL;
+  sm_node_dev_t *d = &r->devices[MARK_DEV];
+  volatile int64_t *bucket = (volatile int64_t *)&d->cur_cuda_cores;
+
+  /* Per-process tallies outside the region: the region's layout is the thing
+   * under test, so the harness must not borrow its fields for bookkeeping. */
+  int64_t *tally = mmap(NULL, sizeof(int64_t) * (NCONS + NWIN + 1), PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  if (tally == MAP_FAILED) { perror("mmap"); return 1; }
+  memset(tally, 0, sizeof(int64_t) * (NCONS + NWIN + 1));
+  volatile int64_t *go = &tally[NCONS + NWIN];
+
+  /* -1, not 0: rate_limiter deducts from any non-negative bucket, so at 0
+   * every consumer would get one launch in before the first winner's read --
+   * consumption that no mark exists to measure yet (valid = 0 by design). */
+  *bucket = -1;
+  d->delta_mark = 0;
+  d->delta_mark_valid = 0;
+  d->last_refill_ns = 0;
+  __atomic_store_n(&d->share, 0, __ATOMIC_RELEASE);
+
+  for (int i = 0; i < NCONS + NWIN; i++) {
+    pid_t pid = fork();
+    if (pid < 0) { perror("fork"); return 1; }
+    if (pid != 0) continue;
+    while (__atomic_load_n(go, __ATOMIC_ACQUIRE) == 0) { /* spin */ }
+    int64_t end = mono_ns() + RUN_NS;
+    unsigned seed = (unsigned)(i * 2654435761u + 1);
+    if (i < NCONS) {
+      int64_t mine = 0;
+      while (mono_ns() < end) {
+        int64_t k = 1 + (int64_t)(rand_r(&seed) % 300), before;
+        do {                                  /* mirrors rate_limiter */
+          before = *bucket;
+          if (before < 0) break;
+        } while (!CAS_(bucket, before, before - k));
+        if (before < 0) { usleep(200); continue; }
+        mine += k;
+      }
+      tally[i] = mine;
+    } else {
+      int64_t mine = 0;
+      while (mono_ns() < end) {
+        int64_t *stamp = &d->last_refill_ns, last = __atomic_load_n(stamp, __ATOMIC_RELAXED);
+        int64_t now = mono_ns();
+        if (now - last < 2000000 || !CAS_(stamp, last, now)) { usleep(300); continue; }
+        (void)__atomic_load_n(&d->share, __ATOMIC_ACQUIRE);           /* sm_ctl_load */
+        int64_t mark = d->delta_mark;
+        int valid = d->delta_mark_valid;
+        int64_t b = *bucket;                                          /* delta(): one read */
+        if (valid) mine += mark - b;
+        mark = b;
+        if (with_drain && (rand_r(&seed) & 3) == 0) {
+          mark += mirror_change_token(bucket, -b, TOTAL);
+        }
+        mark += mirror_change_token(bucket, SHARE, TOTAL);            /* refill */
+        d->delta_mark = mark;
+        d->delta_mark_valid = 1;
+        __atomic_store_n(&d->share, SHARE, __ATOMIC_RELEASE);         /* sm_ctl_publish */
+      }
+      tally[i] = mine;
+    }
+    _exit(0);
+  }
+  usleep(50000);
+  __atomic_store_n(go, 1, __ATOMIC_RELEASE);
+  for (int i = 0; i < NCONS + NWIN; i++) wait(NULL);
+
+  int64_t deducted = 0, measured = 0;
+  for (int i = 0; i < NCONS; i++) deducted += tally[i];
+  for (int i = NCONS; i < NCONS + NWIN; i++) measured += tally[i];
+  /* Launches after the final refill are measured by the cycle that never came. */
+  if (d->delta_mark_valid) measured += d->delta_mark - *bucket;
+  *measured_out = measured;
+  *deducted_out = deducted;
+  munmap(tally, sizeof(int64_t) * (NCONS + NWIN + 1));
+  return 0;
+}
+
+static int test_consumption_mark(sm_node_region_t *r) {
+  int64_t m0, d0, m1, d1;
+  if (run_mark_trial(r, 0, &m0, &d0) || run_mark_trial(r, 1, &m1, &d1)) return 1;
+  int exact = m0 == d0 && d0 > 0;
+  int no_phantom = m1 == d1 && d1 > 0;
+  printf("  [7] refill mark across processes: measured %ld = deducted %ld -> %s; "
+         "with drains measured %ld = deducted %ld -> %s\n",
+         (long)m0, (long)d0, exact ? "PASS" : "FAIL", (long)m1, (long)d1,
+         no_phantom ? "PASS" : "FAIL");
+  return exact && no_phantom ? 0 : 1;
+}
+
 int main(void) {
   printf("sm_node shared-bucket checks (no GPU required)\n");
   printf("  [0] ABI: dev=%zuB region=%zuB devices@%zu file=%d -> %s\n",
@@ -356,6 +479,7 @@ int main(void) {
   rc |= test_fork_keeps_lock_alive(lockpath);
   rc |= test_owner_wins_refill(r);
   rc |= test_adaptive_staleness();
+  rc |= test_consumption_mark(r);
 
   munmap(r, SM_NODE_FILE_SIZE);
   unlink(path);

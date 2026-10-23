@@ -43,10 +43,12 @@ limitations under the License.
  *
  * The per-cell bar is a RATCHET where a generation leaves known residuals:
  * the count of cells beyond it and the worst excess may not grow. v15's are
- * on/off workloads at targets >= 50 whose slow cut (util can never exceed
- * twice the target there) the ceiling's phase change exposes; see
- * docs/sm_delta_validation.md. Lower the budgets when a generation clears
- * cells; never raise them to make a change pass.
+ * on/off workloads: the share winds up while the workload idles (util 0 <
+ * target), the observed cut correctly drains the resulting backlog when the
+ * burst starts, and the stale over-target readings of the next cycles then
+ * cut the share to 0 -- v14 hid that behind the backlog. See
+ * docs/sm_delta_validation.md section 8. Lower the budgets when a
+ * generation clears cells; never raise them to make a change pass.
  */
 
 #include <math.h>
@@ -67,11 +69,11 @@ limitations under the License.
 #define CLASS_TOL   0.05
 
 /* The ratchet (see the header): cells beyond CELL_CAP and the worst excess,
- * per class. v15's BURST residuals are all on the hard path: on20/off5 at
- * pool/1500 and targets 60-90 (81 cells, worst +11.9), pool/15 on3/off7 at
- * target 30 (47), pool/15 on20/off5 at 70 (46), 45 scattered. */
-static const long   BUDGET_CELLS[] = {0, 0, 219};
-static const double BUDGET_WORST[] = {CELL_CAP, CELL_CAP, 11.95};
+ * per class. v15's BURST residuals: 57 on the hard path (on20/off5 at
+ * pool/1500, mostly target 60), 11 on the soft path (on10/off30, worst +15.1:
+ * A2 at pool/150, target 20). */
+static const long   BUDGET_CELLS[] = {0, 0, 68};
+static const double BUDGET_WORST[] = {CELL_CAP, CELL_CAP, 15.15};
 
 enum { DROP, RISE, BURST, NCLASS };
 static const char *CLASS_NAME[NCLASS] = {"DROP ", "RISE ", "BURST"};

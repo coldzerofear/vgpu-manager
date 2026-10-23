@@ -207,14 +207,12 @@ static int64_t prev_delta_step(int64_t total, int up_limit, int user_current,
  *     soft. "Throttled" is a launch finding the bucket short -- here, the
  *     cycle's demand exceeding the bucket.
  *
- * After the refill the bucket is clamped to its ceiling: the pool for the
- * baseline (as v14 shipped), and for the candidate on the soft path;
- * sm_delta_bucket_ceiling() of the share the controller state holds for the
- * candidate on the hard path -- the fresh share after a normal cycle, the
- * frozen one after a bypass -- as refill_ceiling() in cuda_hook.c does it. */
+ * The candidate is the shipped cycle: sm_delta_control with the refill mark
+ * (mark - bucket = consumed) and the drain. The baseline is prev_delta_step
+ * alone, as v14 shipped. */
 typedef struct {
-  int64_t bucket, share;
-  int calls, throttled;
+  int64_t bucket, share, mark;
+  int mark_valid, calls, throttled;
   int hist[8];
 } plant_t;
 
@@ -232,9 +230,18 @@ static int plant_cycle(plant_t *p, int64_t total, int64_t R, int u, int delay, i
   int boot = p->calls < 2;
   p->calls++;
 
-  int64_t out = candidate
-      ? sm_delta_step(total, u, m, p->share, p->bucket, boot, inc_divisor, PREV_RAMP_DIVISOR)
-      : prev_delta_step(total, u, m, p->share, p->bucket, boot);
+  int64_t out;
+  if (candidate) {
+    int64_t consumed = p->mark_valid ? p->mark - p->bucket : -1;
+    int drain = 0;
+    out = sm_delta_control(total, u, m, p->share, p->bucket, boot, consumed, inc_divisor,
+                           PREV_RAMP_DIVISOR, &drain);
+    if (drain) {
+      p->bucket = 0;
+    }
+  } else {
+    out = prev_delta_step(total, u, m, p->share, p->bucket, boot);
+  }
   int lo = u / 10 < 1 ? 1 : u / 10;
   if (hard && m < lo && !p->throttled) {
     p->bucket = out;
@@ -242,13 +249,15 @@ static int plant_cycle(plant_t *p, int64_t total, int64_t R, int u, int delay, i
     p->share = out;
     p->bucket += out;
   }
-  int64_t ceiling = candidate && hard ? sm_delta_bucket_ceiling(total, p->share) : total;
-  if (p->bucket > ceiling) {
-    p->bucket = ceiling;
+  if (p->bucket > total) {
+    p->bucket = total;
   }
   if (p->bucket < 0) {
     p->bucket = 0;
   }
+  /* Serial plant: "the read plus every applied change" is just the bucket. */
+  p->mark = p->bucket;
+  p->mark_valid = 1;
   p->throttled = 0;
   return util;
 }

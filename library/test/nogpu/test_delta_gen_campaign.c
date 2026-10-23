@@ -24,7 +24,7 @@ limitations under the License.
  * cycle, both start paths:
  *
  *   v14 vs v13: finer seed, escape, 1-token trim (HAMi-core #360)
- *   v15 vs v14: bucket ceiling of two cycles of share (sm_delta_bucket_ceiling)
+ *   v15 vs v14: consumption-observed cut (sm_delta_observe / sm_delta_control)
  *
  * Results per generation are in docs/sm_delta_validation.md.
  *
@@ -105,15 +105,15 @@ limitations under the License.
 #endif
 
 /* Per-cell cap RATCHET: cells beyond the cap, and the worst excess, may not
- * grow. v15 (bucket ceiling, hard path only) leaves residuals on the hard
- * path: 146 at R/pool 1e-5..3e-5, targets 40-49, where both generations
- * bang-bang at MAE 40+ (+1.3..+2.7 there); 16 at 5.6e-5..1e-4, targets
- * 50-89, p95 +3..+5 in exchange for cold-start 22-27 points better; 9 at
- * targets 90-99, p95 +3. docs/sm_delta_validation.md section 8. Lower these
- * when a generation clears cells; never raise them to let a change pass. */
+ * grow. v15 (consumption-observed cut) leaves 13 on the hard path, all at
+ * R/pool 5.6e-5..1e-4 and targets 51-54 with a 4-cycle delay: v14's own
+ * seed-growth limit cycle entered at a different phase after the much
+ * better cold start (49 -> 10 there), steady MAE +1.1..+1.7, p95 +3..+5.
+ * docs/sm_delta_validation.md section 8. Lower these when a generation
+ * clears cells; never raise them to let a change pass. */
 #if GEN_START_HARD
-#define CAP_BUDGET_CELLS 171
-#define CAP_BUDGET_MAE   2.70
+#define CAP_BUDGET_CELLS 13
+#define CAP_BUDGET_MAE   1.70
 #define CAP_BUDGET_P95   5
 #else
 #define CAP_BUDGET_CELLS 0

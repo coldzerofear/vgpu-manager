@@ -254,38 +254,70 @@ static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_curren
   return (share - increment) < 0 ? 0 : (share - increment);
 }
 
-/* ---- Bucket ceiling (v15) ----
+/* ---- Consumption-observed cut (v15) ----
  *
- * The bucket used to be capped at the whole pool. A share above what the
- * workload consumes -- after the boot jump on a light workload, after a
- * heavy workload turns light, after a burst ends -- then piles a backlog of
- * up to a pool's worth of tokens, and util reads 100 until it drains no
- * matter what the share does: on a light workload that is minutes. At
- * targets of 50 and above util can never exceed twice the target, so the
- * blowout cut never fires and only the mild cut works against it.
+ * sm_delta_step sees utilization, a delayed and share-blind signal. When the
+ * share far exceeds what the workload consumes -- after the boot jump on a
+ * light workload, or after a heavy workload turns light mid-run -- the
+ * surplus piles up in the bucket, and while that backlog lasts util reads 100
+ * no matter what share does. Below a 50% target the blowout floor (util >
+ * 2*target) recovers in seconds; at or above 50% util can never exceed twice
+ * the target, only the mild cut runs, and the bucket floods for minutes
+ * (A100, target 75, a light workload: 28 s to 10 min).
  *
- * Capping the bucket at two cycles of share bounds every such backlog to two
- * cycles of supply, by construction: tokens beyond it were never going to be
- * spent at the target rate anyway. Two, not one: one cycle of headroom
- * removes the carry-over that smooths launches straddling a cycle boundary
- * (p95 sawtooth 19.4 -> 22.0 in the campaign); four keeps too much backlog
- * (load-drop transient 9.3 -> 10.8). Single launches larger than the ceiling
- * are unaffected -- rate_limiter admits any launch while the bucket is
- * non-negative and the debt is repaid by later refills.
+ * The bucket says what utilization cannot: consumed = (bucket right after the
+ * last refill) - (bucket now) is exactly what every process in the container
+ * launched in between. When the last cycle was over-supplied (consumed <
+ * share) while util ran over the target, consumed*target/util is the share
+ * that would have held the target, and the backlog is surplus by
+ * construction. The caller caps share at that and drains the bucket.
  *
- * share <= 0 keeps the pool ceiling: nothing to scale from, and a zero
- * ceiling would starve the escape from share = 0.
+ * Gates, each answering a failure of the ungated rule in simulation:
+ *   consumed >= 100          one token per utilization point; below that the
+ *                            cap truncates and erases the dithering that is
+ *                            the best any controller can do (R of 1-10 tokens)
+ *   util - target >= 10      a real overshoot; at targets above 90 the rule
+ *                            dipped util below target on stale readings for
+ *                            a gain of at most 9 points
+ *   bucket > 8 * share       a persistent surplus, not a pause: an on/off
+ *                            workload's idle cycles also read consumed <
+ *                            share with a stale util over target, and cutting
+ *                            there starved the next burst (on-phase MAE
+ *                            12.7 -> 22.6). After 8 idle cycles the delayed
+ *                            util has caught up to 0 and the rule is off.
  *
- * Applied on the hard-limit path only (refill_ceiling in cuda_hook.c): it
- * relies on the hard-limit bypass to keep the share from winding up while
- * the workload idles, which the soft path lacks. */
-#define DELTA_BUCKET_CEILING_SHARES 2
+ * Returns the share to use (never above `next`, sm_delta_step's result) and
+ * sets *drain when the caller must empty the bucket before refilling. */
+#define DELTA_OBS_MIN_CONSUMED  100
+#define DELTA_OBS_MIN_OVERSHOOT (2 * MIN_INCREMENT)
+#define DELTA_OBS_BACKLOG_TICKS 8
 
-static inline int64_t sm_delta_bucket_ceiling(int64_t total, int64_t share) {
-  if (share <= 0 || share > total / DELTA_BUCKET_CEILING_SHARES) {
-    return total;
+static inline int64_t sm_delta_observe(int up_limit, int user_current, int64_t share,
+                                       int64_t next, int64_t bucket, int64_t consumed,
+                                       int *drain) {
+  *drain = 0;
+  if (up_limit >= 100 || up_limit < 1 || consumed < DELTA_OBS_MIN_CONSUMED ||
+      user_current - up_limit < DELTA_OBS_MIN_OVERSHOOT || consumed >= share ||
+      bucket <= DELTA_OBS_BACKLOG_TICKS * share) {
+    return next;
   }
-  return share * DELTA_BUCKET_CEILING_SHARES;
+  /* user_current > up_limit >= 1 here, so the division is safe; consumed is
+   * bounded by the pool, so the product cannot overflow. */
+  int64_t cap = consumed * up_limit / user_current;
+  *drain = 1;
+  return next < cap ? next : cap;
+}
+
+/* The whole delta cycle as the watcher runs it: the step, then the
+ * consumption-observed cut. consumed < 0 means unknown (no refill yet). One
+ * function so the simulations exercise exactly what ships. */
+static inline int64_t sm_delta_control(int64_t total, int up_limit, int user_current,
+                                       int64_t share, int64_t bucket, int boot,
+                                       int64_t consumed, int inc_divisor, int ramp_divisor,
+                                       int *drain) {
+  int64_t next = sm_delta_step(total, up_limit, user_current, share, bucket, boot,
+                               inc_divisor, ramp_divisor);
+  return sm_delta_observe(up_limit, user_current, share, next, bucket, consumed, drain);
 }
 
 #ifdef __cplusplus
