@@ -339,6 +339,21 @@ if(BUILD_SM_NODE_TESTS)
     target_compile_options(test_delta_gen_campaign PRIVATE -O2)
     target_link_libraries(test_delta_gen_campaign PRIVATE m)
 
+    # The same campaign through the hard-limit start path (the watcher's
+    # bypass, the default Fixed policy), and the changing-workload scenarios
+    # (load drop / rise / on-off bursts). Shared plant: test/nogpu/delta_sim.h.
+    add_executable(test_delta_gen_hard test/nogpu/test_delta_gen_hard.c)
+    target_include_directories(test_delta_gen_hard PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_options(test_delta_gen_hard PRIVATE -O2)
+    target_link_libraries(test_delta_gen_hard PRIVATE m)
+
+    add_executable(test_delta_transients test/nogpu/test_delta_transients.c)
+    target_include_directories(test_delta_transients PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_options(test_delta_transients PRIVATE -O2)
+    target_link_libraries(test_delta_transients PRIVATE m)
+
     # Exercises src/dlsym_entry.S with the real symbol predicates from
     # hook.h. Three pieces, because the bug only appears when the library
     # asking for RTLD_NEXT is loaded after the interceptor:
@@ -395,6 +410,8 @@ foreach(vgpu_nogpu_test
         test_delta_step
         test_delta_campaign
         test_delta_gen_campaign
+        test_delta_gen_hard
+        test_delta_transients
         test_dlsym_entry)
     if(TARGET ${vgpu_nogpu_test})
         target_link_libraries(${vgpu_nogpu_test} PRIVATE

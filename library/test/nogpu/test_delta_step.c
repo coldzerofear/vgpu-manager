@@ -355,10 +355,11 @@ static void test_invariants(void) {
     }
   }
 
-  /* #360: a kernel filling the GPU for 10 ms with 1024-thread blocks
-   * consumes pool/32768 per tick under grid charging. The seed must sit well
-   * under it on every pool, or the share can only bang between 0 and seed
-   * multiples. Pool-relative, so checking the extremes checks them all. */
+  /* #360: a kernel filling the GPU for 100 ms with 1024-thread blocks
+   * consumes pool/32768 per 100 ms controller cycle under grid charging (a
+   * 10 ms one, ten times that). The seed must sit well under it on every
+   * pool, or the share can only bang between 0 and seed multiples.
+   * Pool-relative, so checking the extremes checks them all. */
   {
     int64_t pools[] = {5LL * 2048 * 32, 188LL * 1536 * 32, 1024LL * 4096 * 32};
     int ok = 1;
@@ -369,10 +370,10 @@ static void test_invariants(void) {
       }
     }
     if (!ok) {
-      printf("  [FAIL] seed not 4x under a 10 ms GEMM's per-tick consumption\n");
+      printf("  [FAIL] seed not 4x under a 100 ms kernel's per-cycle consumption\n");
       failures++;
     } else {
-      printf("  [ok] seed >= 4x under a 10 ms GEMM's per-tick consumption (#360)\n");
+      printf("  [ok] seed >= 4x under a 100 ms kernel's per-cycle consumption (#360)\n");
     }
   }
 
@@ -430,6 +431,28 @@ static void test_invariants(void) {
       failures++;
     } else {
       printf("  [ok] 1-token trim un-parks a small share, holds it while the backlog drains\n");
+    }
+  }
+
+  /* Bucket ceiling: two cycles of share; the pool when there is no share to
+   * scale from (a zero ceiling would starve the escape from share = 0) or
+   * when two shares would exceed it -- including shares big enough that the
+   * doubling itself would overflow. */
+  {
+    int64_t total = 108LL * 2048 * 32;
+    int ok = sm_delta_bucket_ceiling(total, 0) == total
+          && sm_delta_bucket_ceiling(total, -5) == total
+          && sm_delta_bucket_ceiling(total, 1) == 2
+          && sm_delta_bucket_ceiling(total, 1000) == 2000
+          && sm_delta_bucket_ceiling(total, total / 2) == total
+          && sm_delta_bucket_ceiling(total, total / 2 + 1) == total
+          && sm_delta_bucket_ceiling(total, total) == total
+          && sm_delta_bucket_ceiling(INT64_MAX, INT64_MAX / 2 + 1) == INT64_MAX;
+    if (!ok) {
+      printf("  [FAIL] bucket ceiling is not min(pool, 2*share) with the share<=0 escape\n");
+      failures++;
+    } else {
+      printf("  [ok] bucket ceiling = min(pool, 2*share); pool when share <= 0; no overflow\n");
     }
   }
 }

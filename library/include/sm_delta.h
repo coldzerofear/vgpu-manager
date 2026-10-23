@@ -60,15 +60,17 @@ limitations under the License.
  * measurement delay (share/2-scale steps blow up at 4).
  *
  * THE SEED is the escape from share=0 and the granularity at the setpoint:
- * ~0.0004% of the pool. It must sit below the per-tick consumption of the
- * lightest workload that matters, and that is set by software, not by the
- * card: a kernel that fills the GPU for 10 ms with 1024-thread blocks
- * consumes pool/32768 per tick under grid charging, and a small kernel on a
- * bigger future part consumes less still. The previous seed (pool/16384) was
- * twice that GEMM's whole demand -- the share could only bang between 0 and
- * seed multiples, util pinned at 100% most ticks (HAMi-core #360). Floored at
- * 1 token so an absurd env divisor degrades granularity instead of freezing
- * the controller.
+ * ~0.0004% of the pool. It must sit well below the per-cycle consumption of
+ * the lightest workload that matters, and that is set by software, not by
+ * the card. One controller cycle is 100 ms (the watcher's per-device
+ * cadence; TIME_TICK's 10 ms is only rate_limiter's back-off). Under grid
+ * charging a kernel that fills the GPU for 10 ms with 1024-thread blocks
+ * consumes pool/3277 per cycle, a 100 ms one pool/32768, and a small kernel
+ * on a bigger future part less still. The previous seed (pool/16384) was a
+ * fifth of the 10 ms GEMM's whole demand -- too coarse to settle: H100 at
+ * target 50 bang-banged at MAE 22.5, p95 50 (HAMi-core #360); this seed
+ * holds it at 1.8. Floored at 1 token so an absurd env divisor degrades
+ * granularity instead of freezing the controller.
  *
  * THE ESCAPE pays for that fineness. After the boot jump overshoots a light
  * workload, the bucket drains for a while and share decays toward zero; with
@@ -250,6 +252,40 @@ static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_curren
     increment = 1;
   }
   return (share - increment) < 0 ? 0 : (share - increment);
+}
+
+/* ---- Bucket ceiling (v15) ----
+ *
+ * The bucket used to be capped at the whole pool. A share above what the
+ * workload consumes -- after the boot jump on a light workload, after a
+ * heavy workload turns light, after a burst ends -- then piles a backlog of
+ * up to a pool's worth of tokens, and util reads 100 until it drains no
+ * matter what the share does: on a light workload that is minutes. At
+ * targets of 50 and above util can never exceed twice the target, so the
+ * blowout cut never fires and only the mild cut works against it.
+ *
+ * Capping the bucket at two cycles of share bounds every such backlog to two
+ * cycles of supply, by construction: tokens beyond it were never going to be
+ * spent at the target rate anyway. Two, not one: one cycle of headroom
+ * removes the carry-over that smooths launches straddling a cycle boundary
+ * (p95 sawtooth 19.4 -> 22.0 in the campaign); four keeps too much backlog
+ * (load-drop transient 9.3 -> 10.8). Single launches larger than the ceiling
+ * are unaffected -- rate_limiter admits any launch while the bucket is
+ * non-negative and the debt is repaid by later refills.
+ *
+ * share <= 0 keeps the pool ceiling: nothing to scale from, and a zero
+ * ceiling would starve the escape from share = 0.
+ *
+ * Applied on the hard-limit path only (refill_ceiling in cuda_hook.c): it
+ * relies on the hard-limit bypass to keep the share from winding up while
+ * the workload idles, which the soft path lacks. */
+#define DELTA_BUCKET_CEILING_SHARES 2
+
+static inline int64_t sm_delta_bucket_ceiling(int64_t total, int64_t share) {
+  if (share <= 0 || share > total / DELTA_BUCKET_CEILING_SHARES) {
+    return total;
+  }
+  return share * DELTA_BUCKET_CEILING_SHARES;
 }
 
 #ifdef __cplusplus

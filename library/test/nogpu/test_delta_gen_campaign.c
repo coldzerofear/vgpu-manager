@@ -17,58 +17,49 @@ limitations under the License.
 /*
  * The delta controller GENERATIONAL campaign. No GPU, no driver.
  *
- * test_delta_campaign.c proved the current controller beats the removed sm^2
- * formula. This campaign holds the shipped sm_delta_step() to the same bar
- * against a frozen replica of the generation it replaces, over a far wider
- * load range -- because the narrow range was where the previous campaign
- * stopped looking, and where the generation it accepted still failed.
+ * Each controller generation is held against a frozen replica of the one it
+ * replaces (test/nogpu/delta_sim.h). test_delta_campaign.c did it for the
+ * first generation against the removed sm^2 formula; this campaign does it
+ * from v14 on, over a far wider load range and through the watcher's real
+ * cycle, both start paths:
  *
- * WHY THE LOAD RANGE HAD TO WIDEN
+ *   v14 vs v13: finer seed, escape, 1-token trim (HAMi-core #360)
+ *   v15 vs v14: bucket ceiling of two cycles of share (sm_delta_bucket_ceiling)
  *
- * test_delta_campaign.c sweeps three loads, consumption pool/1500, pool/150
- * and pool/15 per tick. A real workload's consumption follows from what it
- * launches, and the limiter charges a launch its grid size. For a kernel that
- * fills the GPU for a wave of wave_us microseconds with tpb threads per block,
- * at 100% utilization:
+ * Results per generation are in docs/sm_delta_validation.md.
  *
- *     R / pool = (10000 / wave_us) * occupancy / (32 * tpb)
+ * WHY THE LOAD RANGE IS WIDE
  *
- * which is independent of the card (both R and the pool scale with
- * sm * threads_per_sm). A long-running GEMM -- wave 10 ms, tpb 1024 -- lands at
- * pool/32768, twenty times lighter than the lightest band tested. There the
- * previous generation's granularity seed (pool*5/81920) is twice the entire
- * demand: share can only bang between 0 and seed multiples, and on an A100 at
- * limit 25 the workload runs at 100% for 80% of ticks. That is HAMi-core
- * issue #360, present in our controller and invisible to its campaign.
+ * A real workload's per-cycle consumption follows from what it launches;
+ * delta_sim.h gives the mapping (a 10 ms GEMM at tpb 1024 is pool/3277 per
+ * 100 ms cycle, a 100 ms kernel pool/32768). test_delta_campaign.c sweeps
+ * pool/1500, /150 and /15 only, and the generation it accepted bang-banged
+ * between 0 and 100% just below that range. And the range drifts: a small
+ * kernel's grid is fixed by its problem size, not by the card, so on a part
+ * with more SMs its occupancy -- and its R/pool -- shrinks. Each hardware
+ * generation pushes the same software further toward the light end.
  *
  * WHY THE CARD LIST INCLUDES PARTS THAT DO NOT EXIST
  *
  * In pool units the closed loop is card-independent except for integer
  * effects: every controller constant is a fraction of the pool, and so is R.
- * What changes with hardware is WHERE workloads land. A small kernel's grid is
- * fixed by its problem size, not by the card, so on a part with more SMs its
- * occupancy -- and its R/pool -- shrinks. Each hardware generation pushes the
- * same software further toward the light end. The synthetic parts below (up to
- * 1024 SMs x 4096 threads/SM, a pool of 134M tokens) check that nothing in the
- * arithmetic breaks as the pool grows, and the light end of the load range is
- * swept deep enough to hold the small kernels of those parts. This component
- * serves every mainstream part and whatever comes next; nothing here may be
- * tuned to one model.
+ * The synthetic parts (up to 1024 SMs x 4096 threads/SM, a pool of 134M
+ * tokens) check that nothing in the arithmetic breaks as the pool grows.
+ * This component serves every mainstream part and whatever comes next;
+ * nothing here may be tuned to one model.
  *
  * AXES
  *   cards  : every mainstream/top NVIDIA part since Pascal, MIG slices, and
- *            synthetic future parts
+ *            synthetic future parts (same-shape parts run once)
  *   load   : R/pool log-spaced 4 per decade over [1e-7, 2], plus the three
  *            bands of test_delta_campaign.c for continuity. R is an integer
  *            token count, floored at 1 -- real token accounting is integer
  *            and the lightest loads on small pools hit that floor for real.
  *   limits : 1..99 (100 is not limited)
- *   delays : 2 and 4 ticks of measurement lag
- *   start  : empty bucket, which is what g_dev_hot's zero-init does. The
- *            full-bucket start test_delta_campaign.c uses is not tractable at
- *            the light end (draining a full bucket at pool/1e7 per tick takes
- *            ten million ticks); test_delta_campaign.c keeps covering it on
- *            the range where it is.
+ *   delays : 2 and 4 cycles of measurement lag
+ *   start  : empty bucket, as g_dev_hot's zero-init and a fresh shared region
+ *            give; soft-limit start path here, hard-limit (the default Fixed
+ *            policy: bypass while util is low) in test_delta_gen_hard.c.
  *
  * ACCEPTANCE. On the three legacy loads the bar is test_delta_campaign.c's,
  * cell by cell: steady MAE not worse by more than 0.5 util-points, p95 not
@@ -105,105 +96,31 @@ limitations under the License.
 
 #include "include/hook.h"
 #include "include/sm_delta.h"
+#include "test/nogpu/delta_sim.h"
 
-typedef struct { const char *n; int sm, th; } card_t;
-static const card_t CARDS[] = {
-  /* Pascal / Volta */
-  {"GTX1050",5,2048},{"GTX1060",10,2048},{"GTX1070",15,2048},{"GTX1080",20,2048},
-  {"GTX1080Ti",28,2048},{"P40",30,2048},{"P100",56,2048},
-  {"TitanV",80,2048},{"V100",80,2048},{"V100S",80,2048},{"V100-32g",80,2048},
-  /* Turing (1024 threads/SM) */
-  {"GTX1650",14,1024},{"GTX1660",22,1024},{"GTX1660Ti",24,1024},{"T4",40,1024},
-  {"RTX2060",30,1024},{"RTX2070",36,1024},{"RTX2080",46,1024},{"RTX2080Ti",68,1024},
-  /* Ampere consumer / pro (1536) */
-  {"RTX3050",20,1536},{"RTX3060",28,1536},{"RTX3070",46,1536},{"RTX3070Ti",48,1536},
-  {"RTX3080",68,1536},{"RTX3080Ti",80,1536},{"RTX3090",82,1536},
-  {"A2",10,1536},{"A10",72,1536},{"A40",84,1536},
-  {"RTXA4000",48,1536},{"RTXA5000",64,1536},{"RTXA6000",84,1536},
-  /* Ampere datacenter (2048) incl. MIG */
-  {"A100-1g",14,2048},{"A30",56,2048},{"A800",108,2048},{"A100",108,2048},
-  /* Ada (1536) */
-  {"RTX4060",24,1536},{"RTX4070",46,1536},{"RTX4070Ti",60,1536},{"RTX4080",76,1536},
-  {"RTX4090",128,1536},{"L4",58,1536},{"L20",92,1536},{"L40",142,1536},
-  {"L40S",142,1536},{"RTX6000Ada",142,1536},
-  /* Hopper (2048) incl. MIG and PCIe */
-  {"H100-1g",16,2048},{"H20",78,2048},{"H100-PCIe",114,2048},{"H800",132,2048},
-  {"H100",132,2048},{"H200",132,2048},
-  /* Blackwell datacenter (2048) / consumer and pro (1536) */
-  {"B200",148,2048},{"B300",160,2048},
-  {"RTX5060",36,1536},{"RTX5070",50,1536},{"RTX5070Ti",70,1536},{"RTX5080",84,1536},
-  {"RTX5090",170,1536},{"RTXPRO6000",188,1536},
-  /* Synthetic future parts: more SMs, and twice today's threads per SM. */
-  {"FUT-256x2048",256,2048},{"FUT-384x2048",384,2048},
-  {"FUT-512x4096",512,4096},{"FUT-1024x4096",1024,4096},
-};
-#define NCARD (int)(sizeof(CARDS) / sizeof(CARDS[0]))
+/* GEN_START_HARD selects the hard-limit start path (test_delta_gen_hard.c
+ * includes this file with it set); the default is the soft path. */
+#ifndef GEN_START_HARD
+#define GEN_START_HARD 0
+#endif
 
-/* ---- The previous generation, frozen verbatim from include/sm_delta.h as of
- * the commit that introduced this campaign. Every constant it reads is frozen
- * with it: the shipped header may change any of them, and a baseline that
- * moved with the code under test would not be a baseline. ---- */
-#define PREV_MIN_INCREMENT     5
-#define PREV_INC_DIVISOR       81920
-#define PREV_GROW_CAP_DIVISOR  10
-#define PREV_REL_DAMPING       6
-#define PREV_STARVED_DAMPING   4
-#define PREV_BOOT_JUMP_DIVISOR 6400
-#define PREV_RAMP_DIVISOR      64
-
-static int64_t prev_delta_step(int64_t total, int up_limit, int user_current,
-                               int64_t share, int64_t bucket, int boot) {
-  if (up_limit >= 100) {
-    return total;
-  }
-  int raw_diff = abs(up_limit - user_current);
-  int64_t up = up_limit > 0 ? up_limit : 1;
-  int64_t seed = total * PREV_MIN_INCREMENT / PREV_INC_DIVISOR;
-  if (seed < 1) {
-    seed = 1;
-  }
-  if (user_current <= up_limit) {
-    if (boot) {
-      int64_t jump = total * up / PREV_BOOT_JUMP_DIVISOR;
-      if (jump > total / 64) {
-        jump = total / 64;
-      }
-      if (share < jump) {
-        return jump;
-      }
-    }
-    int damp = bucket <= 0 ? PREV_STARVED_DAMPING : PREV_REL_DAMPING;
-    int64_t increment = share * (int64_t)raw_diff / (damp * up);
-    if (increment < seed) {
-      increment = seed;
-    }
-    int64_t grow_cap = total / PREV_GROW_CAP_DIVISOR;
-    if (increment > grow_cap) {
-      increment = grow_cap;
-    }
-    return (share + increment) > total ? total : (share + increment);
-  }
-  if (raw_diff > up_limit && raw_diff >= PREV_MIN_INCREMENT) {
-    int64_t increment = share * (int64_t)raw_diff / (PREV_REL_DAMPING * up);
-    if (increment < seed) {
-      increment = seed;
-    }
-    int64_t ramp_floor = total * (int64_t)raw_diff / (up * PREV_RAMP_DIVISOR);
-    if (increment < ramp_floor) {
-      increment = ramp_floor;
-    }
-    if (increment > total) {
-      increment = total;
-    }
-    return (share - increment) < 0 ? 0 : (share - increment);
-  }
-  int64_t backlog = bucket > 0 ? bucket : 0;
-  int64_t prop = share * (int64_t)raw_diff / (PREV_REL_DAMPING * up);
-  int64_t by_cause = (int64_t)((__int128)prop * share / (share + backlog + 1));
-  int64_t by_error = prop * (int64_t)raw_diff / 100;
-  int64_t increment = by_cause > by_error ? by_cause : by_error;
-  return (share - increment) < 0 ? 0 : (share - increment);
-}
+/* Per-cell cap RATCHET: cells beyond the cap, and the worst excess, may not
+ * grow. v15 (bucket ceiling, hard path only) leaves residuals on the hard
+ * path: 146 at R/pool 1e-5..3e-5, targets 40-49, where both generations
+ * bang-bang at MAE 40+ (+1.3..+2.7 there); 16 at 5.6e-5..1e-4, targets
+ * 50-89, p95 +3..+5 in exchange for cold-start 22-27 points better; 9 at
+ * targets 90-99, p95 +3. docs/sm_delta_validation.md section 8. Lower these
+ * when a generation clears cells; never raise them to let a change pass. */
+#if GEN_START_HARD
+#define CAP_BUDGET_CELLS 171
+#define CAP_BUDGET_MAE   2.70
+#define CAP_BUDGET_P95   5
+#else
+#define CAP_BUDGET_CELLS 0
+#define CAP_BUDGET_MAE   1.0
+#define CAP_BUDGET_P95   2
+#endif
+#define CAP_BUDGET_COLD  2.0
 
 #define WARM  2000
 #define STEADY 3000
@@ -213,24 +130,13 @@ typedef struct { double mae, p95, cold; } res_t;
 
 static res_t run_cell(int64_t total, int64_t R, int u, int delay, int use_new,
                       int inc_divisor) {
-  int64_t bucket = 0, share = 0;
-  int hist[8] = {0};
+  plant_t p;
+  memset(&p, 0, sizeof(p));
   double err = 0, cold = 0;
   int h[101] = {0};
 
   for (int t = 0; t < WARM + STEADY; t++) {
-    int64_t c = bucket < R ? bucket : R;
-    bucket -= c;
-    int util = (int)(c * 100 / R);
-    int m = hist[t % delay];
-    hist[t % delay] = util;
-    share = use_new
-        ? sm_delta_step(total, u, m, share, bucket, t < 2, inc_divisor, PREV_RAMP_DIVISOR)
-        : prev_delta_step(total, u, m, share, bucket, t < 2);
-    bucket += share;
-    if (bucket > total) {
-      bucket = total;
-    }
+    int util = plant_cycle(&p, total, R, u, delay, t, use_new, GEN_START_HARD, inc_divisor);
     int dev = util > u ? util - u : u - util;
     if (t < COLD) {
       cold += dev;
@@ -418,8 +324,8 @@ int main(int argc, char **argv) {
   g_inc_divisor = argc > 1 ? atoi(argv[1]) : DELTA_INCREMENT_DIVISOR_DEFAULT;
   g_verbose = getenv("GEN_VERBOSE") != NULL;
   build_loads();
-  printf("generational campaign: candidate inc_divisor=%d vs frozen previous (%d)\n",
-         g_inc_divisor, PREV_INC_DIVISOR);
+  printf("generational campaign (%s start): shipped cycle, inc_divisor=%d, vs frozen previous\n",
+         GEN_START_HARD ? "hard-limit" : "soft-limit", g_inc_divisor);
 
   /* In pool units only sm*th matters; same-shape parts are one cell. */
   for (int ci = 0; ci < NCARD; ci++) {
@@ -499,11 +405,16 @@ int main(int argc, char **argv) {
     printf("[ok] every region at least as good as the previous generation on average (tol %.2f)\n",
            REGION_TOL);
   }
-  if (t->cap_fail) {
-    printf("[FAIL] %ld cells beyond the single-cell cap (1.0 / 2 / 2.0)\n", t->cap_fail);
+  if (t->cap_fail > CAP_BUDGET_CELLS || t->wm.d > CAP_BUDGET_MAE || t->wp.d > CAP_BUDGET_P95 ||
+      t->wc.d > CAP_BUDGET_COLD) {
+    printf("[FAIL] single-cell cap (1.0 / 2 / 2.0) ratchet: %ld cells beyond (budget %d), worst "
+           "%+.2f / %+.0f / %+.2f (budget %+.2f / %+d / %+.2f)\n",
+           t->cap_fail, CAP_BUDGET_CELLS, t->wm.d, t->wp.d, t->wc.d, CAP_BUDGET_MAE,
+           CAP_BUDGET_P95, CAP_BUDGET_COLD);
     failures++;
   } else {
-    printf("[ok] no single cell beyond the cap (1.0 / 2 / 2.0)\n");
+    printf("[ok] single-cell cap (1.0 / 2 / 2.0) ratchet: %ld cells beyond (budget %d)\n",
+           t->cap_fail, CAP_BUDGET_CELLS);
   }
   if (failures) {
     printf("\n%d generational criteria FAILED\n", failures);
