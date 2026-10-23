@@ -727,7 +727,7 @@ func Test_Strict_TriesComponentWindowAfterRail(t *testing.T) {
 	require.True(t, ok)
 	rootA, ok := n.ComponentByDomain(domainA)
 	require.True(t, ok)
-	plan, got := alloc.allocateLink(store, req, rootA, 2)
+	plan, got := alloc.allocateLink(store, req, rootA, 2, device.TierNVLink)
 	require.True(t, got, "strict must try the component window after the rail window fails it")
 	require.Len(t, plan.Devices, 2)
 	assert.Equal(t, device.TierNVLink, plan.Tier)
@@ -844,7 +844,10 @@ func Test_LinkDowngrade_IsReported(t *testing.T) {
 		got := run(t, n, 4)
 		require.Len(t, got.warnings, 1, "a downgrade must be reported exactly once")
 		assert.Contains(t, got.warnings[0], "downgraded")
-		assert.Contains(t, got.warnings[0], "not NVLink")
+		// The message names the tier reached and the tier asked for, both in
+		// the LinkTier vocabulary so the two are directly comparable.
+		assert.Contains(t, got.warnings[0], `connected at "switch"`)
+		assert.Contains(t, got.warnings[0], `not "nvlink"`)
 	})
 
 	t.Run("no connectivity at all: reported as spanning", func(t *testing.T) {

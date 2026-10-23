@@ -26,9 +26,11 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 )
 
 // remotePublisher decides how this node's devices are announced with respect
@@ -61,7 +63,7 @@ type remotePublisher struct {
 }
 
 func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, error) {
-	rp := &remotePublisher{nodeName: config.Flags.NodeName}
+	rp := &remotePublisher{nodeName: config.NodeName}
 	if !featuregates.Enabled(featuregates.RemoteGPUSupport) {
 		return rp, nil
 	}
@@ -70,13 +72,12 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 	if err != nil {
 		return nil, err
 	}
-	rp.agentDial, err = remotegpu.ResolveAgentDial(ctx, config.Core.CoreV1().Nodes(), config.Flags.NodeName, config.Flags.RemoteAgentEndpoint)
+	rp.agentDial, err = remotegpu.ResolveAgentDial(ctx, config.Core.CoreV1().Nodes(), config.NodeName, config.RemoteAgentEndpoint)
 	if err != nil {
 		return nil, err
 	}
 	rp.spec = &remote.PublishSpec{Selector: reachable}
-	klog.V(2).Infof("Remote GPU publishing enabled: agent at %s, reachable-nodes=%q",
-		rp.agentDial, config.Flags.RemoteNodeSelector)
+	klog.V(2).Infof("Remote GPU publishing enabled: agent at %s, reachable-nodes=%q", rp.agentDial, config.RemoteNodeSelector)
 
 	// Ask the agent once right away so the first publish already carries
 	// the endpoints and the server's version when it is up. If not, the
@@ -98,6 +99,16 @@ func (rp *remotePublisher) apply(pool resourceslice.Pool) resourceslice.Pool {
 	spec := rp.currentSpec()
 	for i := range pool.Slices {
 		remote.Decorate(pool.Slices[i].Devices, spec)
+		if rp.enabled() {
+			// Always within a DRA string attribute's 64 characters: kubelet
+			// names the node after its hostname and labels it
+			// kubernetes.io/hostname with the same value, so a node longer
+			// than a 63-character label value never registers.
+			attr := resourceapi.DeviceAttribute{StringValue: ptr.To(rp.nodeName)}
+			for j := range pool.Slices[i].Devices {
+				pool.Slices[i].Devices[j].Attributes[remote.AttrNodeName] = attr
+			}
+		}
 	}
 	if spec != nil {
 		pool.NodeSelector = remote.PoolNodeSelector(spec.Selector)

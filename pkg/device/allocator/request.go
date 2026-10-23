@@ -458,9 +458,9 @@ func parseSchedulerPolicy(pod *corev1.Pod, annotation string) util.SchedulerPoli
 	}
 }
 
-// ParsePodTopologyMode reads DeviceTopologyModeAnnotation and returns the
-// BASE mode (numa / link / none) plus a strict flag derived from the
-// "-strict" suffix variants. Moved here from allocator.go so the parse
+// ParsePodTopologyMode reads DeviceTopologyModeAnnotation and returns the mode
+// as written, lower-cased and "-strict" suffix included (BaseTopology strips
+// it), plus a strict flag derived from that suffix. Moved here from allocator.go so the parse
 // happens once at BuildAllocationRequest time, alongside the other
 // annotation reads.
 func ParsePodTopologyMode(pod *corev1.Pod) (mode util.TopologyMode, strict bool) {

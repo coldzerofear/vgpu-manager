@@ -185,6 +185,11 @@ func (h *validateHandle) createCombinedResourceClaimTemplate(
 	}
 
 	resourceClaimTemplate := common.BuildTaskResourceClaimTemplate(task, resourceRequests, resourceClaimName, ownerKey, createTimestamp)
+	if errs := common.CheckDeviceConstraintLimit(&resourceClaimTemplate.Spec.Spec, taskPath.Child("template").Child("spec").Child("containers")); len(errs) > 0 {
+		err := apierrors.NewInvalid(vcv1alpha1.SchemeGroupVersion.WithKind("Job").GroupKind(), job.Name, errs)
+		logger.V(3).Error(err, "")
+		return nil, err
+	}
 
 	if !dryRun {
 		if err := h.client.Create(ctx, resourceClaimTemplate); err != nil {

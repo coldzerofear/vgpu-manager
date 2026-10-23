@@ -439,12 +439,17 @@ spec:
             - --kube-api-qps=20
             - --kube-api-burst=30
             - --server-bind-port=9443
-            - --default-topology-mode=link
+            - --default-topology-mode=numa
             - --vgpu-device-class-name=vgpu-manager
             - --dra-admission-enabled
             - --default-convert2-dra
             - --combined-resource-claim
             - --v=4
+          env:
+            # 远程 GPU 服务端按域名寻址（不允许 hostNetwork）时设为 "true"：
+            # 拒绝解析不到集群域名的 remote Pod（dnsPolicy Default、hostNetwork + ClusterFirst 等）。
+            - name: CHECK_CLUSTER_DNS
+              value: "false"
           ports:
             - name: https
               containerPort: 9443

@@ -360,7 +360,7 @@ func PolicyLabel(p util.SchedulerPolicy) string {
 // (strictness is a separate dimension and is not a label here).
 func TopologyLabel(m util.TopologyMode) string {
 	switch m {
-	case util.NUMATopology, util.LinkTopology, util.NoneTopology:
+	case util.NUMATopology, util.LinkTopology, util.PCIeTopology, util.NoneTopology:
 		return string(m)
 	case "":
 		return string(util.NoneTopology)

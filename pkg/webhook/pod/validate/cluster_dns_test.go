@@ -80,7 +80,7 @@ func TestCheckClusterDNS(t *testing.T) {
 				HostNetwork: test.hostNetwork,
 				DNSConfig:   test.dnsConfig,
 			}}
-
+			t.Setenv(checkClusterDNSEnv, "true")
 			errs := checkClusterDNS(pod)
 
 			if test.wantField == "" {
@@ -92,4 +92,11 @@ func TestCheckClusterDNS(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The check is opt-in: without the env a pod that would fail it is admitted.
+func TestCheckClusterDNSOffByDefault(t *testing.T) {
+	t.Setenv(checkClusterDNSEnv, "")
+	pod := &corev1.Pod{Spec: corev1.PodSpec{DNSPolicy: corev1.DNSDefault}}
+	assert.Empty(t, checkClusterDNS(pod))
 }

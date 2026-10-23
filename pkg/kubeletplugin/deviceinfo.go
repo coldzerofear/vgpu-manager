@@ -24,6 +24,7 @@ import (
 	"github.com/Masterminds/semver"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
@@ -50,6 +51,11 @@ type GpuDeviceInfo struct {
 	// includes this GPU. Used to publish the `partition1`/`partition2`/
 	// `partition4`/`partition8` device attributes.
 	partitionsBySize map[int]int
+
+	// topology is this GPU's interconnect, resolved at discovery when the
+	// TopologyDeviceAttributes gate is on. The zero value means "no peer at
+	// any level, or not resolved", and publishes no attributes.
+	topology deviceTopology
 }
 
 // Represents a specific (concrete, incarnated, created) MIG device. Annotated
@@ -185,7 +191,31 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 		d.addFabricManagerAttributes(attrs)
 	}
 
+	if featuregates.Enabled(featuregates.TopologyDeviceAttributes) {
+		d.addTopologyDeviceAttributes(attrs)
+	}
+
 	return attrs
+}
+
+// addTopologyDeviceAttributes publishes this GPU's interconnect. Each
+// attribute is omitted when unknown rather than published empty: a
+// matchAttribute constraint skips devices that lack the attribute, which is
+// exactly the right answer for a GPU that cannot offer that connectivity.
+func (d *GpuDeviceInfo) addTopologyDeviceAttributes(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute) {
+	if d == nil {
+		return
+	}
+	for name, value := range map[resourceapi.QualifiedName]string{
+		util.CliqueDeviceAttribute:       d.topology.Clique,
+		util.NVLinkDomainDeviceAttribute: d.topology.NVLinkDomain,
+		util.PCIeDomainDeviceAttribute:   d.topology.PCIeDomain,
+	} {
+		if value == "" {
+			continue
+		}
+		attrs[name] = resourceapi.DeviceAttribute{StringValue: ptr.To(value)}
+	}
 }
 
 // addFabricManagerAttributes publishes the Fabric Manager-derived attributes
@@ -290,6 +320,14 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 			klog.V(4).Infof("No parent GPU for %s; skipping Fabric Manager attributes", d.CanonicalName())
 		} else {
 			d.parent.addFabricManagerAttributes(device.Attributes)
+		}
+	}
+
+	if featuregates.Enabled(featuregates.TopologyDeviceAttributes) {
+		if d.parent == nil {
+			klog.V(4).Infof("No parent GPU for %s; skipping topology attributes", d.CanonicalName())
+		} else {
+			d.parent.addTopologyDeviceAttributes(device.Attributes)
 		}
 	}
 

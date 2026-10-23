@@ -105,6 +105,7 @@ devicePlugin:
 | `DevicePluginClientMode` | `false` | Alpha |
 | `NRISupport` | `false` | Alpha |
 | `FabricManagerPartitioning` | `false` | Alpha |
+| `TopologyDeviceAttributes` | `false` | Alpha |
 | `DRAListTypeAttributes` | `false` | Alpha |
 
 ## Dependencies and mutual exclusions
@@ -128,6 +129,9 @@ The rules it enforces:
 * `DynamicMIG` ⊗ `NVMLDeviceHealthCheck`
 * `DynamicMIG` ⊗ `MPSSupport`
 * `PassthroughSupport` ⊗ `NVMLDeviceHealthCheck`
+
+`--plugin-mode=inject` additionally refuses `SharedSMUtilizationWatcher` and
+`TopologyDeviceAttributes`: an inject process publishes no devices.
 
 > Note: `DeviceMetadata` requires `PassthroughSupport`, which is mutually exclusive with
 > `VGPUSupport`. Since `VGPUSupport` is on by default, enabling `DeviceMetadata` also means turning
@@ -315,9 +319,132 @@ is on.
 
 * action scope: kubelet-plugin
 
-Enables Fabric Manager (NVSwitch) partition management for full-GPU and VFIO devices. Prepare
-activates the FM partition whose member set exactly matches the claim's allocated GPUs, and fails if
-no partition matches. Requires Fabric Manager running with `FABRIC_MODE=1`.
+Enables Fabric Manager (NVSwitch) partition management. Requires Fabric Manager running with
+`FABRIC_MODE=1`. What it does depends on whether `VGPUSupport` is on:
+
+* **`VGPUSupport` off** (full-GPU and VFIO devices): Prepare activates the FM partition whose member
+  set exactly matches the claim's allocated GPUs, and fails if no partition matches. Unprepare
+  releases it.
+* **`VGPUSupport` on**: the node activates one partition covering all of its GPUs at startup, and
+  Prepare/Unprepare never touch Fabric Manager. Per-claim partitioning cannot work here — vGPU
+  devices allow multiple allocations, so claims hold overlapping rather than identical GPU sets and
+  FM refuses to activate an overlapping partition. Fabric isolation between claims is given up,
+  which vGPU cannot provide anyway since two claims may share one physical GPU. A node whose GPU
+  count is not a supported partition size logs a warning and leaves the fabric untouched; the
+  `partitionN` attributes are still published either way. If Fabric Manager refuses the activation,
+  the plugin fails to start and is retried by its restart backoff. A refusal that persists is
+  nearly always an overlapping partition that is still active — for example one left by per-claim
+  partitioning before `VGPUSupport` was turned on — and has to be deactivated with Fabric Manager.
+  The node partition is never deactivated, so a node that ran this combination keeps it active until
+  it reboots.
+
+### TopologyDeviceAttributes
+
+* action scope: kubelet-plugin
+
+Publishes each device's interconnect as three attributes:
+
+* `clique` — the hardware fabric identity (`clique:<clusterUUID>.<cliqueID>`, from NVML). On MNNVL
+  systems one clique spans several nodes.
+* `nvlinkDomain` — equal for the GPUs of one NVLink-connected component **on this node**. Always
+  node-local, also on MNNVL: a claim can draw devices from several nodes (remote-GPU pools), and a
+  plain claim cannot use a cross-node NVLink path. The fabric identity is still used — it keeps two
+  independent NVSwitch fabrics in one chassis apart — but it never becomes the key. Match on
+  `clique` instead when cross-node fabric membership is what a claim means. Works on NVLink hardware
+  without NVSwitch too.
+* `pcieDomain` — equal for the GPUs of one component connected by peer-to-peer DMA **without
+  crossing a PCIe host bridge**. Always node-local. The tiers nest, so NVLink links count as well
+  and a GPU normally carries both domains.
+
+Both domains are connected components, so two GPUs share one when a chain of qualifying links joins
+them. Neither says anything about NUMA: NVLink crosses CPU sockets, so one `nvlinkDomain` or
+`pcieDomain` routinely spans two NUMA nodes.
+
+A GPU with no peer at a level publishes no attribute for that level, so a `matchAttribute`
+constraint correctly refuses it. The gate never stops the plugin from starting: a single-GPU node or
+one without NVLink simply publishes fewer attributes, a GPU pair whose link cannot be read is treated
+as unconnected, and if the topology cannot be read at all the node publishes none — each logged as a
+warning.
+
+`pcieDomain` is deliberately not the standard `resource.kubernetes.io/pcieRoot`: a root complex also
+groups GPUs that have to cross the host bridge to talk. `pcieRoot` stays untouched and is the right
+key for hand-written ResourceClaims that need one topology key shared with another DRA driver — for
+example pinning GPUs and CPUs to the same root complex together with
+[dra-driver-cpu](https://github.com/kubernetes-sigs/dra-driver-cpu).
+
+The webhook turns a multi-GPU request of a pod with a topology mode into `matchAttribute`
+constraints on these attributes:
+
+| Mode | `-strict` | Non-strict (`firstAvailable`, tried in order) |
+|---|---|---|
+| `link` | `nvlinkDomain` | `nvlink` (`nvlinkDomain`) → `pcie` (`pcieDomain`) → `numa` (`numaNode`) → `any` |
+| `pcie` | `pcieDomain` | `pcie` (`pcieDomain`) → `numa` (`numaNode`) → `any` |
+| `numa` | `numaNode` | `numa` (`numaNode`) → `any` |
+
+`-strict` keeps one exact request pinned to its tier, so a node that cannot offer it is refused (a
+strict single-GPU request is pinned too, so its card must carry that tier's attribute) — and
+a node without this gate can never offer `nvlinkDomain` or `pcieDomain`, so **enable this gate on
+every node that should satisfy `link-strict` or `pcie-strict`**. A non-strict mode becomes a
+`firstAvailable` list, one subrequest per tier plus an unconstrained `any`: the allocator takes the
+first one a node can satisfy, and the scheduler scores a node higher the earlier that subrequest is,
+so the tightest available tier wins without ever leaving the pod unschedulable. The subrequest
+names show up in the allocation result (`<request>/pcie`), which tells which tier a request got.
+This needs the Kubernetes `DRAPrioritizedList` feature, on by default since 1.34 and locked on since
+1.37. Pods without a topology mode are left as one exact, unconstrained request.
+
+For remote GPUs (`nvidia.com/vgpu-access-mode: remote`) a request with a topology mode is also kept
+on one GPU server, through the `nodeName` attribute remote devices carry: topology is not defined
+across nodes. Without a topology mode a request may span servers.
+
+**Limit with `--combined-resource-claim`.** Kubernetes allows at most 32 constraints per
+ResourceClaim, and each multi-GPU request takes one per tier above, one for uuid exclusivity, and
+one more for remote access. Without the flag every container gets its own claim and never comes
+near the limit; with it, all of a pod's containers share one claim, which caps how many multi-GPU
+containers a pod (or a Volcano task) can have:
+
+| Topology mode | Constraints per multi-GPU container (local / remote) | Max multi-GPU containers (local / remote) |
+|---|---|---|
+| `link` | 4 / 5 | 8 / 6 |
+| `pcie` | 3 / 4 | 10 / 8 |
+| `numa` | 2 / 3 | 16 / 10 |
+| any `-strict` mode | 2 / 3 | 16 / 10 |
+| none | 1 / 1 | 32 / 32 |
+
+Single-GPU containers take none, or one under a `-strict` mode. A workload beyond its limit is
+refused at admission with an error saying so; the webhook does not drop tiers to make it fit, since
+what a topology mode guarantees would then depend on how many containers share the claim. Use fewer
+multi-GPU containers, a `-strict` mode, or turn the flag off. Well inside the limit, many multi-GPU
+containers in one claim still multiply the combinations the scheduler has to try (one ladder per
+container), so a pod with many of them schedules faster with a `-strict` mode or without the flag.
+
+**How this compares with the scheduler-extender path.** The connectivity thresholds are the same, so
+`link` means NVLink and `pcie` means the PCIe switch tier on both paths, but the grouping is not
+identical. The domains are components of the whole node, while the extender checks connectivity
+among the cards still free; on a board without full NVLink connectivity (for example a hybrid
+cube-mesh) a DRA request can be given two GPUs of one component that have no direct link. The NUMA
+tier also differs in source: `numaNode` here, the CPU-affinity link type on the extender path, which
+can disagree with sub-NUMA clustering on.
+
+It reads fabric identities from NVML and never talks to Fabric Manager. The topology is read once,
+at plugin start, so it reflects the NVLinks that are up at that moment: with Fabric Manager in
+`FABRIC_MODE=1`, links may not be trained until a partition is activated, and a node using
+per-claim partitions (`FabricManagerPartitioning` without `VGPUSupport`) may then publish no
+`nvlinkDomain` at all. Under `VGPUSupport` the node partition is activated before the topology is
+read.
+
+**Upgrading.** These changes reach pods through the webhook, which relies on what the kubelet
+plugins publish, so upgrade the kubelet plugins (with this gate) before the webhook:
+
+* A non-strict mode used to be one hard constraint (`link` on `pcieRoot`, `numa` on `numaNode`) and
+  is now the fallback ladder above, ending unconstrained.
+* `link-strict` used to match `pcieRoot`, which every node publishes; it now needs `nvlinkDomain`, so
+  nodes without this gate stop satisfying it.
+* A remote request with a topology mode needs the GPU servers to publish `nodeName`, which they do
+  from this release on.
+* The shipped manifests and chart now default the webhook to `numa`, so remote multi-GPU containers
+  stay on one GPU server unless the pod sets `nvidia.com/device-topology-mode: none`.
+* With `FabricManagerPartitioning` and `VGPUSupport` both on, the plugin now activates the node
+  partition at startup and fails to start if Fabric Manager refuses it (see above).
 
 ### DeviceMetadata
 

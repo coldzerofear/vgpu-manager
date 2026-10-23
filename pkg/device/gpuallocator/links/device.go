@@ -149,7 +149,18 @@ func GetP2PLink(dev1 device.Device, dev2 device.Device) (P2PLinkType, error) {
 //     downstream topology decision (NVLink component/island detection,
 //     strict-link validation, node fitness ranking, bestEffort pair scoring).
 //     We detect the fabric via the remote device TYPE instead.
+//
+// It cannot tell two DISTINCT NVSwitch fabrics apart (see
+// GetNVLinkWithCliques); callers that can supply fabric identities should use
+// that variant instead.
 func GetNVLink(dev1 device.Device, dev2 device.Device) (P2PLinkType, error) {
+	return GetNVLinkWithCliques(dev1, dev2, "", "")
+}
+
+// GetNVLinkWithCliques is GetNVLink told which NVLink fabric each device
+// belongs to (see FabricCliques). Unknown ("") clique keys reduce it exactly
+// to GetNVLink.
+func GetNVLinkWithCliques(dev1 device.Device, dev2 device.Device, clique1, clique2 string) (P2PLinkType, error) {
 	pciInfos, err := getAllNvLinkRemotePciInfo(dev1)
 	if err != nil {
 		return P2PLinkUnknown, fmt.Errorf("failed to get nvlink remote pci info: %v", err)
@@ -177,6 +188,16 @@ func GetNVLink(dev1 device.Device, dev2 device.Device) (P2PLinkType, error) {
 	// which would report "no NVLink" for a fully connected 8-GPU HGX/DGX board.
 	// Both endpoints must be attached to the fabric; the usable width is the
 	// weaker side's enabled-link count.
+	//
+	// "Attached to a switch" is not "attached to the SAME switch fabric": a
+	// chassis can carry two independent NVSwitch baseboards whose GPUs have no
+	// NVLink path between them. The probes below only report the remote device
+	// TYPE, never which fabric it belongs to, so they would call such a pair
+	// connected. Known-and-different clique keys settle it; unknown keys leave
+	// the answer as it was.
+	if DifferentFabric(clique1, clique2) {
+		return P2PLinkUnknown, nil
+	}
 	links1, viaSwitch1, err := countNvSwitchLinks(dev1)
 	if err != nil {
 		return P2PLinkUnknown, fmt.Errorf("failed to check nvswitch links for dev1: %v", err)

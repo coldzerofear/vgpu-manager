@@ -206,3 +206,29 @@ func TestRemotePublisherAgentDown(t *testing.T) {
 		t.Fatalf("spec must be untouched: %+v", spec)
 	}
 }
+
+// The node name is what keeps a remote request with a topology mode on one GPU
+// server, so a remote node must publish it on every device.
+func TestRemotePublisherNodeName(t *testing.T) {
+	publish := func(rp *remotePublisher) resourceslice.Pool {
+		return rp.apply(resourceslice.Pool{Slices: []resourceslice.Slice{{
+			Devices: []resourceapi.Device{{Name: "vgpu-0"}, {Name: "vgpu-1"}},
+		}}})
+	}
+
+	t.Run("a remote node publishes its name on every device", func(t *testing.T) {
+		p := publish(&remotePublisher{nodeName: "gpu-node", spec: &remote.PublishSpec{}})
+		for _, d := range p.Slices[0].Devices {
+			if got := d.Attributes[remote.AttrNodeName]; got.StringValue == nil || *got.StringValue != "gpu-node" {
+				t.Fatalf("device %s nodeName = %v, want gpu-node", d.Name, got.StringValue)
+			}
+		}
+	})
+
+	t.Run("a local-only node publishes none", func(t *testing.T) {
+		p := publish(&remotePublisher{nodeName: "gpu-node"})
+		if _, ok := p.Slices[0].Devices[0].Attributes[remote.AttrNodeName]; ok {
+			t.Fatal("nodeName must only be published for remote devices")
+		}
+	})
+}

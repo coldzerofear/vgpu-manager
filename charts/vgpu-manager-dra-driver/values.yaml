@@ -149,6 +149,10 @@ kubeletPlugin:
         TimeSlicingSettings: false
         PassthroughSupport: false
         FabricManagerPartitioning: false
+        # Publish each device's interconnect (`clique` / `nvlinkDomain` / `pcieDomain`), which the
+        # `link` and `pcie` topology modes match on. Without it a node can never satisfy
+        # `link-strict` / `pcie-strict`, and non-strict pods there fall back past those tiers.
+        TopologyDeviceAttributes: true
         # Publish list-valued DRA device attributes
         DRAListTypeAttributes: false
         # Publish consumable capacity and multi-allocation support for devices
@@ -311,8 +315,12 @@ webhook:
     defaultNodePolicy: ""
     # Default device scheduling policy. Empty uses the binary default. (supported values: binpack | spread)
     defaultDevicePolicy: ""
-    # Default device list topology mode. (supported values: numa | link)
-    defaultTopologyMode: link
+    # Default device list topology mode. Empty leaves pods without one.
+    # (supported values: numa | link | pcie, each also with a "-strict" variant)
+    # link / pcie match on attributes published by the kubelet-plugin's TopologyDeviceAttributes
+    # gate. Non-strict modes fall back tier by tier (needs DRAPrioritizedList, on by default since
+    # Kubernetes 1.34); "-strict" modes refuse nodes without those attributes.
+    defaultTopologyMode: numa
     # Default container runtimeClassName set on vGPU pods. Empty disables it. (code default: "")
     defaultRuntimeClass: ""
     # Name of the vGPU device class used for DRA conversion. (code default: "vgpu-manager")

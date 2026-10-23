@@ -89,6 +89,13 @@ type DeviceState struct {
 
 	fmManager *fabricmanager.Manager
 
+	// topologyDomains is this node's interconnect topology by GPU UUID,
+	// resolved once at startup when TopologyDeviceAttributes is on. Retained
+	// (rather than only pushed into the GpuDeviceInfos) so a GPU rediscovered
+	// later — a VFIO device rebinding to the nvidia driver — can be given its
+	// topology back without re-walking every link on the node.
+	topologyDomains map[string]deviceTopology
+
 	// Checkpoint read/write lock, file-based for multi-process synchronization.
 	cplock *flock.Flock
 }
@@ -132,8 +139,8 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	devRoot := containerDriverRoot.GetDevRoot()
 	klog.Infof("Using devRoot=%v", devRoot)
 
-	nvdevlib, err := newDeviceLib(containerDriverRoot, config.Flags.HostRoot,
-		int(config.Flags.DeviceMemoryOverride))
+	nvdevlib, err := newDeviceLib(containerDriverRoot, config.HostRoot,
+		int(config.DeviceMemoryOverride))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
 	}
@@ -240,6 +247,29 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		for _, gpu := range nvdevlib.gpuInfosByUUID {
 			if err := state.attachFabricManagerPartitions(gpu); err != nil {
 				return nil, fmt.Errorf("attaching fabric manager partitions for GPU %s: %w", gpu.CanonicalName(), err)
+			}
+		}
+		if !state.perClaimFabricPartitioning() {
+			if err := state.activateNodeFabricPartition(); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Resolve the node's interconnect topology and attach it to every discovered
+	// GPU. The attributes are optional: a node whose topology cannot be read
+	// starts anyway and publishes none, which non-strict topology pods fall back
+	// past and strict ones are refused on, as on a node with no NVLink at all.
+	// Nothing here depends on an external service coming up, so a restart would
+	// not read any more than this one did.
+	if featuregates.Enabled(featuregates.TopologyDeviceAttributes) {
+		domains, err := nvdevlib.discoverTopologyDomains(config.NodeName)
+		if err != nil {
+			klog.Warningf("Resolving the GPU interconnect topology failed, publishing no topology attributes: %v", err)
+		} else {
+			state.topologyDomains = domains
+			for _, gpu := range nvdevlib.gpuInfosByUUID {
+				state.attachTopologyDomains(gpu)
 			}
 		}
 	}
@@ -587,7 +617,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 			}
 		}
 	}
-	if s.fabricManagerPartitioningEnabled() {
+	if s.perClaimFabricPartitioning() {
 		if err := s.deactivateFabricPartition(claimUID, &pc, checkpoint); err != nil {
 			return false, fmt.Errorf("error deactivating fabric partition: %w", err)
 		}
@@ -681,7 +711,7 @@ func (s *DeviceState) unpreparePartiallyPreparedClaim(ctx context.Context, cuid 
 	// Note: This is only relevant for GPU/VFIO devices and the operation
 	// itself is idempotent so even if the partitions were never
 	// activated, its safe to call this function and it'll be a no-op.
-	if s.fabricManagerPartitioningEnabled() {
+	if s.perClaimFabricPartitioning() {
 		if err := s.deactivateFabricPartition(cuid, &pc, checkpoint); err != nil {
 			return fmt.Errorf("error deactivating fabric partition: %w", err)
 		}
@@ -1043,7 +1073,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 			return nil, fmt.Errorf("claim %s contains %d VFIO device groups, but at most one is supported per claim", ResourceClaimToString(claim), vfioGroups)
 		}
 	}
-	if s.fabricManagerPartitioningEnabled() {
+	if s.perClaimFabricPartitioning() {
 		if err := s.activateFabricPartition(claim); err != nil {
 			return nil, err
 		}
@@ -1455,6 +1485,9 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 		if err := s.attachFabricManagerPartitions(gpu.Gpu); err != nil {
 			return fmt.Errorf("error attaching fabric manager partitions for gpu %q: %w", gpu.Gpu.CanonicalName(), err)
 		}
+		// Same for the interconnect topology: the GPU is visible to NVML again, and
+		// the node's links did not change while it was passed through.
+		s.attachTopologyDomains(gpu.Gpu)
 	case MigStaticDeviceType:
 		// TODO: Implement once partitionable device is supported with PassthroughSupport feature gate.
 		return nil
@@ -1646,7 +1679,7 @@ func (s *DeviceState) gpuInfosFromPreparedClaim(results []resourceapi.DeviceRequ
 // Callers that include VFIO devices must first rebind those GPUs to the nvidia
 // driver and rediscover so each VFIO device's parent is repopulated.
 func (s *DeviceState) deactivateFabricPartition(claimUID string, pc *PreparedClaim, checkpoint *Checkpoint) error {
-	if !s.fabricManagerPartitioningEnabled() || pc.Status.Allocation == nil || isAdminAccess(pc.Status.Allocation.Devices.Results) {
+	if !s.perClaimFabricPartitioning() || pc.Status.Allocation == nil || isAdminAccess(pc.Status.Allocation.Devices.Results) {
 		return nil
 	}
 	gpus := s.gpuInfosFromPreparedClaim(pc.Status.Allocation.Devices.Results)
@@ -1700,6 +1733,88 @@ func (s *DeviceState) attachFabricManagerPartitions(gpu *GpuDeviceInfo) error {
 
 func (s *DeviceState) fabricManagerPartitioningEnabled() bool {
 	return featuregates.Enabled(featuregates.FabricManagerPartitioning) && s.fmManager != nil
+}
+
+// perClaimFabricPartitioning reports whether Prepare and Unprepare drive FM
+// partitions. Under VGPUSupport they do not — the node activates one partition
+// covering every GPU instead; see activateNodeFabricPartition for why.
+func (s *DeviceState) perClaimFabricPartitioning() bool {
+	return s.fabricManagerPartitioningEnabled() && !featuregates.Enabled(featuregates.VGPUSupport)
+}
+
+// activateNodeFabricPartition activates the single FM partition covering every
+// GPU on this node. The caller must ensure fabricManagerPartitioningEnabled().
+//
+// The per-claim path never covered vGPU devices -- it only handles full GPUs
+// and VFIO -- so under VGPUSupport the fabric used to be left as Fabric
+// Manager configured it, which with FABRIC_MODE=1 means no partition and so
+// no NVLink for vGPU pods. Extending the per-claim path to vGPU would not
+// work: vGPU devices allow multiple allocations, so claims hold OVERLAPPING
+// GPU sets, and FM refuses to activate a partition that overlaps an active
+// one -- the first single-vGPU claim would lock out every multi-GPU
+// partition containing its GPU.
+//
+// One node-wide partition has no such conflict: there is only ever one, it
+// never changes, and every vGPU claim gets the full NVLink fabric. What is
+// given up is fabric isolation between claims, which vGPU cannot offer in the
+// first place: two claims may share one physical GPU.
+//
+// The partition is never deactivated. Tearing it down would reprogram the
+// fabric underneath the containers still using it, so a plugin restart (or a
+// DaemonSet rollout) must not do it; activation is idempotent, so the next
+// start simply finds it already active.
+func (s *DeviceState) activateNodeFabricPartition() error {
+	gpus := make([]*GpuDeviceInfo, 0, len(s.nvdevlib.gpuInfosByUUID))
+	for _, gpu := range s.nvdevlib.gpuInfosByUUID {
+		gpus = append(gpus, gpu)
+	}
+	if len(gpus) == 0 {
+		return nil
+	}
+
+	partitionID, err := s.resolveFabricPartition(gpus)
+	if err != nil {
+		// Not every node has a partition spanning all of its GPUs — the count
+		// may not be a supported partition size. Say so and carry on: the
+		// partitionN attributes are still published, so allocation constraints
+		// keep working, and refusing to start would take the node out of
+		// service over an optimisation.
+		klog.Warningf("%v; leaving the NVSwitch fabric as Fabric Manager configured it", err)
+		return nil
+	}
+
+	klog.V(2).Infof("Fabric Manager: activating node partition %d covering %d GPUs (VGPUSupport)", partitionID, len(gpus))
+	if err := s.fmManager.ActivatePartition(partitionID); err != nil {
+		// Unlike a missing partition above, this fails startup. A transient
+		// refusal (Fabric Manager restarting) is retried by the container's
+		// restart backoff, which a warning would give up on for good; a lasting
+		// one belongs in CrashLoopBackOff, where it is seen, rather than in a
+		// log line under a plugin that looks healthy while multi-vGPU pods
+		// silently lose NVLink. The lasting cause is nearly always an
+		// overlapping partition still active -- left by per-claim partitioning
+		// from before VGPUSupport was turned on, which nothing under
+		// VGPUSupport deactivates any more -- so say how to clear it.
+		return fmt.Errorf("activating node fabric partition %d: %w (if a partition overlapping it is still active, "+
+			"e.g. one left by per-claim partitioning before VGPUSupport was enabled, deactivate it with Fabric Manager)",
+			partitionID, err)
+	}
+	return nil
+}
+
+// attachTopologyDomains copies the node's resolved interconnect topology onto
+// a GPU. It is a no-op when the feature is off or the GPU was not part of the
+// walk — a GPU bound to vfio-pci at discovery time is invisible to NVML, so it
+// has no entry, and publishing nothing for it is the honest answer.
+func (s *DeviceState) attachTopologyDomains(gpu *GpuDeviceInfo) {
+	if gpu == nil || s.topologyDomains == nil {
+		return
+	}
+	topo, ok := s.topologyDomains[gpu.UUID]
+	if !ok {
+		klog.V(4).Infof("No topology recorded for GPU %s; publishing none", gpu.CanonicalName())
+		return
+	}
+	gpu.topology = topo
 }
 
 // activateFabricPartition activates the FM partition formed by the physical

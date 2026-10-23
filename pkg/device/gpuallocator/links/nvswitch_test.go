@@ -318,3 +318,58 @@ func TestNvlinkCountToType(t *testing.T) {
 		}
 	}
 }
+
+// TestGetNVLinkWithCliques covers the fabric-identity guard. A chassis holding
+// two independent NVSwitch baseboards has GPUs that are switch-attached on
+// both sides yet have no NVLink path between them; the per-link probes cannot
+// see the difference, so the clique keys have to.
+func TestGetNVLinkWithCliques(t *testing.T) {
+	switchAttached := func(self nvml.PciInfo) *testDevice {
+		return linkDev(6, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, self)
+	}
+
+	t.Run("same fabric stays connected", func(t *testing.T) {
+		got, err := GetNVLinkWithCliques(switchAttached(gpu1Pci), switchAttached(gpu2Pci), "cluster.0", "cluster.0")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != SixNVLINKLinks {
+			t.Fatalf("got %v, want SixNVLINKLinks", got)
+		}
+	})
+
+	t.Run("different fabric is not connected", func(t *testing.T) {
+		got, err := GetNVLinkWithCliques(switchAttached(gpu1Pci), switchAttached(gpu2Pci), "cluster.0", "cluster.1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != P2PLinkUnknown {
+			t.Fatalf("got %v, want P2PLinkUnknown for a cross-fabric pair", got)
+		}
+	})
+
+	t.Run("an unknown identity keeps the fabric-agnostic answer", func(t *testing.T) {
+		got, err := GetNVLinkWithCliques(switchAttached(gpu1Pci), switchAttached(gpu2Pci), "cluster.0", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != SixNVLINKLinks {
+			t.Fatalf("got %v, want SixNVLINKLinks (unknown identity must not cut the edge)", got)
+		}
+	})
+
+	// A direct GPU-GPU link is proof of connectivity on its own, so the guard
+	// must sit behind the direct match and never override it.
+	t.Run("direct GPU-GPU links are unaffected by fabric identities", func(t *testing.T) {
+		dev1 := linkDev(4, gpu2Pci, nvml.NVLINK_DEVICE_TYPE_GPU, gpu1Pci)
+		dev2 := linkDev(4, gpu1Pci, nvml.NVLINK_DEVICE_TYPE_GPU, gpu2Pci)
+
+		got, err := GetNVLinkWithCliques(dev1, dev2, "cluster.0", "cluster.1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != FourNVLINKLinks {
+			t.Fatalf("got %v, want FourNVLINKLinks", got)
+		}
+	})
+}

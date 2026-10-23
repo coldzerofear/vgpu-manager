@@ -556,6 +556,11 @@ func (h *validateHandle) createCombinedResourceClaim(
 	ownerPod := fmt.Sprintf("%s-%s", pod.Namespace, pod.Name)
 	createTimestamp := fmt.Sprintf("%v", time.Now().UnixMilli())
 	resourceClaim := common.BuildResourceClaim(pod, resourceRequests, resourceClaimName, ownerPod, createTimestamp)
+	if errs := common.CheckDeviceConstraintLimit(&resourceClaim.Spec, field.NewPath("spec").Child("containers")); len(errs) > 0 {
+		err := apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, errs)
+		logger.V(3).Error(err, "")
+		return err
+	}
 
 	if !dryRun {
 		if err := h.client.Create(ctx, resourceClaim); err != nil {
@@ -946,6 +951,9 @@ func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admi
 	return admission.Allowed("").WithWarnings(warnings...)
 }
 
+// checkClusterDNSEnv turns checkClusterDNS on.
+const checkClusterDNSEnv = "CHECK_CLUSTER_DNS"
+
 // checkClusterDNS refuses a remote vGPU pod that cannot resolve names in the
 // cluster. The GPU server it is given is addressed by whatever its node
 // publishes, and where hostNetwork is not allowed on the server side that is
@@ -960,7 +968,14 @@ func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admi
 //     DNS;
 //   - None is left to the author: it carries its own dnsConfig, and whether
 //     those servers answer for the cluster zone is not ours to judge.
+//
+// Off unless the webhook runs with CHECK_CLUSTER_DNS enabled: some clusters
+// reach their GPU servers by node IP (hostNetwork), where the pod's DNS
+// policy does not matter.
 func checkClusterDNS(pod *corev1.Pod) field.ErrorList {
+	if !util.GetEnvEnabled(checkClusterDNSEnv) {
+		return nil
+	}
 	switch pod.Spec.DNSPolicy {
 	case corev1.DNSDefault:
 		return field.ErrorList{field.Invalid(field.NewPath("spec").Child("dnsPolicy"), pod.Spec.DNSPolicy,
