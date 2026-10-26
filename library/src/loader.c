@@ -2393,13 +2393,15 @@ static void malloc_gpu_virt_memory_graph(CUdeviceptr dptr, size_t bytes, int typ
     found = 1;
   } else {
     memory_node_t *new_node = (memory_node_t *)malloc(sizeof(memory_node_t));
-    /* cppcheck-suppress memleak ; false positive: new_node is NULL on this
-     * path. cppcheck cannot see through unlikely()/__builtin_expect, so it
-     * does not learn new_node == NULL here; the same shape is suppressed the
-     * same way in cuda_hook.c. It only started firing once this stopped
-     * handing list_add() the address of a member, which made cppcheck give up
-     * tracking the pointer altogether and masked the limitation. */
-    if (unlikely(!new_node)) {
+    /* Plain NULL test, deliberately NOT unlikely(): cppcheck 2.13 cannot see
+     * through __builtin_expect, so it never learns new_node == NULL on this
+     * branch and reports a leak at the return below. An inline suppression
+     * would have to sit on the return line, where it reads as if it were
+     * about the return rather than the allocation, and any line inserted
+     * before that return silently un-suppresses it -- which is exactly how
+     * this broke once already. The hint buys nothing on a path that only
+     * logs and returns. */
+    if (new_node == NULL) {
       pthread_mutex_unlock(&g_memory_node_lock);
       LOGGER(ERROR, "failed to allocate virt memory node");
       return;
