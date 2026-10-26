@@ -2393,6 +2393,12 @@ static void malloc_gpu_virt_memory_graph(CUdeviceptr dptr, size_t bytes, int typ
     found = 1;
   } else {
     memory_node_t *new_node = (memory_node_t *)malloc(sizeof(memory_node_t));
+    /* cppcheck-suppress memleak ; false positive: new_node is NULL on this
+     * path. cppcheck cannot see through unlikely()/__builtin_expect, so it
+     * does not learn new_node == NULL here; the same shape is suppressed the
+     * same way in cuda_hook.c. It only started firing once this stopped
+     * handing list_add() the address of a member, which made cppcheck give up
+     * tracking the pointer altogether and masked the limitation. */
     if (unlikely(!new_node)) {
       pthread_mutex_unlock(&g_memory_node_lock);
       LOGGER(ERROR, "failed to allocate virt memory node");
