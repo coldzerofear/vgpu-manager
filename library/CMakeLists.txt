@@ -287,6 +287,14 @@ if(BUILD_SM_NODE_TESTS)
     target_include_directories(test_session_paths PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+    # Container PID identification: the cgroup-namespace regression that made
+    # device_pid_in_same_container() reject every pid on kernels below 4.6,
+    # plus the fd-based GPU-in-use test and its no-leak property. In util.c so
+    # it is reachable without a driver, same as test_cgroup_parse above.
+    add_executable(test_container_pid test/nogpu/test_container_pid.c ${VGPU_NODRIVER_SRCS})
+    target_include_directories(test_container_pid PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
     # Bounds checks for the cgroup line parser. It lives in util.c precisely so
     # it can be reached without the driver: the overflow it pins down survived
     # because the parser was buried in cuda_hook.c where nothing could test it.
@@ -411,6 +419,7 @@ foreach(vgpu_nogpu_test
         test_vmem_region_concurrency
         test_session_paths
         test_session_pids_concurrency
+        test_container_pid
         test_cgroup_parse
         test_shared_file_mode
         test_delta_step

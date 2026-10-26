@@ -914,6 +914,12 @@ int gpu_device_fd_in_process(unsigned int pid) {
   char dir_path[64];
   snprintf(dir_path, sizeof(dir_path), "/proc/%u/fd", pid);
 
+  /* No explicit O_CLOEXEC counterpart to the "e" this file passes fopen()
+   * elsewhere: POSIX.1-2008 requires opendir() to set FD_CLOEXEC on the
+   * descriptor it returns, and glibc does (verified: F_GETFD reports
+   * FD_CLOEXEC on 2.39). Saying so here because the fopen() call sites
+   * deliberately spell it out, and a reader would otherwise read this as the
+   * one that forgot. */
   DIR *dir = opendir(dir_path);
   if (dir == NULL) {
     return -1;
@@ -951,11 +957,24 @@ int gpu_device_fd_in_process(unsigned int pid) {
   return ret;
 }
 
+/* The namespace types that decide "same container", and one cache slot each.
+ *
+ * At file scope so self_ns_inode()'s slot count is bound to this array at
+ * compile time rather than by hand: a third entry added here without widening
+ * the caches below would otherwise write past them.
+ *
+ * "mnt" MUST stay first. On a kernel without cgroup namespaces the loop below
+ * runs over the first entry only, and mnt is the one test that stands alone
+ * (see device_pid_in_same_container). */
+static const char *const g_ns_names[] = {"mnt", "cgroup"};
+#define NS_SLOT_COUNT (sizeof(g_ns_names) / sizeof(g_ns_names[0]))
+_Static_assert(NS_SLOT_COUNT >= 1, "device_pid_in_same_container needs at least the mnt leg");
+
 /* Whether this kernel has cgroup namespaces at all.
  *
  * Resolved once and cached, because it is a property of the kernel and cannot
  * change under a running process. Values: 0 = not probed yet, 1 = present,
- * 2 = absent.
+ * 2 = known absent.
  *
  * This exists because cgroup namespaces were only added in Linux 4.6. On an
  * older kernel /proc/<pid>/ns/cgroup simply does not exist, and the loop in
@@ -966,7 +985,19 @@ int gpu_device_fd_in_process(unsigned int pid) {
  * a no-op and hands the container the entire card. Verified on
  * 3.10.0-1160.el7: /proc/self/ns holds only ipc, mnt, net, pid, user, uts.
  *
- * Not reset after fork: a child inherits the same kernel. */
+ * ONLY ENOENT is treated as "this kernel has none". Any other failure is left
+ * unprobed so the next call retries, and is reported as "present" so the
+ * comparison still tries the cgroup leg and fails closed on it -- i.e. exactly
+ * the behaviour this function replaced. Caching an arbitrary errno as "absent"
+ * would permanently narrow the test for the rest of the process's life on the
+ * strength of one transient failure, which is the silent degradation this
+ * whole change exists to remove.
+ *
+ * Not reset after fork: a child inherits the same kernel.
+ *
+ * Returns 0 when the cgroup leg should be attempted, -1 when it must be
+ * skipped.
+ */
 static unsigned char g_cgroup_ns_state;
 
 static int cgroup_ns_available(void) {
@@ -974,7 +1005,14 @@ static int cgroup_ns_available(void) {
 
   if (unlikely(state == 0)) {
     struct stat st;
-    state = (stat(PID_SELF_NS_PATH "/cgroup", &st) == 0) ? 1 : 2;
+    if (stat(PID_SELF_NS_PATH "/cgroup", &st) == 0) {
+      state = 1;
+    } else if (errno == ENOENT) {
+      state = 2;
+    } else {
+      /* Transient: do not cache, do not narrow the test. */
+      return 0;
+    }
     __atomic_store_n(&g_cgroup_ns_state, state, __ATOMIC_RELAXED);
     if (state == 2) {
       /* A fixed property of the kernel, so a warning rather than a refusal to
@@ -990,7 +1028,7 @@ static int cgroup_ns_available(void) {
       }
     }
   }
-  return state == 1 ? 0 : -1;
+  return state == 2 ? -1 : 0;
 }
 
 /* The inode of one of our own namespaces, resolved once per type.
@@ -1009,18 +1047,23 @@ static int cgroup_ns_available(void) {
  * it would silently disable this comparison for the rest of the process's life
  * -- which means claiming every pid is "not ours" and under-counting memory.
  *
+ * Two threads arriving together both stat and both store the same inode, which
+ * is harmless but still a data race unless the stores are atomic, so they are.
+ * The flag carries release/acquire so a reader that sees it set is guaranteed
+ * to see the inode too; the inode itself only needs relaxed ordering on top of
+ * that.
+ *
  * Returns 0 and writes *ino on success, -1 otherwise.
  */
-static int self_ns_inode(const char *ns_type, int slot, ino_t *ino) {
-  /* One slot per entry of ns_names[] below. */
-  static ino_t cached[2];
-  static unsigned char ready[2];
+static int self_ns_inode(const char *ns_type, unsigned slot, ino_t *ino) {
+  static ino_t cached[NS_SLOT_COUNT];
+  static unsigned char ready[NS_SLOT_COUNT];
 
-  /* Acquire/release rather than relaxed: the store to cached[slot] has to be
-   * visible to any thread that observes ready[slot], or a racing reader could
-   * see the flag set and the inode still zero. */
+  if (slot >= NS_SLOT_COUNT) {
+    return -1;
+  }
   if (__atomic_load_n(&ready[slot], __ATOMIC_ACQUIRE)) {
-    *ino = cached[slot];
+    *ino = __atomic_load_n(&cached[slot], __ATOMIC_RELAXED);
     return 0;
   }
 
@@ -1030,7 +1073,7 @@ static int self_ns_inode(const char *ns_type, int slot, ino_t *ino) {
   if (stat(self_path, &self_st) != 0) {
     return -1;
   }
-  cached[slot] = self_st.st_ino;
+  __atomic_store_n(&cached[slot], self_st.st_ino, __ATOMIC_RELAXED);
   __atomic_store_n(&ready[slot], 1, __ATOMIC_RELEASE);
   *ino = self_st.st_ino;
   return 0;
@@ -1051,18 +1094,17 @@ int device_pid_in_same_container(unsigned int pid) {
    * shares the host's cgroup namespace, so the inodes match for everyone and
    * the test is satisfied by processes that are not ours at all. It narrows
    * the answer when it can and never widens it, which is why it stays. */
-  static const char *const ns_names[] = {"mnt", "cgroup"};
-  int count = (cgroup_ns_available() == 0) ? 2 : 1;
+  unsigned count = (cgroup_ns_available() == 0) ? NS_SLOT_COUNT : 1;
 
-  for (int i = 0; i < count; i++) {
+  for (unsigned i = 0; i < count; i++) {
     char device_path[128];
     struct stat device_st;
-    snprintf(device_path, sizeof(device_path), "/proc/%u/ns/%s", pid, ns_names[i]);
+    snprintf(device_path, sizeof(device_path), "/proc/%u/ns/%s", pid, g_ns_names[i]);
     if (stat(device_path, &device_st) != 0) {
       return -1;
     }
     ino_t self_ino;
-    if (self_ns_inode(ns_names[i], i, &self_ino) != 0) {
+    if (self_ns_inode(g_ns_names[i], i, &self_ino) != 0) {
       return -1;
     }
     if (device_st.st_ino != self_ino) {
