@@ -474,7 +474,14 @@ typedef struct {
 #define MEMORY_TYPE_CAPTURE      3
 #define MEMORY_TYPE_ASYNC_BRIDGE 4
 
-typedef struct {
+/* One virtual-memory record. Process-private heap, never shared memory (the
+ * chain pointer alone rules that out), so it carries no layout contract with
+ * the Go side -- what Go mirrors is device_vmemory_t, the shared region these
+ * records are summarised into.
+ *
+ * Lives in the hash table described by include/vmem_table.h; `hnext` is that
+ * table's bucket chain, owned by it and meaningless outside. */
+typedef struct memory_node_s {
   CUdeviceptr dptr;
   size_t bytes;
   /* One of MEMORY_TYPE_* above. */
@@ -488,7 +495,8 @@ typedef struct {
    * which device is current -- by then the context may be gone, and failing to
    * discharge after the node is dropped would strand the charge forever. */
   int host_index;
-  struct list_head node;
+  /* Bucket chain link. Managed exclusively by include/vmem_table.h. */
+  struct memory_node_s *hnext;
 } memory_node_t;
 
 typedef struct {

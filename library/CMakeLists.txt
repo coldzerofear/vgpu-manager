@@ -321,6 +321,12 @@ if(BUILD_SM_NODE_TESTS)
     target_include_directories(test_delta_step PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+    # Header-only: the dptr -> record hash table that replaced the linked list
+    # the virtual-memory records used to live on.
+    add_executable(test_vmem_table test/nogpu/test_vmem_table.c)
+    target_include_directories(test_vmem_table PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
     # Header-only: the CUDA array descriptor sizing, against the byte sizes
     # and zero-extent rules quoted from cuda.h in include/array_size.h.
     add_executable(test_array_size test/nogpu/test_array_size.c)
@@ -415,6 +421,7 @@ foreach(vgpu_nogpu_test
         test_shared_file_mode
         test_delta_step
         test_array_size
+        test_vmem_table
         test_delta_campaign
         test_delta_gen_campaign
         test_delta_gen_hard
