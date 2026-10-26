@@ -34,6 +34,7 @@
 #include "include/hook.h"
 #include "include/cuda-helper.h"
 #include "include/nvml-helper.h"
+#include "include/vmem_table.h"
 
 entry_t cuda_library_entry[] = {
     {.name = "cuInit"},
@@ -1061,13 +1062,10 @@ resource_data_t* g_vgpu_config = NULL;
 
 device_util_t* g_device_util = NULL;
 
-memory_node_t memory_node_temp = {
-    .dptr = 0,
-    .bytes = 0,
-    .node = LIST_HEAD_INIT(memory_node_temp.node)
-};
-
-memory_node_t* g_memory_node = &memory_node_temp;
+/* Virtual-memory records, keyed by dptr. Zero-initialised is a valid empty
+ * table by construction (see include/vmem_table.h), so no init step and no
+ * constructor -- the latter is forbidden in this library anyway. */
+static vmem_table_t g_vmem_table;
 static pthread_mutex_t g_memory_node_lock = PTHREAD_MUTEX_INITIALIZER;
 
 device_vmemory_t* g_device_vmem = NULL;
@@ -2377,28 +2375,33 @@ void reset_cuda_index_mapping() {
 static void malloc_gpu_virt_memory_graph(CUdeviceptr dptr, size_t bytes, int type,
                                          CUgraph graph, int host_index) {
   int found = 0;
-  memory_node_t *entry_tmp = NULL;
-  struct list_head *iter;
   size_t old_bytes = 0;
 
   int charged = (host_index >= 0 && host_index < MAX_DEVICE_COUNT) ? host_index : -1;
 
   pthread_mutex_lock(&g_memory_node_lock);
-  list_for_each(iter, &g_memory_node->node) {
-    entry_tmp = container_of(iter, memory_node_t, node);
-    if (entry_tmp != NULL && entry_tmp->dptr == dptr) {
-      old_bytes = entry_tmp->bytes;
-      entry_tmp->bytes = bytes;
-      entry_tmp->type = type;
-      entry_tmp->graph = graph;
-      entry_tmp->host_index = charged;
-      found = 1;
-      break;
-    }
-  }
-  if (!found) {
+  /* Look first, so re-recording a dptr the driver handed out again updates
+   * the existing record instead of shadowing it -- the delta below depends on
+   * old_bytes, and a duplicate would also strand the first record's charge. */
+  memory_node_t *entry_tmp = vmem_table_find(&g_vmem_table, dptr);
+  if (entry_tmp != NULL) {
+    old_bytes = entry_tmp->bytes;
+    entry_tmp->bytes = bytes;
+    entry_tmp->type = type;
+    entry_tmp->graph = graph;
+    entry_tmp->host_index = charged;
+    found = 1;
+  } else {
     memory_node_t *new_node = (memory_node_t *)malloc(sizeof(memory_node_t));
-    if (unlikely(!new_node)) {
+    /* Plain NULL test, deliberately NOT unlikely(): cppcheck 2.13 cannot see
+     * through __builtin_expect, so it never learns new_node == NULL on this
+     * branch and reports a leak at the return below. An inline suppression
+     * would have to sit on the return line, where it reads as if it were
+     * about the return rather than the allocation, and any line inserted
+     * before that return silently un-suppresses it -- which is exactly how
+     * this broke once already. The hint buys nothing on a path that only
+     * logs and returns. */
+    if (new_node == NULL) {
       pthread_mutex_unlock(&g_memory_node_lock);
       LOGGER(ERROR, "failed to allocate virt memory node");
       return;
@@ -2408,8 +2411,8 @@ static void malloc_gpu_virt_memory_graph(CUdeviceptr dptr, size_t bytes, int typ
     new_node->type = type;
     new_node->graph = graph;
     new_node->host_index = charged;
-    INIT_LIST_HEAD(&new_node->node);
-    list_add(&new_node->node, &g_memory_node->node);
+    new_node->hnext = NULL;
+    vmem_table_insert(&g_vmem_table, new_node);
   }
   pthread_mutex_unlock(&g_memory_node_lock);
 
@@ -2464,35 +2467,48 @@ void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes,
   malloc_gpu_virt_memory_graph(dptr, bytes, MEMORY_TYPE_CAPTURE, graph, host_index);
 }
 
+/* Predicate + accumulator for free_gpu_virt_memory_by_graph(). Selecting by
+ * graph is not a dptr lookup, so this is a full sweep -- see the note on
+ * vmem_table_retire_if(). A record whose host_index is out of range is still
+ * retired, just not discharged: it was never charged to begin with. */
+struct capture_sweep_ctx {
+  CUgraph graph;
+  size_t totals[MAX_DEVICE_COUNT];
+  int any;
+};
+
+static int retire_capture_of_graph(const memory_node_t *node, void *ctx) {
+  struct capture_sweep_ctx *sweep = (struct capture_sweep_ctx *)ctx;
+  int idx;
+
+  if (node->type != MEMORY_TYPE_CAPTURE || node->graph != sweep->graph) {
+    return 0;
+  }
+  idx = node->host_index;
+  if (idx >= 0 && idx < MAX_DEVICE_COUNT) {
+    sweep->totals[idx] += node->bytes;
+    sweep->any = 1;
+  }
+  return 1;
+}
+
 /* Discharge every capture record owned by graph, against whichever device
  * each record was originally charged to -- not a device looked up here,
- * since the context may already be unusable by the time this runs. Nodes
- * are detached under the list mutex first, then the shared counter is
+ * since the context may already be unusable by the time this runs. Records
+ * are retired under the table mutex first, then the shared counter is
  * updated separately (it takes the cross-process vmem lock and must not
- * nest inside the list mutex; free_gpu_virt_memory() uses the same order). */
+ * nest inside the table mutex; free_gpu_virt_memory() uses the same order). */
 void free_gpu_virt_memory_by_graph(CUgraph graph) {
-  size_t totals[MAX_DEVICE_COUNT] = {0};
-  memory_node_t *entry_tmp = NULL;
-  struct list_head *iter, *tmp;
-  int any = 0;
+  struct capture_sweep_ctx sweep = {.graph = graph, .totals = {0}, .any = 0};
+  size_t *totals = sweep.totals;
+  int any;
 
   if (graph == NULL) return;
 
   pthread_mutex_lock(&g_memory_node_lock);
-  list_for_each_safe(iter, tmp, &g_memory_node->node) {
-    entry_tmp = container_of(iter, memory_node_t, node);
-    if (entry_tmp == NULL) continue;
-    if (entry_tmp->type == MEMORY_TYPE_CAPTURE && entry_tmp->graph == graph) {
-      int idx = entry_tmp->host_index;
-      if (idx >= 0 && idx < MAX_DEVICE_COUNT) {
-        totals[idx] += entry_tmp->bytes;
-        any = 1;
-      }
-      list_del(&entry_tmp->node);
-      free(entry_tmp);
-    }
-  }
+  vmem_table_retire_if(&g_vmem_table, retire_capture_of_graph, &sweep);
   pthread_mutex_unlock(&g_memory_node_lock);
+  any = sweep.any;
 
   if (!any || g_device_vmem == NULL) return;
 
@@ -2517,16 +2533,10 @@ void free_gpu_virt_memory_by_graph(CUgraph graph) {
 
 int get_gpu_virt_memory_type(CUdeviceptr dptr) {
   int type = 0;
-  memory_node_t *entry_tmp = NULL;
-  struct list_head *iter;
   pthread_mutex_lock(&g_memory_node_lock);
-  list_for_each(iter, &g_memory_node->node) {
-    entry_tmp = container_of(iter, memory_node_t, node);
-    if (entry_tmp == NULL) continue;
-    if (entry_tmp->dptr == dptr) {
-      type = entry_tmp->type;
-      break;
-    }
+  const memory_node_t *entry_tmp = vmem_table_find(&g_vmem_table, dptr);
+  if (entry_tmp != NULL) {
+    type = entry_tmp->type;
   }
   pthread_mutex_unlock(&g_memory_node_lock);
   return type;
@@ -2539,21 +2549,16 @@ int get_gpu_virt_memory_type(CUdeviceptr dptr) {
 void free_gpu_virt_memory(CUdeviceptr dptr) {
   int found = 0;
   int host_index = -1;
-  memory_node_t *entry_tmp = NULL;
-  struct list_head *iter;
   size_t size = 0;
   pthread_mutex_lock(&g_memory_node_lock);
-  list_for_each(iter, &g_memory_node->node) {
-    entry_tmp = container_of(iter, memory_node_t, node);
-    if (entry_tmp == NULL) continue;
-    if (entry_tmp->dptr == dptr) {
-      found = 1;
-      size = entry_tmp->bytes;
-      host_index = entry_tmp->host_index;
-      list_del(&entry_tmp->node);
-      free(entry_tmp);
-      break;
-    }
+  /* Unlinked while still intact: the charge has to be discharged against the
+   * device recorded IN the node, so read it out before freeing. */
+  memory_node_t *entry_tmp = vmem_table_remove(&g_vmem_table, dptr);
+  if (entry_tmp != NULL) {
+    found = 1;
+    size = entry_tmp->bytes;
+    host_index = entry_tmp->host_index;
+    free(entry_tmp);
   }
   pthread_mutex_unlock(&g_memory_node_lock);
   if (!found) return;
@@ -2938,16 +2943,9 @@ void loader_child_after_fork(void) {
    * actively harmful once the child starts allocating: the driver reuses
    * addresses, so a new dptr landing on a stale record would misattribute
    * charges, retire records it doesn't own, or misroute a free. Freeing
-   * (not just re-heading the list) is safe because glibc resets the malloc
+   * (not just clearing the buckets) is safe because glibc resets the malloc
    * lock in the child via its own atfork handlers. */
-  memory_node_t *entry_tmp = NULL;
-  struct list_head *iter, *tmp;
-  list_for_each_safe(iter, tmp, &g_memory_node->node) {
-    entry_tmp = container_of(iter, memory_node_t, node);
-    list_del(iter);
-    free(entry_tmp);
-  }
-  INIT_LIST_HEAD(&g_memory_node->node);
+  vmem_table_retire_if(&g_vmem_table, NULL, NULL);
 }
 
 /* fork() child handler implemented in cuda_hook.c. Registered lazily
