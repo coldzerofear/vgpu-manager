@@ -993,6 +993,49 @@ static int cgroup_ns_available(void) {
   return state == 1 ? 0 : -1;
 }
 
+/* The inode of one of our own namespaces, resolved once per type.
+ *
+ * Our own namespace inodes cannot change under us: nothing in this library
+ * calls unshare() or setns(), and a process cannot be moved into another
+ * namespace from the outside. So re-stat()ing /proc/self/ns/<type> for every
+ * pid on the device was two syscalls per pid of pure waste -- measured at
+ * 4.4us of the 7.0us this comparison cost, i.e. most of it.
+ *
+ * Not invalidated after fork: a child inherits our namespaces, so the inode it
+ * would read is the one already cached.
+ *
+ * A failure is deliberately NOT cached. It is far more likely to be transient
+ * (descriptors exhausted) than a permanent property of the system, and caching
+ * it would silently disable this comparison for the rest of the process's life
+ * -- which means claiming every pid is "not ours" and under-counting memory.
+ *
+ * Returns 0 and writes *ino on success, -1 otherwise.
+ */
+static int self_ns_inode(const char *ns_type, int slot, ino_t *ino) {
+  /* One slot per entry of ns_names[] below. */
+  static ino_t cached[2];
+  static unsigned char ready[2];
+
+  /* Acquire/release rather than relaxed: the store to cached[slot] has to be
+   * visible to any thread that observes ready[slot], or a racing reader could
+   * see the flag set and the inode still zero. */
+  if (__atomic_load_n(&ready[slot], __ATOMIC_ACQUIRE)) {
+    *ino = cached[slot];
+    return 0;
+  }
+
+  char self_path[128];
+  struct stat self_st;
+  snprintf(self_path, sizeof(self_path), "%s/%s", PID_SELF_NS_PATH, ns_type);
+  if (stat(self_path, &self_st) != 0) {
+    return -1;
+  }
+  cached[slot] = self_st.st_ino;
+  __atomic_store_n(&ready[slot], 1, __ATOMIC_RELEASE);
+  *ino = self_st.st_ino;
+  return 0;
+}
+
 int device_pid_in_same_container(unsigned int pid) {
   /* The mount namespace is the load-bearing test, and on its own it already
    * answers both threats this function exists for: with hostPID=true we can
@@ -1008,29 +1051,21 @@ int device_pid_in_same_container(unsigned int pid) {
    * shares the host's cgroup namespace, so the inodes match for everyone and
    * the test is satisfied by processes that are not ours at all. It narrows
    * the answer when it can and never widens it, which is why it stays. */
-  const char *ns_types[3];
-  int count = 0;
+  static const char *const ns_names[] = {"mnt", "cgroup"};
+  int count = (cgroup_ns_available() == 0) ? 2 : 1;
 
-  ns_types[count++] = "mnt";
-  if (cgroup_ns_available() == 0) {
-    ns_types[count++] = "cgroup";
-  }
-  ns_types[count] = NULL;
-
-  for (int i = 0; ns_types[i] != NULL; i++) {
+  for (int i = 0; i < count; i++) {
     char device_path[128];
     struct stat device_st;
-    snprintf(device_path, sizeof(device_path), "/proc/%u/ns/%s", pid, ns_types[i]);
+    snprintf(device_path, sizeof(device_path), "/proc/%u/ns/%s", pid, ns_names[i]);
     if (stat(device_path, &device_st) != 0) {
       return -1;
     }
-    char self_path[128];
-    struct stat self_st;
-    snprintf(self_path, sizeof(self_path), "%s/%s", PID_SELF_NS_PATH, ns_types[i]);
-    if (stat(self_path, &self_st) != 0) {
+    ino_t self_ino;
+    if (self_ns_inode(ns_names[i], i, &self_ino) != 0) {
       return -1;
     }
-    if (device_st.st_ino != self_st.st_ino) {
+    if (device_st.st_ino != self_ino) {
       return -1;
     }
   }
