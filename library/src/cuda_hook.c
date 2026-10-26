@@ -59,6 +59,7 @@ extern int pid_exist(int pid);
 extern int file_exist(const char *);
 extern int device_pid_in_same_container(unsigned int pid);
 extern int library_exists_in_process_maps(char const *libName, unsigned int pid);
+extern int gpu_device_fd_in_process(unsigned int pid);
 extern int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids);
 extern int split_str(const char *line, char *key, size_t key_size,
                      char *value, size_t value_size, char d);
@@ -2349,8 +2350,24 @@ int check_device_pid_in_local_container_pid(unsigned int device_pid) {
   if (device_pid_in_same_container(device_pid) != 0) {
     return ret;
   }
-  // Check if the process is using GPU.
-  if (library_exists_in_process_maps("nvidia", device_pid) == 0) {
+  /* Check if the process is using GPU.
+   *
+   * The fd test leads and the maps scan is only a fallback: holding
+   * /dev/nvidia* open is both far cheaper to check (tens of us, and flat in
+   * the target's VMA count, against 44ms at 20k VMAs) and the more
+   * fundamental fact, since the mappings the maps scan looks for are built on
+   * those very descriptors. See gpu_device_fd_in_process() in util.c for the
+   * measurements and the reasoning.
+   *
+   * The fallback stays because this step is what stops another namespace's pid
+   * from being counted as ours -- open-kernel mode returns container-namespace
+   * pids, and a hostPID=true or shareProcessNamespace=true pod can see pids
+   * that are not its own -- and dropping a test that currently says "yes" on
+   * some driver version we have not sampled would under-count memory, which is
+   * a quota escape rather than a cosmetic regression. It costs nothing on the
+   * common path: it only runs when the fd test found nothing. */
+  if (gpu_device_fd_in_process(device_pid) == 0 ||
+      library_exists_in_process_maps("nvidia", device_pid) == 0) {
     ret = 0;
   }
   return ret;

@@ -843,6 +843,114 @@ int library_exists_in_process_maps(char const *libName, unsigned int pid) {
   return ret;
 }
 
+/* Every NVIDIA device node a GPU process can hold open shares this prefix:
+ * nvidia0..N, nvidiactl, nvidia-uvm, nvidia-uvm-tools and nvidia-caps entries.
+ * Anchored at the start rather than searched for anywhere in the target so a
+ * path that merely CONTAINS the word -- /home/user/dev/nvidia-notes/data.bin
+ * -- cannot match. */
+#define GPU_DEV_PREFIX     "/dev/nvidia"
+#define GPU_DEV_PREFIX_LEN (sizeof(GPU_DEV_PREFIX) - 1)
+
+/* Whether the process holds an open descriptor on an NVIDIA device node.
+ *
+ * This is the primary test for "is this pid using the GPU";
+ * library_exists_in_process_maps() above is kept only as a fallback. Two
+ * reasons it leads.
+ *
+ * COST. Generating /proc/<pid>/maps makes the kernel walk the target's whole
+ * VMA tree holding its mmap_lock, so that read costs what the target's address
+ * space is shaped like, not what we are looking for -- and it contends for the
+ * very lock the target needs in order to allocate. Measured in this repo's
+ * devcontainer: 2.1ms at 1k VMAs, 44ms at 20k, 135ms at 60k, and a PyTorch
+ * process with expandable_segments:True maps and unmaps constantly, so tens of
+ * thousands of VMAs is ordinary rather than pathological. This runs inside the
+ * per-device lock on the allocation path (load_limited_memory_view), whose spin
+ * parameters are sized for the "~1-3ms" critical section lock.c documents --
+ * two orders of magnitude out, and overshooting LOCK_TIMEOUT_MS there makes
+ * lock_gpu_device() return -1 and every caller carry on UNLOCKED.
+ *
+ * Walking the fd table instead costs what the FD TABLE is shaped like, and
+ * nothing at all for the address space: measured flat across 0 and 20k VMAs
+ * (65.5us vs 66.0us for the same 45 descriptors). What it does scale with is
+ * descriptor count, at roughly 1.5us each (readdir plus one readlinkat), and
+ * whether the walk can stop early -- a hit breaks out, so a GPU process whose
+ * device nodes sit in the low descriptors (they are opened by cuInit) answers
+ * in about 20us, while a full scan of 45 descriptors costs 66us and of 200
+ * costs 281us. Either way it is two to three orders of magnitude below the
+ * maps scan it replaces.
+ *
+ * CORRECTNESS. The descriptor is also the more fundamental fact. The CUDA
+ * driver speaks to /dev/nvidiactl and /dev/nvidia<N> by ioctl and holds those
+ * descriptors for as long as it holds a context; the mappings that turn up in
+ * maps are built ON those descriptors. So a GPU process has the descriptor
+ * whether or not it has the mapping, but not the other way round. Matching the
+ * link target also cannot be fooled the way searching maps for "nvidia"
+ * anywhere in a path can be.
+ *
+ * Deliberately NOT enumerating /dev and comparing st_rdev: that list would have
+ * to be kept in step with the driver, and missing a node it later adds means
+ * under-counting memory, which is a quota escape. A prefix covers nodes that do
+ * not exist yet.
+ *
+ * No cap on how many descriptors get examined. Linux does walk /proc/<pid>/fd
+ * in ascending descriptor order, so a cap WOULD be meaningful here -- but it is
+ * not worth a tunable. A hit stops the walk, and a hit is the normal case,
+ * because this is only reached once the pid has already been confirmed to be in
+ * our container. A miss reads the whole table, which is why a process holding
+ * ten thousand descriptors costs milliseconds here, but a miss means the pid is
+ * in our container and is NOT on the GPU -- NVML named a pid from another
+ * namespace that collided with one of ours -- which is rare. Capping the walk
+ * would trade that rare cost for a silent under-count whenever a process opened
+ * enough descriptors before cuInit, and under-counting is a quota escape; the
+ * maps fallback below already bounds the damage of a miss without inventing a
+ * limit to tune.
+ *
+ * Returns 0 when such a descriptor is held, -1 otherwise. -1 also covers
+ * "cannot look": /proc/<pid>/fd needs PTRACE_MODE_READ just as
+ * /proc/<pid>/maps does, so a process owned by another uid is unreadable here
+ * too and this is no worse than what it replaces.
+ */
+int gpu_device_fd_in_process(unsigned int pid) {
+  char dir_path[64];
+  snprintf(dir_path, sizeof(dir_path), "/proc/%u/fd", pid);
+
+  DIR *dir = opendir(dir_path);
+  if (dir == NULL) {
+    return -1;
+  }
+
+  int ret = -1;
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL) {
+    /* Every real entry is a descriptor number, so this also drops "." and
+     * ".." without a strcmp. */
+    if (entry->d_name[0] < '0' || entry->d_name[0] > '9') {
+      continue;
+    }
+    /* readlinkat against the open directory rather than a rebuilt path: no
+     * second snprintf, and nothing for -Wformat-truncation to worry about.
+     *
+     * Only as much of the target as the prefix needs is read. readlink neither
+     * NUL-terminates nor reports truncation, and both are fine when the
+     * question is just about the leading GPU_DEV_PREFIX_LEN bytes -- a shorter
+     * target cannot match the prefix, so a short read is already an answer. */
+    char target[GPU_DEV_PREFIX_LEN];
+    ssize_t len = readlinkat(dirfd(dir), entry->d_name, target, sizeof(target));
+    /* A descriptor closed between readdir and readlinkat is ordinary here, not
+     * a condition worth logging. */
+    if (len < (ssize_t)GPU_DEV_PREFIX_LEN) {
+      continue;
+    }
+    if (memcmp(target, GPU_DEV_PREFIX, GPU_DEV_PREFIX_LEN) == 0) {
+      ret = 0;
+      break;
+    }
+  }
+
+  closedir(dir);
+  return ret;
+}
+
 /* Whether this kernel has cgroup namespaces at all.
  *
  * Resolved once and cached, because it is a property of the kernel and cannot
