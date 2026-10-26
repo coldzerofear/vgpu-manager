@@ -44,7 +44,8 @@ endif ()
 # controller related
 add_library(vgpu-control SHARED
     include/hook.h
-    include/list.h
+    include/array_size.h
+    include/vmem_table.h
     include/cuda-subset.h
     include/nvml-subset.h
     include/cuda-helper.h

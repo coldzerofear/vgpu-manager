@@ -55,7 +55,7 @@ limitations under the License.
  * needs no constructor, which matters because hack/check_no_constructors.sh
  * forbids __attribute__((constructor)) in this library, and a lazily
  * initialised table would need a guard on every access. The old code relied
- * on the same property via a statically LIST_HEAD_INIT'd sentinel.
+ * on the same property, via a statically initialised list sentinel.
  *
  * No resizing. The bucket count is fixed at 4096, which costs 32 KiB of BSS
  * and keeps the average chain under ten even at ten thousand live records --

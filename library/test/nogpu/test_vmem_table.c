@@ -283,6 +283,25 @@ static void test_retire_if_predicate(void) {
     CUdeviceptr dptr = (CUdeviceptr)0x200000 + (CUdeviceptr)i * (2u << 20);
     CHECK(vmem_table_find(&table, dptr) == NULL, "record %d gone after retire-all", i);
   }
+
+  /* The post-fork scenario, and the reason retire-all has to leave the table
+   * USABLE rather than merely empty: loader_child_after_fork() drops every
+   * inherited record and the child then starts allocating into the same
+   * table. A sweep that left a bucket pointing at freed memory would pass
+   * every check above and corrupt the first allocation after the fork. */
+  vmem_table_insert(&table, make(0x200000, 42, MEMORY_TYPE_UVA_SYNC, NULL, 2));
+  {
+    const memory_node_t *reused = vmem_table_find(&table, 0x200000);
+    CHECK(reused != NULL, "table must accept inserts after retire-all");
+    if (reused != NULL) {
+      CHECK(reused->bytes == 42 && reused->host_index == 2,
+            "re-inserted record intact: bytes=%zu dev=%d", reused->bytes,
+            reused->host_index);
+    }
+    CHECK(vmem_table_count(&table) == 1, "count restarts at 1, got %zu",
+          vmem_table_count(&table));
+  }
+  vmem_table_retire_if(&table, NULL, NULL);
 }
 
 /* Insert, remove and re-insert the same dptr repeatedly, the way the

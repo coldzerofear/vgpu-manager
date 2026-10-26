@@ -56,7 +56,6 @@ extern "C" {
          "(Android), and MSVC are out of scope."
 #endif
 
-#include "list.h"
 #include "nvml-subset.h"
 #include "cuda-subset.h"
 #include "session.h"
