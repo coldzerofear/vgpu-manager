@@ -4830,15 +4830,10 @@ static CUresult free_virt_memory_uva_on_stream(CUdeviceptr dptr, CUstream hStrea
 
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
   CUresult ret;
-  CUdevice device;
   int type = get_gpu_virt_memory_type(dptr);
   if (type == MEMORY_TYPE_UVA_ASYNC) {
     // If the memory type is asynchronous UVA memory record, go this branch
     return free_virt_memory_uva_on_stream(dptr, hStream, __CUDA_API_IS_PTSZ);
-  }
-  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
-  if (unlikely(ret != CUDA_SUCCESS)) {
-    goto DONE;
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemFreeAsync), dptr, hStream);
   if (likely(ret == CUDA_SUCCESS)) {
@@ -4846,21 +4841,15 @@ CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
       free_gpu_virt_memory(dptr);
     }
   }
-DONE:
   return ret;
 }
 
 CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
   CUresult ret;
-  CUdevice device;
   int type = get_gpu_virt_memory_type(dptr);
   if (type == MEMORY_TYPE_UVA_ASYNC) {
     // If the memory type is asynchronous UVA memory record, go this branch
     return free_virt_memory_uva_on_stream(dptr, hStream, 1);
-  }
-  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
-  if (unlikely(ret != CUDA_SUCCESS)) {
-    goto DONE;
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemFreeAsync_ptsz, dptr, hStream);
   if (likely(ret == CUDA_SUCCESS)) {
@@ -4868,7 +4857,6 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
       free_gpu_virt_memory(dptr);
     }
   }
-DONE:
   return ret;
 }
 
