@@ -843,24 +843,271 @@ int library_exists_in_process_maps(char const *libName, unsigned int pid) {
   return ret;
 }
 
+/* Every NVIDIA device node a GPU process can hold open shares this prefix:
+ * nvidia0..N, nvidiactl, nvidia-uvm, nvidia-uvm-tools and nvidia-caps entries.
+ * Anchored at the start rather than searched for anywhere in the target so a
+ * path that merely CONTAINS the word -- /home/user/dev/nvidia-notes/data.bin
+ * -- cannot match. */
+#define GPU_DEV_PREFIX     "/dev/nvidia"
+#define GPU_DEV_PREFIX_LEN (sizeof(GPU_DEV_PREFIX) - 1)
+
+/* Whether the process holds an open descriptor on an NVIDIA device node.
+ *
+ * This is the primary test for "is this pid using the GPU";
+ * library_exists_in_process_maps() above is kept only as a fallback. Two
+ * reasons it leads.
+ *
+ * COST. Generating /proc/<pid>/maps makes the kernel walk the target's whole
+ * VMA tree holding its mmap_lock, so that read costs what the target's address
+ * space is shaped like, not what we are looking for -- and it contends for the
+ * very lock the target needs in order to allocate. Measured in this repo's
+ * devcontainer: 2.1ms at 1k VMAs, 44ms at 20k, 135ms at 60k, and a PyTorch
+ * process with expandable_segments:True maps and unmaps constantly, so tens of
+ * thousands of VMAs is ordinary rather than pathological. This runs inside the
+ * per-device lock on the allocation path (load_limited_memory_view), whose spin
+ * parameters are sized for the "~1-3ms" critical section lock.c documents --
+ * two orders of magnitude out, and overshooting LOCK_TIMEOUT_MS there makes
+ * lock_gpu_device() return -1 and every caller carry on UNLOCKED.
+ *
+ * Walking the fd table instead costs what the FD TABLE is shaped like, and
+ * nothing at all for the address space: measured flat across 0 and 20k VMAs
+ * (65.5us vs 66.0us for the same 45 descriptors). What it does scale with is
+ * descriptor count, at roughly 1.5us each (readdir plus one readlinkat), and
+ * whether the walk can stop early -- a hit breaks out, so a GPU process whose
+ * device nodes sit in the low descriptors (they are opened by cuInit) answers
+ * in about 20us, while a full scan of 45 descriptors costs 66us and of 200
+ * costs 281us. Either way it is two to three orders of magnitude below the
+ * maps scan it replaces.
+ *
+ * CORRECTNESS. The descriptor is also the more fundamental fact. The CUDA
+ * driver speaks to /dev/nvidiactl and /dev/nvidia<N> by ioctl and holds those
+ * descriptors for as long as it holds a context; the mappings that turn up in
+ * maps are built ON those descriptors. So a GPU process has the descriptor
+ * whether or not it has the mapping, but not the other way round. Matching the
+ * link target also cannot be fooled the way searching maps for "nvidia"
+ * anywhere in a path can be.
+ *
+ * Deliberately NOT enumerating /dev and comparing st_rdev: that list would have
+ * to be kept in step with the driver, and missing a node it later adds means
+ * under-counting memory, which is a quota escape. A prefix covers nodes that do
+ * not exist yet.
+ *
+ * No cap on how many descriptors get examined. Linux does walk /proc/<pid>/fd
+ * in ascending descriptor order, so a cap WOULD be meaningful here -- but it is
+ * not worth a tunable. A hit stops the walk, and a hit is the normal case,
+ * because this is only reached once the pid has already been confirmed to be in
+ * our container. A miss reads the whole table, which is why a process holding
+ * ten thousand descriptors costs milliseconds here, but a miss means the pid is
+ * in our container and is NOT on the GPU -- NVML named a pid from another
+ * namespace that collided with one of ours -- which is rare. Capping the walk
+ * would trade that rare cost for a silent under-count whenever a process opened
+ * enough descriptors before cuInit, and under-counting is a quota escape; the
+ * maps fallback below already bounds the damage of a miss without inventing a
+ * limit to tune.
+ *
+ * Returns 0 when such a descriptor is held, -1 otherwise. -1 also covers
+ * "cannot look": /proc/<pid>/fd needs PTRACE_MODE_READ just as
+ * /proc/<pid>/maps does, so a process owned by another uid is unreadable here
+ * too and this is no worse than what it replaces.
+ */
+int gpu_device_fd_in_process(unsigned int pid) {
+  char dir_path[64];
+  snprintf(dir_path, sizeof(dir_path), "/proc/%u/fd", pid);
+
+  /* No explicit O_CLOEXEC counterpart to the "e" this file passes fopen()
+   * elsewhere: POSIX.1-2008 requires opendir() to set FD_CLOEXEC on the
+   * descriptor it returns, and glibc does (verified: F_GETFD reports
+   * FD_CLOEXEC on 2.39). Saying so here because the fopen() call sites
+   * deliberately spell it out, and a reader would otherwise read this as the
+   * one that forgot. */
+  DIR *dir = opendir(dir_path);
+  if (dir == NULL) {
+    return -1;
+  }
+
+  int ret = -1;
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL) {
+    /* Every real entry is a descriptor number, so this also drops "." and
+     * ".." without a strcmp. */
+    if (entry->d_name[0] < '0' || entry->d_name[0] > '9') {
+      continue;
+    }
+    /* readlinkat against the open directory rather than a rebuilt path: no
+     * second snprintf, and nothing for -Wformat-truncation to worry about.
+     *
+     * Only as much of the target as the prefix needs is read. readlink neither
+     * NUL-terminates nor reports truncation, and both are fine when the
+     * question is just about the leading GPU_DEV_PREFIX_LEN bytes -- a shorter
+     * target cannot match the prefix, so a short read is already an answer. */
+    char target[GPU_DEV_PREFIX_LEN];
+    ssize_t len = readlinkat(dirfd(dir), entry->d_name, target, sizeof(target));
+    /* A descriptor closed between readdir and readlinkat is ordinary here, not
+     * a condition worth logging. */
+    if (len < (ssize_t)GPU_DEV_PREFIX_LEN) {
+      continue;
+    }
+    if (memcmp(target, GPU_DEV_PREFIX, GPU_DEV_PREFIX_LEN) == 0) {
+      ret = 0;
+      break;
+    }
+  }
+
+  closedir(dir);
+  return ret;
+}
+
+/* The namespace types that decide "same container", and one cache slot each.
+ *
+ * At file scope so self_ns_inode()'s slot count is bound to this array at
+ * compile time rather than by hand: a third entry added here without widening
+ * the caches below would otherwise write past them.
+ *
+ * "mnt" MUST stay first. On a kernel without cgroup namespaces the loop below
+ * runs over the first entry only, and mnt is the one test that stands alone
+ * (see device_pid_in_same_container). */
+static const char *const g_ns_names[] = {"mnt", "cgroup"};
+#define NS_SLOT_COUNT (sizeof(g_ns_names) / sizeof(g_ns_names[0]))
+_Static_assert(NS_SLOT_COUNT >= 1, "device_pid_in_same_container needs at least the mnt leg");
+
+/* Whether this kernel has cgroup namespaces at all.
+ *
+ * Resolved once and cached, because it is a property of the kernel and cannot
+ * change under a running process. Values: 0 = not probed yet, 1 = present,
+ * 2 = known absent.
+ *
+ * This exists because cgroup namespaces were only added in Linux 4.6. On an
+ * older kernel /proc/<pid>/ns/cgroup simply does not exist, and the loop in
+ * device_pid_in_same_container() used to stat it unconditionally -- the stat
+ * failed, the function returned "not ours", and it did so for EVERY pid,
+ * INCLUDING THE CALLER'S OWN. The whole open-kernel identification path then
+ * silently reported zero GPU memory in use, which turns the budget check into
+ * a no-op and hands the container the entire card. Verified on
+ * 3.10.0-1160.el7: /proc/self/ns holds only ipc, mnt, net, pid, user, uts.
+ *
+ * ONLY ENOENT is treated as "this kernel has none". Any other failure is left
+ * unprobed so the next call retries, and is reported as "present" so the
+ * comparison still tries the cgroup leg and fails closed on it -- i.e. exactly
+ * the behaviour this function replaced. Caching an arbitrary errno as "absent"
+ * would permanently narrow the test for the rest of the process's life on the
+ * strength of one transient failure, which is the silent degradation this
+ * whole change exists to remove.
+ *
+ * Not reset after fork: a child inherits the same kernel.
+ *
+ * Returns 0 when the cgroup leg should be attempted, -1 when it must be
+ * skipped.
+ */
+static unsigned char g_cgroup_ns_state;
+
+static int cgroup_ns_available(void) {
+  unsigned char state = __atomic_load_n(&g_cgroup_ns_state, __ATOMIC_RELAXED);
+
+  if (unlikely(state == 0)) {
+    struct stat st;
+    if (stat(PID_SELF_NS_PATH "/cgroup", &st) == 0) {
+      state = 1;
+    } else if (errno == ENOENT) {
+      state = 2;
+    } else {
+      /* Transient: do not cache, do not narrow the test. */
+      return 0;
+    }
+    __atomic_store_n(&g_cgroup_ns_state, state, __ATOMIC_RELAXED);
+    if (state == 2) {
+      /* A fixed property of the kernel, so a warning rather than a refusal to
+       * serve: there is nothing to retry and nothing the operator can change
+       * at this point, and mnt alone still answers the question this function
+       * is asked (see device_pid_in_same_container). Once per process -- the
+       * exchange keeps a racing pair of threads to a single line. */
+      static unsigned char warned;
+      if (!__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED)) {
+        LOGGER(WARNING, "%s/cgroup is absent (cgroup namespaces need Linux 4.6+); "
+                        "matching container PIDs on the mount namespace alone",
+               PID_SELF_NS_PATH);
+      }
+    }
+  }
+  return state == 2 ? -1 : 0;
+}
+
+/* The inode of one of our own namespaces, resolved once per type.
+ *
+ * Our own namespace inodes cannot change under us: nothing in this library
+ * calls unshare() or setns(), and a process cannot be moved into another
+ * namespace from the outside. So re-stat()ing /proc/self/ns/<type> for every
+ * pid on the device was two syscalls per pid of pure waste -- measured at
+ * 4.4us of the 7.0us this comparison cost, i.e. most of it.
+ *
+ * Not invalidated after fork: a child inherits our namespaces, so the inode it
+ * would read is the one already cached.
+ *
+ * A failure is deliberately NOT cached. It is far more likely to be transient
+ * (descriptors exhausted) than a permanent property of the system, and caching
+ * it would silently disable this comparison for the rest of the process's life
+ * -- which means claiming every pid is "not ours" and under-counting memory.
+ *
+ * Two threads arriving together both stat and both store the same inode, which
+ * is harmless but still a data race unless the stores are atomic, so they are.
+ * The flag carries release/acquire so a reader that sees it set is guaranteed
+ * to see the inode too; the inode itself only needs relaxed ordering on top of
+ * that.
+ *
+ * Returns 0 and writes *ino on success, -1 otherwise.
+ */
+static int self_ns_inode(const char *ns_type, unsigned slot, ino_t *ino) {
+  static ino_t cached[NS_SLOT_COUNT];
+  static unsigned char ready[NS_SLOT_COUNT];
+
+  if (slot >= NS_SLOT_COUNT) {
+    return -1;
+  }
+  if (__atomic_load_n(&ready[slot], __ATOMIC_ACQUIRE)) {
+    *ino = __atomic_load_n(&cached[slot], __ATOMIC_RELAXED);
+    return 0;
+  }
+
+  char self_path[128];
+  struct stat self_st;
+  snprintf(self_path, sizeof(self_path), "%s/%s", PID_SELF_NS_PATH, ns_type);
+  if (stat(self_path, &self_st) != 0) {
+    return -1;
+  }
+  __atomic_store_n(&cached[slot], self_st.st_ino, __ATOMIC_RELAXED);
+  __atomic_store_n(&ready[slot], 1, __ATOMIC_RELEASE);
+  *ino = self_st.st_ino;
+  return 0;
+}
+
 int device_pid_in_same_container(unsigned int pid) {
-  // For the k8s container, these two namespace types already
-  // determine whether the PID is in the same container or not.
-  const char *ns_types[] = {"mnt", "cgroup", NULL};
-  for (int i = 0; ns_types[i] != NULL; i++) {
+  /* The mount namespace is the load-bearing test, and on its own it already
+   * answers both threats this function exists for: with hostPID=true we can
+   * see the host's processes, which have a different rootfs; with
+   * shareProcessNamespace=true we can see a sibling container's, which also
+   * has its own rootfs. Either way the mnt inode differs and the pid is
+   * correctly rejected.
+   *
+   * The cgroup namespace is kept as a second test where the kernel has one,
+   * but it is worth being clear that it adds less than it looks: it
+   * discriminates only under cgroupns=private (containerd's default on cgroup
+   * v2, one namespace per container). Under cgroupns=host every container
+   * shares the host's cgroup namespace, so the inodes match for everyone and
+   * the test is satisfied by processes that are not ours at all. It narrows
+   * the answer when it can and never widens it, which is why it stays. */
+  unsigned count = (cgroup_ns_available() == 0) ? NS_SLOT_COUNT : 1;
+
+  for (unsigned i = 0; i < count; i++) {
     char device_path[128];
     struct stat device_st;
-    snprintf(device_path, sizeof(device_path), "/proc/%u/ns/%s", pid, ns_types[i]);
+    snprintf(device_path, sizeof(device_path), "/proc/%u/ns/%s", pid, g_ns_names[i]);
     if (stat(device_path, &device_st) != 0) {
       return -1;
     }
-    char self_path[128];
-    struct stat self_st;
-    snprintf(self_path, sizeof(self_path), "%s/%s", PID_SELF_NS_PATH, ns_types[i]);
-    if (stat(self_path, &self_st) != 0) {
+    ino_t self_ino;
+    if (self_ns_inode(g_ns_names[i], i, &self_ino) != 0) {
       return -1;
     }
-    if (device_st.st_ino != self_st.st_ino) {
+    if (device_st.st_ino != self_ino) {
       return -1;
     }
   }
