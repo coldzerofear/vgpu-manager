@@ -843,10 +843,72 @@ int library_exists_in_process_maps(char const *libName, unsigned int pid) {
   return ret;
 }
 
+/* Whether this kernel has cgroup namespaces at all.
+ *
+ * Resolved once and cached, because it is a property of the kernel and cannot
+ * change under a running process. Values: 0 = not probed yet, 1 = present,
+ * 2 = absent.
+ *
+ * This exists because cgroup namespaces were only added in Linux 4.6. On an
+ * older kernel /proc/<pid>/ns/cgroup simply does not exist, and the loop in
+ * device_pid_in_same_container() used to stat it unconditionally -- the stat
+ * failed, the function returned "not ours", and it did so for EVERY pid,
+ * INCLUDING THE CALLER'S OWN. The whole open-kernel identification path then
+ * silently reported zero GPU memory in use, which turns the budget check into
+ * a no-op and hands the container the entire card. Verified on
+ * 3.10.0-1160.el7: /proc/self/ns holds only ipc, mnt, net, pid, user, uts.
+ *
+ * Not reset after fork: a child inherits the same kernel. */
+static unsigned char g_cgroup_ns_state;
+
+static int cgroup_ns_available(void) {
+  unsigned char state = __atomic_load_n(&g_cgroup_ns_state, __ATOMIC_RELAXED);
+
+  if (unlikely(state == 0)) {
+    struct stat st;
+    state = (stat(PID_SELF_NS_PATH "/cgroup", &st) == 0) ? 1 : 2;
+    __atomic_store_n(&g_cgroup_ns_state, state, __ATOMIC_RELAXED);
+    if (state == 2) {
+      /* A fixed property of the kernel, so a warning rather than a refusal to
+       * serve: there is nothing to retry and nothing the operator can change
+       * at this point, and mnt alone still answers the question this function
+       * is asked (see device_pid_in_same_container). Once per process -- the
+       * exchange keeps a racing pair of threads to a single line. */
+      static unsigned char warned;
+      if (!__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED)) {
+        LOGGER(WARNING, "%s/cgroup is absent (cgroup namespaces need Linux 4.6+); "
+                        "matching container PIDs on the mount namespace alone",
+               PID_SELF_NS_PATH);
+      }
+    }
+  }
+  return state == 1 ? 0 : -1;
+}
+
 int device_pid_in_same_container(unsigned int pid) {
-  // For the k8s container, these two namespace types already
-  // determine whether the PID is in the same container or not.
-  const char *ns_types[] = {"mnt", "cgroup", NULL};
+  /* The mount namespace is the load-bearing test, and on its own it already
+   * answers both threats this function exists for: with hostPID=true we can
+   * see the host's processes, which have a different rootfs; with
+   * shareProcessNamespace=true we can see a sibling container's, which also
+   * has its own rootfs. Either way the mnt inode differs and the pid is
+   * correctly rejected.
+   *
+   * The cgroup namespace is kept as a second test where the kernel has one,
+   * but it is worth being clear that it adds less than it looks: it
+   * discriminates only under cgroupns=private (containerd's default on cgroup
+   * v2, one namespace per container). Under cgroupns=host every container
+   * shares the host's cgroup namespace, so the inodes match for everyone and
+   * the test is satisfied by processes that are not ours at all. It narrows
+   * the answer when it can and never widens it, which is why it stays. */
+  const char *ns_types[3];
+  int count = 0;
+
+  ns_types[count++] = "mnt";
+  if (cgroup_ns_available() == 0) {
+    ns_types[count++] = "cgroup";
+  }
+  ns_types[count] = NULL;
+
   for (int i = 0; ns_types[i] != NULL; i++) {
     char device_path[128];
     struct stat device_st;
