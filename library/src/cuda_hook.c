@@ -2236,20 +2236,15 @@ static void initialization() {
   balance_batches(device_count);
 }
 
-// Container PID matching method in cgroupv1 mode
-int check_device_pid_in_cgroupv1_container(unsigned int device_pid) {
+int check_device_pid_in_proc_cgroupv1_path(unsigned int device_pid, char *pid_cgroup_path) {
   int ret = -1;
   if (device_pid == 0) {
     return ret;
   }
-  char host_pid_path[PATH_MAX];
   char cont_process_cg[CGROUP_LINE_MAX];
   char host_process_cg[CGROUP_LINE_MAX];
-  snprintf(host_pid_path, sizeof(host_pid_path), HOST_PROC_CGROUP_PID_PATH, device_pid);
-  if (!read_cgroup(PID_SELF_CGROUP_PATH, "memory", cont_process_cg,
-                   sizeof(cont_process_cg)) &&
-      !read_cgroup(host_pid_path, "memory", host_process_cg,
-                   sizeof(host_process_cg))) {
+  if (!read_cgroup(PID_SELF_CGROUP_PATH, "memory", cont_process_cg, sizeof(cont_process_cg)) &&
+      !read_cgroup(pid_cgroup_path, "memory", host_process_cg, sizeof(host_process_cg))) {
     LOGGER(DETAIL, "\ncontainer process cgroup: %s\nhost process cgroup: %s", cont_process_cg, host_process_cg);
     /* Our own path has to be specific enough to identify us. A container in
      * its own cgroup namespace reads "/" here, and "/" is a substring of
@@ -2260,8 +2255,7 @@ int check_device_pid_in_cgroupv1_container(unsigned int device_pid) {
     if (cont_process_cg[0] != '/' || cont_process_cg[1] == '\0') {
       LOGGER(VERBOSE, "own cgroup path %s is not specific enough to match against "
                       "the host's view -- cgroup v1 matching needs cgroupns=host; "
-                      "not claiming pid %u",
-             cont_process_cg, device_pid);
+                      "not claiming pid %u", cont_process_cg, device_pid);
     } else if (strstr(host_process_cg, cont_process_cg) != NULL) {
       ret = 0;
     }
@@ -2269,24 +2263,28 @@ int check_device_pid_in_cgroupv1_container(unsigned int device_pid) {
   return ret;
 }
 
-// Container PID matching method in cgroupv2 mode
-int check_device_pid_in_cgroupv2_container(unsigned int device_pid) {
+// Container PID matching method in cgroupv1 mode
+int check_device_pid_in_cgroupv1_container(unsigned int device_pid) {
+  char host_pid_path[PATH_MAX];
+  snprintf(host_pid_path, sizeof(host_pid_path), HOST_PROC_CGROUP_PID_PATH, device_pid);
+  return check_device_pid_in_proc_cgroupv1_path(device_pid, host_pid_path);
+}
+
+int check_device_pid_in_proc_cgroupv2_path(unsigned int device_pid, char *pid_cgroup_path) {
   int ret = -1;
   if (device_pid == 0) {
     return ret;
   }
   // TODO May I need to check if there are zombie processes?
-  char host_pid_path[PATH_MAX];
-  snprintf(host_pid_path, sizeof(host_pid_path), HOST_PROC_CGROUP_PID_PATH, device_pid);
   /* No file_exist() pre-check: it only duplicated what fopen already reports,
    * and the gap between the two was a time-of-check/time-of-use window. */
-  FILE *fp = fopen(host_pid_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
+  FILE *fp = fopen(pid_cgroup_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
   if (!fp) {
     /* A PID that exited between being sampled and being read here is the
      * common case on this per-PID path, not something worth a log line --
      * which is exactly what the file_exist() pre-check used to filter. */
     if (errno != ENOENT) {
-      LOGGER(VERBOSE, "read host pid path %s failed: %s", host_pid_path, strerror(errno));
+      LOGGER(VERBOSE, "read pid cgroup path %s failed: %s", pid_cgroup_path, strerror(errno));
     }
     return ret;
   }
@@ -2304,6 +2302,13 @@ int check_device_pid_in_cgroupv2_container(unsigned int device_pid) {
   }
   fclose(fp);
   return ret;
+}
+
+// Container PID matching method in cgroupv2 mode
+int check_device_pid_in_cgroupv2_container(unsigned int device_pid) {
+  char host_pid_path[PATH_MAX];
+  snprintf(host_pid_path, sizeof(host_pid_path), HOST_PROC_CGROUP_PID_PATH, device_pid);
+  return check_device_pid_in_proc_cgroupv2_path(device_pid, host_pid_path);
 }
 
 static int int_compare(const void *a, const void *b) {
@@ -2351,38 +2356,13 @@ int check_device_pid_in_local_container_pid(unsigned int device_pid) {
     return -1;
   }
 
+  // Detection path under restricted read permissions.
   if (ownership == PID_IN_CONTAINER_UNKNOWN) {
-    /* We may not inspect this pid, and that blocks the GPU test below as well:
-     * gpu_device_fd_in_process() reads /proc/<pid>/fd, which needs the same
-     * PTRACE_MODE_READ permission that was just refused. Running it would fail
-     * on the permission rather than the facts and report "not on the GPU"
-     * about a process we simply cannot see.
-     *
-     * The cgroup is still readable, though -- PTRACE_MODE_READ gates
-     * /proc/<pid>/ns, /proc/<pid>/fd and /proc/<pid>/maps, but not
-     * /proc/<pid>/cgroup -- so where a cgroup mode is configured, defer to the
-     * check that mode already uses. That is deliberately the SAME function the
-     * CGROUPV2 path calls, so there is one verified implementation of "is this
-     * pid in our cgroup" rather than a second one written for this branch.
-     *
-     * This is what keeps hostPID=true honest: a host process is outside our
-     * cgroup, so it is excluded, while a process of ours under another uid is
-     * inside it and gets counted. Without the fallback the first case would be
-     * over-counted and the second under-counted.
-     *
-     * No CGROUPV1 branch: Kubernetes has moved off cgroup v1 and this project
-     * no longer maintains that path. */
-    if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) ==
-        CGROUPV2_COMPATIBILITY_MODE) {
-      return check_device_pid_in_cgroupv2_container(device_pid);
-    }
-    /* No cgroup mode to defer to. Count it: from CUDA 13.x the driver lists
-     * only pids of our own namespace, so a pid reaching here is almost
-     * certainly ours, and NVML named it as a GPU process to begin with.
-     * Under-counting would let the container hold memory nobody charged it
-     * for; over-counting only throttles the container against itself.
-     * device_pid_in_same_container() has already logged the denial. */
-    return 0;
+    char pid_cgroup_path[PATH_MAX];
+    snprintf(pid_cgroup_path, sizeof(pid_cgroup_path), PID_CGROUP_PATH, device_pid);
+    // Detect using cgroupv2 and cgroupv1 respectively, and return 0 if one of them is successful.
+    return (check_device_pid_in_proc_cgroupv2_path(device_pid, pid_cgroup_path) == 0 ||
+            check_device_pid_in_proc_cgroupv1_path(device_pid, pid_cgroup_path) == 0) ? 0 : -1;
   }
 
   /* Confirmed ours: the only question left is whether it is on the GPU.
