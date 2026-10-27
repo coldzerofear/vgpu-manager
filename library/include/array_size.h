@@ -101,18 +101,59 @@ limitations under the License.
  *
  * 8 bytes is the widest element among every format cuda.h 13.4 defines
  * (UNORM_INT16X4 / SNORM_INT16X4 / Y416 are 4 x 16-bit = 8 bytes), so no
- * known format is ever under-charged. It does over-charge the compressed
- * ones -- a BC1 block is 8 bytes per 4x4 texels, i.e. half a byte per texel --
- * which is the conservative direction, and narrowing it needs a per-format
- * table whose every entry has to be verified the way the eight below were.
- * Until then vgpu_array_format_is_known() lets the call site log the gap so
- * it is visible rather than silent.
+ * classified format is ever under-charged.
+ *
+ * WHAT STILL LANDS HERE, after the measurements below:
+ *   - BC6H_UF16 / BC6H_SF16. Block-compressed like their siblings, but the
+ *     driver REFUSED them on the probed hardware, so there is no measurement
+ *     and the 16-bytes-per-block their siblings use is an inference, not a
+ *     number. Left conservative on purpose.
+ *   - the 32 planar/semi-planar/packed YUV formats. Also refused -- 24
+ *     attempts each, every NumChannels and shape -- so they cannot reach these
+ *     hooks at all on that driver; they arrive through external-memory import,
+ *     which allocates nothing of ours.
+ *   - whatever NVIDIA adds next.
  */
 #define VGPU_ARRAY_UNKNOWN_FORMAT_BYTES ((size_t)8)
 
-/* Whether vgpu_array_format_bytes() knows this format exactly, as opposed to
- * falling back to VGPU_ARRAY_UNKNOWN_FORMAT_BYTES. */
+/* Bytes one 4x4 block occupies, or 0 when the format is not block-compressed.
+ *
+ * MEASURED, not inferred: see docs/cuda_array_size_measurements.md. A block
+ * size covers all of its format's channels, so NumChannels must NOT be
+ * multiplied in on this path -- the driver confirmed it (BC1 with the
+ * NumChannels=4 it demands still costs 8 bytes per block, not 32).
+ *
+ * BC6H is absent deliberately: the driver refused it, so there is no number.
+ */
+static inline size_t vgpu_array_block_bytes(int format) {
+  switch (format) {
+  /* 8 bytes per 4x4 block = 0.5 bytes per texel. */
+  case CU_AD_FORMAT_BC1_UNORM:
+  case CU_AD_FORMAT_BC1_UNORM_SRGB:
+  case CU_AD_FORMAT_BC4_UNORM:
+  case CU_AD_FORMAT_BC4_SNORM:
+    return 8;
+  /* 16 bytes per 4x4 block = 1 byte per texel. */
+  case CU_AD_FORMAT_BC2_UNORM:
+  case CU_AD_FORMAT_BC2_UNORM_SRGB:
+  case CU_AD_FORMAT_BC3_UNORM:
+  case CU_AD_FORMAT_BC3_UNORM_SRGB:
+  case CU_AD_FORMAT_BC5_UNORM:
+  case CU_AD_FORMAT_BC5_SNORM:
+  case CU_AD_FORMAT_BC7_UNORM:
+  case CU_AD_FORMAT_BC7_UNORM_SRGB:
+    return 16;
+  default:
+    return 0;
+  }
+}
+
+/* Whether this format's size is known exactly, as opposed to falling back to
+ * VGPU_ARRAY_UNKNOWN_FORMAT_BYTES. */
 static inline int vgpu_array_format_is_known(int format) {
+  if (vgpu_array_block_bytes(format) != 0) {
+    return 1;
+  }
   switch (format) {
   case CU_AD_FORMAT_UNSIGNED_INT8:
   case CU_AD_FORMAT_SIGNED_INT8:
@@ -122,23 +163,62 @@ static inline int vgpu_array_format_is_known(int format) {
   case CU_AD_FORMAT_UNSIGNED_INT32:
   case CU_AD_FORMAT_SIGNED_INT32:
   case CU_AD_FORMAT_FLOAT:
+  case CU_AD_FORMAT_UNORM_INT8X1:
+  case CU_AD_FORMAT_UNORM_INT8X2:
+  case CU_AD_FORMAT_UNORM_INT8X4:
+  case CU_AD_FORMAT_SNORM_INT8X1:
+  case CU_AD_FORMAT_SNORM_INT8X2:
+  case CU_AD_FORMAT_SNORM_INT8X4:
+  case CU_AD_FORMAT_UNORM_INT_101010_2:
+  case CU_AD_FORMAT_UNORM_INT16X1:
+  case CU_AD_FORMAT_UNORM_INT16X2:
+  case CU_AD_FORMAT_UNORM_INT16X4:
+  case CU_AD_FORMAT_SNORM_INT16X1:
+  case CU_AD_FORMAT_SNORM_INT16X2:
+  case CU_AD_FORMAT_SNORM_INT16X4:
     return 1;
   default:
     return 0;
   }
 }
 
-/* Bytes per channel of one array element. See the file comment for where each
- * value comes from; they match HAMi-core's cuarray_format_bytes[] table, which
- * was cross-checked against cuda.h rather than taken on trust. */
+/* Bytes per channel of one array element, for the formats sized as
+ * bytes-per-channel x NumChannels x W x H x D. Block-compressed formats do not
+ * go through here; vgpu_array_block_bytes() handles them.
+ *
+ * The classic eight come from cuda.h's own worked examples (file comment). The
+ * normalised families are MEASURED -- the X-suffix names state a channel count
+ * ("4 channel unsigned 8-bit") and the driver turned out to require
+ * NumChannels to match it exactly, so the per-channel figure here times that
+ * NumChannels reproduces the measured size. UNORM_INT_101010_2 is a packed
+ * 32-bit element that likewise demands NumChannels=4, so 1 byte per channel
+ * lands on the measured 4 bytes per texel. See
+ * docs/cuda_array_size_measurements.md.
+ */
 static inline size_t vgpu_array_format_bytes(int format) {
   switch (format) {
   case CU_AD_FORMAT_UNSIGNED_INT8:
   case CU_AD_FORMAT_SIGNED_INT8:
+  /* Measured: *INT8X{1,2,4} with NumChannels {1,2,4} respectively. */
+  case CU_AD_FORMAT_UNORM_INT8X1:
+  case CU_AD_FORMAT_UNORM_INT8X2:
+  case CU_AD_FORMAT_UNORM_INT8X4:
+  case CU_AD_FORMAT_SNORM_INT8X1:
+  case CU_AD_FORMAT_SNORM_INT8X2:
+  case CU_AD_FORMAT_SNORM_INT8X4:
+  /* Measured: 4 bytes per texel at the NumChannels=4 the driver requires. */
+  case CU_AD_FORMAT_UNORM_INT_101010_2:
     return 1;
   case CU_AD_FORMAT_UNSIGNED_INT16:
   case CU_AD_FORMAT_SIGNED_INT16:
   case CU_AD_FORMAT_HALF:
+  /* Measured: *INT16X{1,2,4} with NumChannels {1,2,4} respectively. */
+  case CU_AD_FORMAT_UNORM_INT16X1:
+  case CU_AD_FORMAT_UNORM_INT16X2:
+  case CU_AD_FORMAT_UNORM_INT16X4:
+  case CU_AD_FORMAT_SNORM_INT16X1:
+  case CU_AD_FORMAT_SNORM_INT16X2:
+  case CU_AD_FORMAT_SNORM_INT16X4:
     return 2;
   case CU_AD_FORMAT_UNSIGNED_INT32:
   case CU_AD_FORMAT_SIGNED_INT32:
@@ -190,6 +270,26 @@ static inline int vgpu_array_size_from(size_t width, size_t height, size_t depth
   }
   if (depth == 0) {
     depth = 1;
+  }
+
+  /* Block-compressed formats are sized per 4x4 block, with Width and Height in
+   * TEXELS and rounded up to whole blocks -- measured, not assumed: BC1 at
+   * width 4097 costs the same as 4098/4099/4100 and one block column more than
+   * 4096. NumChannels is deliberately absent from the product; a block size
+   * already covers the format's channels, and the driver demands a specific
+   * NumChannels per BC format anyway. Depth multiplies block planes as-is (a
+   * 3D or layered BC array measured identical to the 2D one of equal
+   * Height x Depth). See docs/cuda_array_size_measurements.md. */
+  bytes = vgpu_array_block_bytes(format);
+  if (bytes != 0) {
+    size_t blocks_w = (width + 3) / 4;
+    size_t blocks_h = (height + 3) / 4;
+    if (!vgpu_array_mul(&bytes, blocks_w) || !vgpu_array_mul(&bytes, blocks_h) ||
+        !vgpu_array_mul(&bytes, depth)) {
+      return 0;
+    }
+    *out = bytes;
+    return 1;
   }
 
   bytes = vgpu_array_format_bytes(format);

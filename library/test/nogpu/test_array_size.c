@@ -76,7 +76,9 @@ static void test_format_bytes(void) {
   CHECK(vgpu_array_format_bytes(CU_AD_FORMAT_FLOAT) != 32, "float still bits");
 
   CHECK(vgpu_array_format_is_known(CU_AD_FORMAT_FLOAT), "float known");
-  CHECK(!vgpu_array_format_is_known(CU_AD_FORMAT_BC7_UNORM), "bc7 not known");
+  CHECK(vgpu_array_format_is_known(CU_AD_FORMAT_BC7_UNORM), "bc7 measured");
+  /* Still unmeasured: the driver refused both, so there is no number to use. */
+  CHECK(!vgpu_array_format_is_known(CU_AD_FORMAT_BC6H_UF16), "bc6h not known");
   CHECK(!vgpu_array_format_is_known(CU_AD_FORMAT_NV12), "nv12 not known");
 }
 
@@ -192,23 +194,123 @@ static void test_overflow(void) {
 }
 
 /* An unclassified format is charged the documented upper bound, never zero and
- * never a rejection: the hook has to stay usable for block-compressed and
- * video-surface arrays. */
+ * never a rejection: the hook has to stay usable for formats we have not
+ * measured. BC6H and the planar YUV range are the ones still in that bucket --
+ * the driver refused both on the probed hardware, so there is no number for
+ * them (docs/cuda_array_size_measurements.md). */
 static void test_unknown_format_is_conservative(void) {
-  size_t bc7, nv12, widest;
+  size_t bc6h, nv12;
   CUDA_ARRAY_DESCRIPTOR d;
 
-  d = desc2d(1024, 1024, CU_AD_FORMAT_BC7_UNORM, 1);
-  CHECK(vgpu_array_size(&d, &bc7), "BC7 must still be sizable, not rejected");
+  d = desc2d(1024, 1024, CU_AD_FORMAT_BC6H_UF16, 1);
+  CHECK(vgpu_array_size(&d, &bc6h), "BC6H must still be sizable, not rejected");
   d = desc2d(1024, 1024, CU_AD_FORMAT_NV12, 1);
   CHECK(vgpu_array_size(&d, &nv12), "NV12 must still be sizable, not rejected");
-  CHECK(bc7 != 0 && nv12 != 0, "unknown formats must not be free");
+  CHECK(bc6h != 0 && nv12 != 0, "unknown formats must not be free");
+  CHECK(!vgpu_array_format_is_known(CU_AD_FORMAT_BC6H_UF16), "BC6H unmeasured");
+  CHECK(!vgpu_array_format_is_known(CU_AD_FORMAT_NV12), "NV12 unmeasured");
+}
 
-  /* Not under the widest element cuda.h defines (4 x 16-bit = 8 bytes), so no
-   * known format can be under-charged through the fallback. */
-  d = desc2d(1024, 1024, CU_AD_FORMAT_UNORM_INT16X4, 1);
-  CHECK(vgpu_array_size(&d, &widest) && widest >= 1024 * 1024 * 8,
-        "fallback %zu must cover an 8-byte element", widest);
+/* The normalised families, against sizes measured on a real driver at
+ * 1024x512 (docs/cuda_array_size_measurements.md). The driver requires
+ * NumChannels to equal the count in the format name, which is what makes
+ * bytes-per-channel x NumChannels reproduce the measurement -- the question
+ * that blocked this table, since reading the name as "1 channel of 4 bytes"
+ * instead would be off by 4x. */
+static void test_measured_normalised_formats(void) {
+  struct {
+    int format;
+    unsigned channels;
+    size_t want;
+  } cases[] = {
+      {CU_AD_FORMAT_UNORM_INT8X1, 1, 524288},
+      {CU_AD_FORMAT_UNORM_INT8X2, 2, 1048576},
+      {CU_AD_FORMAT_UNORM_INT8X4, 4, 2097152},
+      {CU_AD_FORMAT_UNORM_INT16X1, 1, 1048576},
+      {CU_AD_FORMAT_UNORM_INT16X2, 2, 2097152},
+      {CU_AD_FORMAT_UNORM_INT16X4, 4, 4194304},
+      {CU_AD_FORMAT_SNORM_INT8X1, 1, 524288},
+      {CU_AD_FORMAT_SNORM_INT8X2, 2, 1048576},
+      {CU_AD_FORMAT_SNORM_INT8X4, 4, 2097152},
+      {CU_AD_FORMAT_SNORM_INT16X1, 1, 1048576},
+      {CU_AD_FORMAT_SNORM_INT16X2, 2, 2097152},
+      {CU_AD_FORMAT_SNORM_INT16X4, 4, 4194304},
+      {CU_AD_FORMAT_UNORM_INT_101010_2, 4, 2097152},
+  };
+
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    size_t got;
+    CUDA_ARRAY_DESCRIPTOR d = desc2d(1024, 512, cases[i].format, cases[i].channels);
+    CHECK(vgpu_array_size(&d, &got) && got == cases[i].want,
+          "format 0x%x ch=%u: got %zu want %zu", cases[i].format,
+          cases[i].channels, got, cases[i].want);
+    CHECK(vgpu_array_format_is_known(cases[i].format), "0x%x measured",
+          cases[i].format);
+  }
+}
+
+/* Block-compressed sizing, against the same measured run. Width and Height are
+ * in texels and round up to whole 4x4 blocks; NumChannels does not multiply in,
+ * even though the driver demands a specific one per format. */
+static void test_measured_block_compressed(void) {
+  struct {
+    int format;
+    unsigned channels; /* the one the driver accepts, to prove it is ignored */
+    size_t want;       /* at 1024x512 */
+  } cases[] = {
+      {CU_AD_FORMAT_BC1_UNORM, 4, 262144},
+      {CU_AD_FORMAT_BC1_UNORM_SRGB, 4, 262144},
+      {CU_AD_FORMAT_BC4_UNORM, 1, 262144},
+      {CU_AD_FORMAT_BC4_SNORM, 1, 262144},
+      {CU_AD_FORMAT_BC2_UNORM, 4, 524288},
+      {CU_AD_FORMAT_BC2_UNORM_SRGB, 4, 524288},
+      {CU_AD_FORMAT_BC3_UNORM, 4, 524288},
+      {CU_AD_FORMAT_BC3_UNORM_SRGB, 4, 524288},
+      {CU_AD_FORMAT_BC5_UNORM, 2, 524288},
+      {CU_AD_FORMAT_BC5_SNORM, 2, 524288},
+      {CU_AD_FORMAT_BC7_UNORM, 4, 524288},
+      {CU_AD_FORMAT_BC7_UNORM_SRGB, 4, 524288},
+  };
+  size_t got, at4096, at4097, at4100;
+  CUDA_ARRAY_DESCRIPTOR d;
+
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    d = desc2d(1024, 512, cases[i].format, cases[i].channels);
+    CHECK(vgpu_array_size(&d, &got) && got == cases[i].want,
+          "BC 0x%x: got %zu want %zu", cases[i].format, got, cases[i].want);
+
+    /* NumChannels must not enter the product. Every legal value gives the same
+     * size, so a future refactor cannot quietly start multiplying by it. */
+    for (unsigned ch = 1; ch <= 4; ch *= 2) {
+      size_t same;
+      CUDA_ARRAY_DESCRIPTOR e = desc2d(1024, 512, cases[i].format, ch);
+      CHECK(vgpu_array_size(&e, &same) && same == cases[i].want,
+            "BC 0x%x ch=%u must still be %zu, got %zu", cases[i].format, ch,
+            cases[i].want, same);
+    }
+  }
+
+  /* Block rounding, measured on BC1 at H=4096: 4097 costs one block column
+   * more than 4096, and 4098/4099/4100 cost the same as 4097. */
+  d = desc2d(4096, 4096, CU_AD_FORMAT_BC1_UNORM, 4);
+  CHECK(vgpu_array_size(&d, &at4096) && at4096 == 8388608, "BC1 4096 = %zu", at4096);
+  d = desc2d(4097, 4096, CU_AD_FORMAT_BC1_UNORM, 4);
+  CHECK(vgpu_array_size(&d, &at4097) && at4097 == at4096 + 1024 * 8,
+        "BC1 4097 must add one block column: %zu vs %zu", at4097, at4096);
+  d = desc2d(4100, 4096, CU_AD_FORMAT_BC1_UNORM, 4);
+  CHECK(vgpu_array_size(&d, &at4100) && at4100 == at4097,
+        "BC1 4100 must match 4097: %zu vs %zu", at4100, at4097);
+
+  /* Depth multiplies block planes as-is: 3D(H=256,D=4) measured identical to
+   * 2D(H=1024). */
+  {
+    CUDA_ARRAY3D_DESCRIPTOR flat = desc3d(2048, 1024, 0, CU_AD_FORMAT_BC1_UNORM, 4, 0);
+    CUDA_ARRAY3D_DESCRIPTOR deep = desc3d(2048, 256, 4, CU_AD_FORMAT_BC1_UNORM, 4, 0);
+    size_t a, b;
+    CHECK(vgpu_array3d_size(&flat, &a) && vgpu_array3d_size(&deep, &b) && a == b &&
+              a == 1048576,
+          "BC1 2D %zu vs 3D %zu, want 1048576", a, b);
+  }
 }
 
 int main(void) {
@@ -218,6 +320,8 @@ int main(void) {
   test_3d_zero_extents();
   test_malformed();
   test_overflow();
+  test_measured_normalised_formats();
+  test_measured_block_compressed();
   test_unknown_format_is_conservative();
 
   if (failures != 0) {

@@ -107,6 +107,13 @@ static array_mem_reqs_fn array_mem_reqs;
 
 static int csv_mode;
 
+/* --geom: one exact geometry instead of the shape sweep, for pinning a single
+ * rule (see --help). width 0 means "not set". */
+static struct {
+  int set;
+  size_t width, height, depth;
+} custom;
+
 /* Base probe geometry. Big enough that the free-memory delta clears the
  * driver's allocation granularity, small enough that the whole sweep fits on
  * a small card: the widest case is the doubled 3D width, 4096 x 256 x 4 at
@@ -318,8 +325,19 @@ int main(int argc, char **argv) {
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--csv") == 0) {
       csv_mode = 1;
+    } else if (strcmp(argv[i], "--geom") == 0 && i + 1 < argc) {
+      if (sscanf(argv[++i], "%zu,%zu,%zu", &custom.width, &custom.height,
+                 &custom.depth) < 1) {
+        fprintf(stderr, "--geom wants W[,H[,D]]\n");
+        return 1;
+      }
+      custom.set = 1;
     } else if (strcmp(argv[i], "--help") == 0) {
-      printf("usage: %s [device_index] [--csv]\n", argv[0]);
+      printf("usage: %s [device_index] [--csv] [--geom W[,H[,D]]]\n", argv[0]);
+      printf("  --geom replaces the shape sweep with one exact geometry and\n");
+      printf("         does not double the width, for pinning a specific rule\n");
+      printf("         (block rounding at a width not divisible by 4, row\n");
+      printf("         padding at an awkward width, the allocation floor).\n");
       return 0;
     } else {
       device_index = atoi(argv[i]);
@@ -391,8 +409,13 @@ int main(int argc, char **argv) {
     printf("memory: %zu free / %zu total\n", free_mem, total_mem);
     printf("cuArrayGetMemoryRequirements: %s\n",
            array_mem_reqs ? "available" : "NOT available (delta only)");
-    printf("probe geometry: width %d and %d, height %d, depth %d\n\n", PROBE_WIDTH,
-           PROBE_WIDTH * 2, PROBE_HEIGHT, PROBE_DEPTH);
+    if (custom.set) {
+      printf("probe geometry: --geom %zu,%zu,%zu (single, no sweep)\n\n",
+             custom.width, custom.height, custom.depth);
+    } else {
+      printf("probe geometry: width %d and %d, height %d (2D) / %d (3D), depth %d\n\n",
+             PROBE_WIDTH, PROBE_WIDTH * 2, PROBE_HEIGHT, PROBE_HEIGHT3, PROBE_DEPTH);
+    }
     printf("exact      = cuArrayGetMemoryRequirements size (authoritative)\n");
     printf("free_delta = cuMemGetInfo drop across the allocation (upper bound,\n");
     printf("             quantised by the driver's suballocator)\n");
@@ -408,12 +431,21 @@ int main(int argc, char **argv) {
       printf("%s (0x%x)%s\n", formats[f].name, formats[f].value,
              formats[f].exact_today ? "  [sized exactly by the library today]" : "");
     }
-    for (size_t s = 0; s < sizeof(shapes) / sizeof(shapes[0]); s++) {
+    if (custom.set) {
+      /* One exact geometry, no doubling: the caller is pinning a single rule
+       * and wants the one number, not a sweep. */
+      struct shape one = {"custom", custom.height, custom.depth};
       for (unsigned ch = 1; ch <= 4; ch *= 2) {
-        /* Both widths, so the caller can tell linear-in-Width apart from row
-         * padding or 4x4 block rounding. */
-        any |= probe(dev, &formats[f], ch, &shapes[s], PROBE_WIDTH);
-        any |= probe(dev, &formats[f], ch, &shapes[s], PROBE_WIDTH * 2);
+        any |= probe(dev, &formats[f], ch, &one, custom.width);
+      }
+    } else {
+      for (size_t s = 0; s < sizeof(shapes) / sizeof(shapes[0]); s++) {
+        for (unsigned ch = 1; ch <= 4; ch *= 2) {
+          /* Both widths, so the caller can tell linear-in-Width apart from row
+           * padding or 4x4 block rounding. */
+          any |= probe(dev, &formats[f], ch, &shapes[s], PROBE_WIDTH);
+          any |= probe(dev, &formats[f], ch, &shapes[s], PROBE_WIDTH * 2);
+        }
       }
     }
     if (!csv_mode && !any) {
