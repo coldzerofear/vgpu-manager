@@ -376,7 +376,15 @@ static int load_limited_memory_view(CUdevice device,
   }
 
   *lock_fd = lock_gpu_device(*host_index);
+  /* Timed because this is the one call on the allocation path whose cost we
+   * have never measured: two NVML process enumerations plus per-PID container
+   * attribution, and it runs inside the device lock. Only get_used_gpu_memory
+   * is wrapped -- get_used_gpu_virt_memory reads an mmap'd region and is not
+   * in the same cost class, and including it would blur the figure this is
+   * meant to produce. See metrics.h for what the number is for. */
+  uint64_t query_start = metrics_memory_query_begin();
   get_used_gpu_memory((void *)used, device);
+  metrics_record_memory_query(*host_index, query_start);
   get_used_gpu_virt_memory((void *)vmem_used, *host_index);
   return 1;
 }

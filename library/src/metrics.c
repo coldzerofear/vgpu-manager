@@ -14,12 +14,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include <time.h>
+
 #include "include/hook.h"
 #include "include/metrics.h"
 
 static volatile uint64_t g_lock_wait_ns[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_lock_success_total[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_lock_timeout_total[MAX_DEVICE_COUNT] = {0};
+
+/* Per-allocation memory-usage query: see metrics.h. The maximum is kept
+ * alongside the sum because the mean alone would hide the tail, and the tail
+ * is what overshoots the critical section lock.c is tuned for. */
+static volatile uint64_t g_mem_query_ns[MAX_DEVICE_COUNT] = {0};
+static volatile uint64_t g_mem_query_total[MAX_DEVICE_COUNT] = {0};
+static volatile uint64_t g_mem_query_max_ns[MAX_DEVICE_COUNT] = {0};
 
 static volatile uint64_t g_uva_fallback_total[MAX_DEVICE_COUNT] = {0};
 /* The proactive oversold path, kept separate from the reactive fallback above
@@ -101,6 +110,71 @@ void metrics_record_lock_wait(int device_index, uint64_t wait_ns, int timeout) {
            (uint64_t)g_lock_success_total[device_index],
            (uint64_t)g_lock_timeout_total[device_index],
            (uint64_t)g_lock_wait_ns[device_index]);
+  }
+}
+
+/* CLOCK_MONOTONIC, matching lock.c: this measures a duration, so it must not
+ * be affected by a wall-clock step. */
+static uint64_t metrics_monotonic_ns(void) {
+  struct timespec ts;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+    return 0;
+  }
+  return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+uint64_t metrics_memory_query_begin(void) {
+  uint64_t now;
+
+  if (!should_collect_metrics()) {
+    return 0;
+  }
+  now = metrics_monotonic_ns();
+  /* 0 is the "not measuring" sentinel, so never hand it back as a real stamp.
+   * Losing one nanosecond of precision on a 1ns boundary costs nothing, and it
+   * keeps the sentinel unambiguous without a second out-parameter. */
+  return now == 0 ? 1 : now;
+}
+
+void metrics_record_memory_query(int host_index, uint64_t start_ns) {
+  uint64_t now, duration, total, prev;
+
+  /* start_ns == 0 means begin() declined, so the clock was never read and
+   * there is nothing to record. Checked first: it is the common case in a
+   * build that does not collect. */
+  if (start_ns == 0 || !should_collect_metrics() || !is_valid_metric_index(host_index)) {
+    return;
+  }
+  now = metrics_monotonic_ns();
+  /* A failed or non-monotonic read would underflow the subtraction below and
+   * poison the sum with a near-2^64 value. */
+  if (now <= start_ns) {
+    return;
+  }
+  duration = now - start_ns;
+
+  total = __sync_add_and_fetch(&g_mem_query_total[host_index], 1);
+  __sync_add_and_fetch(&g_mem_query_ns[host_index], duration);
+
+  /* CAS loop rather than a plain compare-and-store: several threads of the
+   * same process allocate concurrently on different devices, and two landing
+   * on the same device must not lose the larger sample. */
+  prev = g_mem_query_max_ns[host_index];
+  while (duration > prev) {
+    if (__sync_bool_compare_and_swap(&g_mem_query_max_ns[host_index], prev, duration)) {
+      break;
+    }
+    prev = g_mem_query_max_ns[host_index];
+  }
+
+  if ((total & (total - 1)) == 0) {
+    uint64_t sum = g_mem_query_ns[host_index];
+    LOGGER(INFO,
+           "memory query metrics device=%d count=%" PRIu64 " total_ns=%" PRIu64
+           " mean_ns=%" PRIu64 " max_ns=%" PRIu64,
+           host_index, total, sum, sum / total,
+           (uint64_t)g_mem_query_max_ns[host_index]);
   }
 }
 

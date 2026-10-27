@@ -50,6 +50,34 @@ typedef enum {
 } metrics_aimd_event_t;
 
 void metrics_record_lock_wait(int device_index, uint64_t wait_ns, int timeout);
+
+/* Cost of the per-allocation memory-usage query: the two NVML process
+ * enumerations plus the per-PID container attribution that
+ * get_used_gpu_memory() performs, measured where it actually runs -- inside
+ * the per-device lock on the allocation path.
+ *
+ * This exists to answer a question we cannot answer without a GPU: how
+ * expensive that query really is, and how often the allocation path takes it.
+ * lock.c:39 documents the critical section as "~1-3ms (two NVML process
+ * enumerations plus the real driver allocation)", but that is a design-time
+ * estimate, and it is the only number we have. Whether caching the query
+ * result is worth a new shared region depends entirely on the real figure and
+ * on the real call rate -- a workload allocating in large blocks takes this
+ * path a few hundred times and would not care, while one on
+ * PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True drives cuMemCreate at the
+ * 2MiB granularity and could take it tens of thousands of times.
+ *
+ * Call metrics_memory_query_begin() immediately before the query and pass what
+ * it returns to metrics_record_memory_query() immediately after. begin()
+ * returns 0 when metrics are off, and record() then does nothing, so a build
+ * that never collects pays one call and one comparison rather than a
+ * clock_gettime.
+ *
+ * Reported per device as count / total / mean / max, on the same
+ * powers-of-two schedule the other counters here use. */
+uint64_t metrics_memory_query_begin(void);
+void metrics_record_memory_query(int host_index, uint64_t start_ns);
+
 void metrics_record_oom(int host_index, metrics_oom_reason_t reason);
 /* Reactive: the driver refused a device allocation and we retried it as managed
  * memory. This is oversold memory arriving as a surprise. */

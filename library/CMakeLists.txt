@@ -288,6 +288,14 @@ if(BUILD_SM_NODE_TESTS)
     target_include_directories(test_session_paths PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+    # The per-allocation memory-usage query timer. It exists to produce a
+    # figure we cannot measure without a GPU, so the measurement itself has to
+    # be sound on the no-GPU paths -- in particular the underflow guard on
+    # now - start, which would otherwise poison the running total.
+    add_executable(test_memory_query_metrics test/nogpu/test_memory_query_metrics.c ${VGPU_NODRIVER_SRCS})
+    target_include_directories(test_memory_query_metrics PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
     # Container PID identification: the cgroup-namespace regression that made
     # device_pid_in_same_container() reject every pid on kernels below 4.6,
     # plus the fd-based GPU-in-use test and its no-leak property. In util.c so
@@ -426,6 +434,7 @@ foreach(vgpu_nogpu_test
         test_vmem_region_concurrency
         test_session_paths
         test_session_pids_concurrency
+        test_memory_query_metrics
         test_container_pid
         test_cgroup_parse
         test_shared_file_mode
