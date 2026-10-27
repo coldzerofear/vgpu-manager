@@ -276,6 +276,110 @@ static void test_prefix_rule(void) {
   }
 }
 
+/* A pid we may not inspect must be REPORTED, not silently counted as "not
+ * ours". /proc/<pid>/ns entries need PTRACE_MODE_READ, so the verdict for a pid
+ * owned by another uid is indistinguishable from one that exited -- and the
+ * two mean opposite things (an under-count that lets a container exceed its
+ * quota, versus an ordinary race). The warning is the only thing that tells
+ * them apart, so this checks the warning actually comes out.
+ *
+ * Works whether or not the suite runs as root:
+ *   as root   -- fork a child, drop it to an unprivileged uid, and have it
+ *                inspect its still-root parent. That is a denial we create
+ *                rather than hope to find.
+ *   otherwise -- inspect pid 1, which is root and therefore off limits.
+ */
+static void test_inspect_denial_is_reported(void) {
+  char log_path[] = "/tmp/vgpu_cpid_denied_XXXXXX";
+  int log_fd = mkstemp(log_path);
+  if (log_fd < 0) {
+    printf("SKIP %s: could not create a temp log\n", __func__);
+    return;
+  }
+  close(log_fd);
+
+  int pipefd[2];
+  if (pipe(pipefd) != 0) {
+    printf("SKIP %s: pipe failed\n", __func__);
+    unlink(log_path);
+    return;
+  }
+
+  pid_t parent_pid = getpid();
+  pid_t child = fork();
+  if (child < 0) {
+    printf("SKIP %s: fork failed\n", __func__);
+    close(pipefd[0]);
+    close(pipefd[1]);
+    unlink(log_path);
+    return;
+  }
+  if (child == 0) {
+    close(pipefd[0]);
+    /* The warning goes to stderr; capture it for the parent to read. */
+    int fd = open(log_path, O_WRONLY | O_TRUNC);
+    if (fd >= 0) {
+      dup2(fd, STDERR_FILENO);
+      close(fd);
+    }
+    /* LOGGER needs WARNING enabled; that is the default, but be explicit
+     * since this child's verdict depends on it. */
+    setenv("LOGGER_LEVEL", "2", 1);
+
+    unsigned int target;
+    if (getuid() == 0) {
+      /* 65534 = nobody on Debian/Ubuntu, which this image is. setgid first:
+       * after setuid we would no longer be allowed to. */
+      if (setgid(65534) != 0 || setuid(65534) != 0 || getuid() == 0) {
+        _exit(77); /* could not drop privileges -> SKIP */
+      }
+      target = (unsigned int)parent_pid; /* still root, now off limits to us */
+    } else {
+      target = 1; /* pid 1 is root, we are not */
+    }
+
+    int verdict = device_pid_in_same_container(target);
+    char payload = (verdict != 0) ? 1 : 0;
+    ssize_t written = write(pipefd[1], &payload, 1);
+    (void)written;
+    _exit(0);
+  }
+
+  close(pipefd[1]);
+  char rejected = 0;
+  ssize_t got = read(pipefd[0], &rejected, 1);
+  close(pipefd[0]);
+  int status = 0;
+  waitpid(child, &status, 0);
+
+  if (WIFEXITED(status) && WEXITSTATUS(status) == 77) {
+    printf("SKIP %s: could not drop privileges to create a denial\n", __func__);
+    unlink(log_path);
+    return;
+  }
+  CHECK(got == 1 && rejected == 1,
+        "a pid we may not inspect must be rejected (got=%zd rejected=%d)",
+        got, (int)rejected);
+
+  /* The point of the test: the rejection must have said why. */
+  FILE *fp = fopen(log_path, "re");
+  int saw_warning = 0;
+  if (fp != NULL) {
+    char line[2048];
+    while (fgets(line, sizeof(line), fp) != NULL) {
+      if (strstr(line, "not permitted to inspect pid") != NULL) {
+        saw_warning = 1;
+        break;
+      }
+    }
+    fclose(fp);
+  }
+  CHECK(saw_warning,
+        "a permission denial was not reported: an under-count from EPERM is "
+        "then indistinguishable from a pid that simply exited");
+  unlink(log_path);
+}
+
 int main(void) {
   test_self_is_in_own_container();
   test_child_is_in_same_container();
@@ -285,6 +389,7 @@ int main(void) {
   test_unrelated_devices_are_not_gpu();
   test_no_descriptor_leak();
   test_prefix_rule();
+  test_inspect_denial_is_reported();
 
   if (failures != 0) {
     printf("FAILED: %d check(s)\n", failures);

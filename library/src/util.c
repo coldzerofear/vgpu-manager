@@ -1079,6 +1079,44 @@ static int self_ns_inode(const char *ns_type, unsigned slot, ino_t *ino) {
   return 0;
 }
 
+/* Report that we were not allowed to inspect a pid, which is NOT the same
+ * thing as that pid not being ours.
+ *
+ * /proc/<pid>/ns entries need PTRACE_MODE_READ, so a process owned by another uid
+ * is unreadable from here and device_pid_in_same_container() has to answer
+ * "not ours". Two cases hide behind that one answer, and they are opposites:
+ *
+ *   ENOENT -- the pid exited between NVML sampling it and us reading it. The
+ *             common case on this path, and correctly "not ours".
+ *   EACCES/EPERM -- the pid is real and might well be ours, but it runs as a
+ *             different uid (runAsUser, a deliberately de-privileged child, a
+ *             sidecar) and we may not look. Answering "not ours" then
+ *             UNDER-COUNTS its memory, which is the quota-escape direction.
+ *
+ * Nothing here can fix the second case -- it needs CAP_SYS_PTRACE, which is
+ * not ours to grant -- so the point is to stop it being invisible. Until this
+ * logged, an under-count from a permission denial looked exactly like a pid
+ * that had simply exited.
+ *
+ * Rate-limited on powers of two rather than logged once: the count is the
+ * interesting part. One denial in a whole run is a transient to ignore; a
+ * count that climbs with every allocation says the deployment really does run
+ * GPU processes under another uid, and the memory accounting is short by
+ * however much they hold. This runs per-pid inside the device lock, so an
+ * unthrottled line here would be one per pid per allocation.
+ */
+static void note_pid_inspect_denied(unsigned int pid, const char *ns_type, int err) {
+  static volatile uint64_t denied_total;
+  uint64_t total = __sync_add_and_fetch(&denied_total, 1);
+
+  if ((total & (total - 1)) == 0) {
+    LOGGER(WARNING, "not permitted to inspect pid %u (/proc/%u/ns/%s: %s); counting it as "
+                    "NOT ours, so its GPU memory is excluded -- this under-counts if it is "
+                    "a process of this container running as another uid. Denials so far: %" PRIu64,
+           pid, pid, ns_type, strerror(err), total);
+  }
+}
+
 int device_pid_in_same_container(unsigned int pid) {
   /* The mount namespace is the load-bearing test, and on its own it already
    * answers both threats this function exists for: with hostPID=true we can
@@ -1101,6 +1139,11 @@ int device_pid_in_same_container(unsigned int pid) {
     struct stat device_st;
     snprintf(device_path, sizeof(device_path), "/proc/%u/ns/%s", pid, g_ns_names[i]);
     if (stat(device_path, &device_st) != 0) {
+      /* ENOENT is the pid having exited -- ordinary here, and genuinely "not
+       * ours". A permission denial is the under-count described above. */
+      if (unlikely(errno == EACCES || errno == EPERM)) {
+        note_pid_inspect_denied(pid, g_ns_names[i], errno);
+      }
       return -1;
     }
     ino_t self_ino;
