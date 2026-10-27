@@ -148,6 +148,49 @@ static inline size_t vgpu_array_block_bytes(int format) {
   }
 }
 
+/* Channels the FORMAT ITSELF fixes, or 1 when the format leaves the count to
+ * the descriptor's NumChannels.
+ *
+ * This exists so the size does not depend on what NumChannels a given driver
+ * happens to accept. The probed driver requires NumChannels to equal the count
+ * in the format name -- UNORM_INT8X4 takes only 4, X2 only 2, X1 only 1 -- so
+ * "per-channel bytes x NumChannels" reproduced every measurement. But that is
+ * an ACCEPTANCE rule, not a format definition: another driver, GPU generation
+ * or OS could relax it, and if one accepted UNORM_INT8X4 with NumChannels=1 we
+ * would charge a quarter of the real 4 bytes per texel. A quota bypass is
+ * silent, so the arithmetic must not rest on a validation someone else
+ * performs.
+ *
+ * The name states the element: "4 channel unsigned 8-bit normalized integer"
+ * IS a 4-byte element. Taking the larger of the two counts therefore reproduces
+ * the measurements exactly where the driver enforces the match, and still
+ * charges the full element if some driver does not.
+ *
+ * The classic eight genuinely leave the count to the descriptor (cuda.h shows
+ * UNSIGNED_INT8 used with 1, 2 and 4 channels), so they return 1 and the max
+ * below is a no-op for them.
+ */
+static inline unsigned int vgpu_array_format_channels(int format) {
+  switch (format) {
+  case CU_AD_FORMAT_UNORM_INT8X2:
+  case CU_AD_FORMAT_UNORM_INT16X2:
+  case CU_AD_FORMAT_SNORM_INT8X2:
+  case CU_AD_FORMAT_SNORM_INT16X2:
+    return 2;
+  case CU_AD_FORMAT_UNORM_INT8X4:
+  case CU_AD_FORMAT_UNORM_INT16X4:
+  case CU_AD_FORMAT_SNORM_INT8X4:
+  case CU_AD_FORMAT_SNORM_INT16X4:
+  /* "4 channel unorm R10G10B10A2": a packed 32-bit element, and the driver
+   * requires NumChannels=4 for it. */
+  case CU_AD_FORMAT_UNORM_INT_101010_2:
+    return 4;
+  default:
+    /* Includes the X1 formats, whose one channel the max cannot change. */
+    return 1;
+  }
+}
+
 /* Whether this format's size is known exactly, as opposed to falling back to
  * VGPU_ARRAY_UNKNOWN_FORMAT_BYTES. */
 static inline int vgpu_array_format_is_known(int format) {
@@ -282,14 +325,31 @@ static inline int vgpu_array_size_from(size_t width, size_t height, size_t depth
    * Height x Depth). See docs/cuda_array_size_measurements.md. */
   bytes = vgpu_array_block_bytes(format);
   if (bytes != 0) {
-    size_t blocks_w = (width + 3) / 4;
-    size_t blocks_h = (height + 3) / 4;
+    /* ceil(extent / 4) written as a division plus a remainder test rather than
+     * (extent + 3) / 4: the latter wraps for an extent within 3 of SIZE_MAX,
+     * and a wrap there turns a colossal request into a block count of zero.
+     * That happens to be caught today by vgpu_array_mul() refusing a zero
+     * factor, but relying on a guard three calls away for the difference
+     * between "refuse" and "charge nothing" is how a later cleanup of that
+     * guard would silently reopen the bypass. This form cannot overflow. */
+    size_t blocks_w = width / 4 + (width % 4 != 0 ? 1 : 0);
+    size_t blocks_h = height / 4 + (height % 4 != 0 ? 1 : 0);
     if (!vgpu_array_mul(&bytes, blocks_w) || !vgpu_array_mul(&bytes, blocks_h) ||
         !vgpu_array_mul(&bytes, depth)) {
       return 0;
     }
     *out = bytes;
     return 1;
+  }
+
+  /* The larger of the descriptor's count and the one the format fixes, so the
+   * element size does not depend on a driver's NumChannels validation. See
+   * vgpu_array_format_channels(). */
+  {
+    unsigned int implied = vgpu_array_format_channels(format);
+    if (implied > num_channels) {
+      num_channels = implied;
+    }
   }
 
   bytes = vgpu_array_format_bytes(format);
