@@ -943,6 +943,19 @@ void free_gpu_virt_memory_by_graph(CUgraph graph);
 
 int get_gpu_virt_memory_type(CUdeviceptr dptr);
 
+/* Results of device_pid_in_same_container() (src/util.c). Three-valued because
+ * "we may not look at this pid" is a different answer from "this pid is not
+ * ours": a denial has to be resolved by the caller, which knows the
+ * compatibility mode, rather than silently read as "not ours" -- that would
+ * under-count a process that IS ours, and under-counting is the quota-escape
+ * direction.
+ *
+ * YES/NO keep the 0 / -1 this function has always returned, so an existing
+ * `== 0` test still means "confirmed ours". */
+#define PID_IN_CONTAINER_YES      0
+#define PID_IN_CONTAINER_UNKNOWN  1
+#define PID_IN_CONTAINER_NO     (-1)
+
 int get_nvml_device_index_by_cuda_device(CUdevice device);
 
 int get_host_device_index_by_cuda_device(CUdevice device);

@@ -58,7 +58,6 @@ extern void *lib_control;
 extern int pid_exist(int pid);
 extern int file_exist(const char *);
 extern int device_pid_in_same_container(unsigned int pid);
-extern int library_exists_in_process_maps(char const *libName, unsigned int pid);
 extern int gpu_device_fd_in_process(unsigned int pid);
 extern int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids);
 extern int split_str(const char *line, char *key, size_t key_size,
@@ -2338,39 +2337,64 @@ int check_device_pid_in_ordered_container_pids(unsigned int device_pid, const in
 }
 
 int check_device_pid_in_local_container_pid(unsigned int device_pid) {
-  int ret = -1;
   if (device_pid == 0) {
-    return ret;
+    return -1;
   }
   // Check if PID exists in the container.
   if (pid_exist(device_pid) != 0) {
-    return ret;
+    return -1;
   }
+
   // Check if PID exists in the current container namespace.
-  if (device_pid_in_same_container(device_pid) != 0) {
-    return ret;
+  int ownership = device_pid_in_same_container(device_pid);
+  if (ownership == PID_IN_CONTAINER_NO) {
+    return -1;
   }
-  /* Check if the process is using GPU.
-   *
-   * The fd test leads and the maps scan is only a fallback: holding
-   * /dev/nvidia* open is both far cheaper to check (tens of us, and flat in
-   * the target's VMA count, against 44ms at 20k VMAs) and the more
-   * fundamental fact, since the mappings the maps scan looks for are built on
-   * those very descriptors. See gpu_device_fd_in_process() in util.c for the
-   * measurements and the reasoning.
-   *
-   * The fallback stays because this step is what stops another namespace's pid
-   * from being counted as ours -- open-kernel mode returns container-namespace
-   * pids, and a hostPID=true or shareProcessNamespace=true pod can see pids
-   * that are not its own -- and dropping a test that currently says "yes" on
-   * some driver version we have not sampled would under-count memory, which is
-   * a quota escape rather than a cosmetic regression. It costs nothing on the
-   * common path: it only runs when the fd test found nothing. */
-  if (gpu_device_fd_in_process(device_pid) == 0 ||
-      library_exists_in_process_maps("nvidia", device_pid) == 0) {
-    ret = 0;
+
+  if (ownership == PID_IN_CONTAINER_UNKNOWN) {
+    /* We may not inspect this pid, and that blocks the GPU test below as well:
+     * gpu_device_fd_in_process() reads /proc/<pid>/fd, which needs the same
+     * PTRACE_MODE_READ permission that was just refused. Running it would fail
+     * on the permission rather than the facts and report "not on the GPU"
+     * about a process we simply cannot see.
+     *
+     * The cgroup is still readable, though -- PTRACE_MODE_READ gates
+     * /proc/<pid>/ns, /proc/<pid>/fd and /proc/<pid>/maps, but not
+     * /proc/<pid>/cgroup -- so where a cgroup mode is configured, defer to the
+     * check that mode already uses. That is deliberately the SAME function the
+     * CGROUPV2 path calls, so there is one verified implementation of "is this
+     * pid in our cgroup" rather than a second one written for this branch.
+     *
+     * This is what keeps hostPID=true honest: a host process is outside our
+     * cgroup, so it is excluded, while a process of ours under another uid is
+     * inside it and gets counted. Without the fallback the first case would be
+     * over-counted and the second under-counted.
+     *
+     * No CGROUPV1 branch: Kubernetes has moved off cgroup v1 and this project
+     * no longer maintains that path. */
+    if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) ==
+        CGROUPV2_COMPATIBILITY_MODE) {
+      return check_device_pid_in_cgroupv2_container(device_pid);
+    }
+    /* No cgroup mode to defer to. Count it: from CUDA 13.x the driver lists
+     * only pids of our own namespace, so a pid reaching here is almost
+     * certainly ours, and NVML named it as a GPU process to begin with.
+     * Under-counting would let the container hold memory nobody charged it
+     * for; over-counting only throttles the container against itself.
+     * device_pid_in_same_container() has already logged the denial. */
+    return 0;
   }
-  return ret;
+
+  /* Confirmed ours: the only question left is whether it is on the GPU.
+   *
+   * One test, no fallback. Holding /dev/nvidia* open is the fundamental fact
+   * -- the CUDA driver keeps those descriptors for as long as it holds a
+   * context -- and it is flat in the target's VMA count, where the
+   * /proc/<pid>/maps scan this replaced cost 44ms at 20k VMAs inside the
+   * device lock. That scan also matched "nvidia" anywhere in a path, so a
+   * mapped file under a directory merely named after the vendor counted as GPU
+   * use. See gpu_device_fd_in_process() in util.c. */
+  return gpu_device_fd_in_process(device_pid) == 0 ? 0 : -1;
 }
 
 /* Load pids.config at most once per device query. get_used_gpu_memory_by_

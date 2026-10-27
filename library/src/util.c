@@ -804,45 +804,6 @@ int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_s
   return 0;
 }
 
-char *GetNthMapsToken(char *line, int n) {
-  char *context = NULL;
-  // coverity[var_deref_model] Yes, we're using strtok_r correctly
-  char *token = strtok_r(line, " ", &context);
-  while (token && --n > 0) {
-    token = strtok_r(NULL, " ", &context);
-  }
-  return token;
-}
-
-int library_exists_in_process_maps(char const *libName, unsigned int pid) {
-  int ret = -1;
-  char fileName[512];
-  snprintf(fileName, sizeof(fileName), "/proc/%u/maps", pid);
-
-  FILE *fMaps = fopen(fileName, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
-  if (NULL == fMaps) {
-    return ret;
-  }
-
-  // Read the file line by line
-  char line[1024];
-  while (fgets(line, sizeof(line), fMaps)) {
-    char *libPath = GetNthMapsToken(line, 6);
-    if (libPath == NULL) {
-      continue;
-    }
-    char *p = strstr(libPath, libName);
-    if (p == NULL) {
-      continue;
-    }
-    ret = 0;
-    break;
-  }
-
-  fclose(fMaps);
-  return ret;
-}
-
 /* Every NVIDIA device node a GPU process can hold open shares this prefix:
  * nvidia0..N, nvidiactl, nvidia-uvm, nvidia-uvm-tools and nvidia-caps entries.
  * Anchored at the start rather than searched for anywhere in the target so a
@@ -853,9 +814,9 @@ int library_exists_in_process_maps(char const *libName, unsigned int pid) {
 
 /* Whether the process holds an open descriptor on an NVIDIA device node.
  *
- * This is the primary test for "is this pid using the GPU";
- * library_exists_in_process_maps() above is kept only as a fallback. Two
- * reasons it leads.
+ * This is the ONLY test for "is this pid using the GPU". It replaced a scan of
+ * /proc/<pid>/maps that matched "nvidia" anywhere in a mapping's path; that
+ * scan was kept as a fallback for a while and is now gone. Two reasons.
  *
  * COST. Generating /proc/<pid>/maps makes the kernel walk the target's whole
  * VMA tree holding its mmap_lock, so that read costs what the target's address
@@ -1093,30 +1054,49 @@ static int self_ns_inode(const char *ns_type, unsigned slot, ino_t *ino) {
  *             sidecar) and we may not look. Answering "not ours" then
  *             UNDER-COUNTS its memory, which is the quota-escape direction.
  *
- * Nothing here can fix the second case -- it needs CAP_SYS_PTRACE, which is
- * not ours to grant -- so the point is to stop it being invisible. Until this
- * logged, an under-count from a permission denial looked exactly like a pid
- * that had simply exited.
+ * The denial is REPORTED here and resolved by the caller, not decided here:
+ * this file deliberately knows nothing about compatibility modes, and the
+ * fallback that can still settle ownership -- the cgroup check -- lives with
+ * them. What must never happen is a denial silently reading as "not ours":
+ * that under-counts a process that IS ours, which is the quota-escape
+ * direction. Nothing can remove the ambiguity from here; it needs
+ * CAP_SYS_PTRACE, which is not ours to grant.
  *
  * Rate-limited on powers of two rather than logged once: the count is the
  * interesting part. One denial in a whole run is a transient to ignore; a
  * count that climbs with every allocation says the deployment really does run
- * GPU processes under another uid, and the memory accounting is short by
- * however much they hold. This runs per-pid inside the device lock, so an
- * unthrottled line here would be one per pid per allocation.
+ * GPU processes under another uid. This runs per-pid inside the device lock,
+ * so an unthrottled line here would be one per pid per allocation.
  */
 static void note_pid_inspect_denied(unsigned int pid, const char *ns_type, int err) {
   static volatile uint64_t denied_total;
   uint64_t total = __sync_add_and_fetch(&denied_total, 1);
 
   if ((total & (total - 1)) == 0) {
-    LOGGER(WARNING, "not permitted to inspect pid %u (/proc/%u/ns/%s: %s); counting it as "
-                    "NOT ours, so its GPU memory is excluded -- this under-counts if it is "
-                    "a process of this container running as another uid. Denials so far: %" PRIu64,
+    LOGGER(WARNING, "not permitted to inspect pid %u (/proc/%u/ns/%s: %s); ownership cannot be "
+                    "confirmed from the namespaces, so the caller decides -- reported because a "
+                    "denial must not be mistaken for a pid that simply exited. "
+                    "Denials so far: %" PRIu64,
            pid, pid, ns_type, strerror(err), total);
   }
 }
 
+/* Three-valued; the caller distinguishes all three (see hook.h for the names).
+ *
+ *   YES     confirmed ours -- the namespace inodes match.
+ *   UNKNOWN the pid exists but we may not inspect it (another uid). The caller
+ *           resolves this; it is NOT "not ours".
+ *   NO      confirmed not ours -- inodes differ, or the pid is gone.
+ *
+ * Why UNKNOWN is a separate answer: from CUDA 13.x the driver lists only the
+ * pids of the caller's own PID namespace, so for an ordinary container every
+ * pid NVML hands us is already one of ours and this function is a confirmation
+ * rather than a filter. Folding a permission denial into "not ours" would
+ * under-count a process that is ours, and under-counting is the quota-escape
+ * direction. What a denial means instead is decided by
+ * check_device_pid_in_local_container_pid(), which knows the compatibility
+ * mode and can fall back to the cgroup check.
+ */
 int device_pid_in_same_container(unsigned int pid) {
   /* The mount namespace is the load-bearing test, and on its own it already
    * answers both threats this function exists for: with hostPID=true we can
@@ -1139,22 +1119,27 @@ int device_pid_in_same_container(unsigned int pid) {
     struct stat device_st;
     snprintf(device_path, sizeof(device_path), "/proc/%u/ns/%s", pid, g_ns_names[i]);
     if (stat(device_path, &device_st) != 0) {
-      /* ENOENT is the pid having exited -- ordinary here, and genuinely "not
-       * ours". A permission denial is the under-count described above. */
+      /* A permission denial means "cannot tell", which the caller resolves.
+       * Anything else -- ENOENT above all, the pid having exited between NVML
+       * sampling it and now -- is genuinely not ours. */
       if (unlikely(errno == EACCES || errno == EPERM)) {
         note_pid_inspect_denied(pid, g_ns_names[i], errno);
+        return PID_IN_CONTAINER_UNKNOWN;
       }
-      return -1;
+      return PID_IN_CONTAINER_NO;
     }
     ino_t self_ino;
     if (self_ns_inode(g_ns_names[i], i, &self_ino) != 0) {
-      return -1;
+      /* Our OWN namespace is unreadable, so there is nothing to compare
+       * against. Not a statement about the target pid, so stay conservative;
+       * self_ns_inode() does not cache the failure, so the next call retries. */
+      return PID_IN_CONTAINER_NO;
     }
     if (device_st.st_ino != self_ino) {
-      return -1;
+      return PID_IN_CONTAINER_NO;
     }
   }
-  return 0;
+  return PID_IN_CONTAINER_YES;
 }
 
 /* Widens a shared-state file this library just created, so that another uid

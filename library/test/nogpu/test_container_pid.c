@@ -338,16 +338,17 @@ static void test_inspect_denial_is_reported(void) {
       target = 1; /* pid 1 is root, we are not */
     }
 
-    int verdict = device_pid_in_same_container(target);
-    char payload = (verdict != 0) ? 1 : 0;
+    /* Report the raw verdict, not a boolean: the whole point is that a denial
+     * is its own third value rather than being folded into "not ours". */
+    char payload = (char)device_pid_in_same_container(target);
     ssize_t written = write(pipefd[1], &payload, 1);
     (void)written;
     _exit(0);
   }
 
   close(pipefd[1]);
-  char rejected = 0;
-  ssize_t got = read(pipefd[0], &rejected, 1);
+  char verdict = 0;
+  ssize_t got = read(pipefd[0], &verdict, 1);
   close(pipefd[0]);
   int status = 0;
   waitpid(child, &status, 0);
@@ -357,11 +358,16 @@ static void test_inspect_denial_is_reported(void) {
     unlink(log_path);
     return;
   }
-  CHECK(got == 1 && rejected == 1,
-        "a pid we may not inspect must be rejected (got=%zd rejected=%d)",
-        got, (int)rejected);
+  /* UNKNOWN, specifically. NO would mean the denial was folded into "not
+   * ours", which under-counts a process that may well be ours -- the
+   * quota-escape direction this third value exists to prevent. */
+  CHECK(got == 1 && verdict == PID_IN_CONTAINER_UNKNOWN,
+        "a pid we may not inspect must come back UNKNOWN (%d), not NO (%d) or "
+        "YES (%d) (got=%zd verdict=%d)",
+        PID_IN_CONTAINER_UNKNOWN, PID_IN_CONTAINER_NO, PID_IN_CONTAINER_YES,
+        got, (int)verdict);
 
-  /* The point of the test: the rejection must have said why. */
+  /* And it must have said why. */
   FILE *fp = fopen(log_path, "re");
   int saw_warning = 0;
   if (fp != NULL) {
