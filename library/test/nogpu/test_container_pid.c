@@ -45,6 +45,8 @@
 #include "include/hook.h"
 
 extern int device_pid_in_same_container(unsigned int pid);
+extern int read_cgroup(const char *pid_path, const char *cgroup_key,
+                       char *cgroup_value, size_t value_size);
 extern int gpu_device_fd_in_process(unsigned int pid);
 
 static int failures = 0;
@@ -386,6 +388,92 @@ static void test_inspect_denial_is_reported(void) {
   unlink(log_path);
 }
 
+/* The premises the restricted-permission fallback rests on.
+ *
+ * When device_pid_in_same_container() comes back UNKNOWN, the caller
+ * (check_device_pid_in_local_container_pid) decides ownership from
+ * /proc/<pid>/cgroup -- the CONTAINER'S OWN proc, not the mounted host one,
+ * because an open-kernel driver lists pids of our own namespace. It tries the
+ * cgroup v2 shape and then the v1 shape and counts the pid if either says yes.
+ *
+ * Those two checks live in cuda_hook.c, which cannot join the no-driver source
+ * set, so what is pinned here is what they depend on:
+ *
+ *   v2 shape -- a process of this container reads exactly "0::/", which only
+ *               holds under cgroupns=private.
+ *   v1 shape -- our own path is specific enough to identify us (not a bare
+ *               "/") AND another process of this container contains it, which
+ *               only holds under cgroupns=host.
+ *
+ * Exactly one of the two normally applies, so this asserts that AT LEAST ONE
+ * premise holds on whatever host the suite runs on. If both were to break, the
+ * fallback would quietly answer "not ours" for every pid it cannot inspect,
+ * and that under-counts -- the quota-escape direction the third value exists
+ * to prevent.
+ */
+static void test_local_cgroup_can_identify_this_container(void) {
+  char self_v1[CGROUP_LINE_MAX] = {0};
+  char child_v1[CGROUP_LINE_MAX] = {0};
+  char child_path[64];
+  int v2_premise = 0;
+  int v1_premise = 0;
+
+  pid_t child = spawn_holder(NULL);
+  if (child <= 0) {
+    printf("SKIP %s: could not spawn a child\n", __func__);
+    return;
+  }
+  snprintf(child_path, sizeof(child_path), "/proc/%d/cgroup", (int)child);
+
+  /* v2 premise: some line of the child's cgroup file is exactly "0::/".
+   *
+   * Read the way check_device_pid_in_proc_cgroupv2_path() reads it -- whole
+   * line, strcmp against "0::/" -- and NOT via read_cgroup() with an empty
+   * controller key. Those are not the same test: read_cgroup() splits on ':'
+   * and on a v1 host its first line yields a non-empty controller name, so
+   * asking it for "" can still succeed against a line this check would
+   * reject. Modelling the premise with a different parser than the code uses
+   * would make this test agree with itself rather than with the code. */
+  FILE *cf = fopen(child_path, "re");
+  if (cf != NULL) {
+    char line[CGROUP_LINE_MAX];
+    while (fgets(line, sizeof(line), cf) != NULL) {
+      size_t len = strlen(line);
+      if (len > 0 && line[len - 1] == '\n') {
+        line[len - 1] = '\0';
+      }
+      if (strcmp(line, "0::/") == 0) {
+        v2_premise = 1;
+        break;
+      }
+    }
+    fclose(cf);
+  }
+
+  /* v1 premise: our own memory-controller path is specific, and the child's
+   * contains it. */
+  memset(child_v1, 0, sizeof(child_v1));
+  if (read_cgroup(PID_SELF_CGROUP_PATH, "memory", self_v1, sizeof(self_v1)) == 0 &&
+      read_cgroup(child_path, "memory", child_v1, sizeof(child_v1)) == 0 &&
+      self_v1[0] == '/' && self_v1[1] != '\0' &&
+      strstr(child_v1, self_v1) != NULL) {
+    v1_premise = 1;
+  }
+
+  /* Reported either way: which premise holds is a property of the host, so
+   * printing it is what makes a failure here actionable. */
+  printf("      (cgroup premises: v2(line==\"0::/\")=%d v1(specific+contains)=%d; "
+         "own memory path=\"%s\")\n",
+         v2_premise, v1_premise, self_v1[0] != '\0' ? self_v1 : "(none)");
+
+  CHECK(v2_premise || v1_premise,
+        "neither cgroup shape can identify a process of this container, so the "
+        "UNKNOWN fallback would answer \"not ours\" for every pid it cannot "
+        "inspect and under-count its memory");
+
+  reap(child);
+}
+
 int main(void) {
   test_self_is_in_own_container();
   test_child_is_in_same_container();
@@ -396,6 +484,7 @@ int main(void) {
   test_no_descriptor_leak();
   test_prefix_rule();
   test_inspect_denial_is_reported();
+  test_local_cgroup_can_identify_this_container();
 
   if (failures != 0) {
     printf("FAILED: %d check(s)\n", failures);
