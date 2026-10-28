@@ -63,6 +63,8 @@ extern int gpu_device_fd_in_process(unsigned int pid);
 extern int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids);
 extern int split_str(const char *line, char *key, size_t key_size, char *value, size_t value_size, char d);
 extern int read_cgroup(FILE *fp, const char *cgroup_key, char *cgroup_value, size_t value_size);
+extern void self_cgroup_init(self_cgroup_t *self, int cgroup_v1);
+extern void self_cgroup_ensure(self_cgroup_t *self);
 
 /* SM throttle controller selection (see util.c). Defaults preserve stock
  * behaviour when env is unset. */
@@ -2250,11 +2252,27 @@ static FILE *open_fp(const char *path) {
   return fp;
 }
 
-int check_device_pid_in_proc_cgroup_path(unsigned int device_pid, const char *pid_cgroup_path) {
+/* Is this pid's cgroup ours?
+ *
+ * No `pid_cgroup == "/"` short-circuit any more. It used to return "ours" the
+ * moment the pid's path was exactly "/", which is right under
+ * cgroupns=private -- our own processes render that way -- and wrong under
+ * cgroupns=host, where "/" is what a process sitting in the HOST root cgroup
+ * renders as. The real-hardware matrix caught it in all twelve CRI
+ * configurations on cgroup v1, because containerd gives containers the host
+ * cgroup namespace there: 162 of 2338 judgements claimed a host process.
+ * cgroup_path_is_ours() answers the private case correctly on its own
+ * (self "/" is the namespace root, so the test is the absence of a ".."
+ * component), which is why the short-circuit could simply go.
+ *
+ * What the short-circuit really bought was skipping the per-pid read of
+ * /proc/self/cgroup; `self` now carries that, read once per device query. See
+ * self_cgroup_t in include/hook.h for the measurements. */
+int check_device_pid_in_proc_cgroup_path(unsigned int device_pid, const char *pid_cgroup_path,
+                                         self_cgroup_t *self) {
   int ret = -1;
   FILE *fp = NULL;
-  FILE *self_fp = NULL;
-  if (device_pid == 0) {
+  if (device_pid == 0 || self == NULL) {
     return ret;
   }
   // TODO May I need to check if there are zombie processes?
@@ -2262,54 +2280,15 @@ int check_device_pid_in_proc_cgroup_path(unsigned int device_pid, const char *pi
   if (!fp) {
     return ret;
   }
-  /* Which key to ask first, and why the order is load-bearing on cgroup v1.
-   *
-   * "" matches the cgroup v2 unified line ("0::<path>"); "memory" matches the
-   * v1 memory hierarchy. Asking "" first is right on a v2 host, where it is
-   * the only line there is.
-   *
-   * On a cgroup v1 host the unified line may still be present -- systemd's
-   * hybrid layout mounts cgroup2 alongside the v1 hierarchies -- but nothing
-   * guarantees the CONTAINER has a group of its own in it: that is the
-   * runtime's choice, not ours. Measured on a hybrid host (Ubuntu 24.04,
-   * systemd.unified_cgroup_hierarchy=0): Docker 29 does give each container
-   * its own "0::/docker/<id>", so the unified line is usable there. But where
-   * that group is absent the line degenerates to a path every container
-   * shares, or to "/" -- and then this check reads the same string for a
-   * sibling container as for us and claims its process as ours. That
-   * over-counts, and over-counting throttles the container against memory it
-   * does not hold. Reproduced by placing two containers in one unified group:
-   * "" claimed the sibling, "memory" rejected it.
-   *
-   * The memory hierarchy carries the per-container path in every v1 layout, so
-   * when the manager has told us this is a v1 host, ask it first and keep ""
-   * only as a fallback. */
-  const char *cgroup_keys_v1[] = {"memory", "", NULL};
-  const char *cgroup_keys_v2[] = {"", "memory", NULL};
-  const char **cgroup_keys =
-      ((g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) ==
-       CGROUPV1_COMPATIBILITY_MODE) ? cgroup_keys_v1 : cgroup_keys_v2;
-  for (int i = 0; cgroup_keys[i] != NULL; i++) {
+  self_cgroup_ensure(self);
+  for (unsigned i = 0; i < CGROUP_KEY_SLOTS && self->keys[i] != NULL; i++) {
     char pid_cgroup[CGROUP_LINE_MAX];
-    if (read_cgroup(fp, cgroup_keys[i], pid_cgroup, sizeof(pid_cgroup)) != 0) {
+    if (read_cgroup(fp, self->keys[i], pid_cgroup, sizeof(pid_cgroup)) != 0) {
       continue;
     }
-    // cgroupns=private
-    // It is generally the root directory, and if not, the following precise comparison will be made.
-    // eg. cgroupv2: 0::/
-    //     cgroupv1: 12:memory:/
-    if (pid_cgroup[0] == '/' && pid_cgroup[1] == '\0') {
-      ret = 0;
-      goto DONE;
-    }
-    if (!self_fp) { // Ensure to only open once.
-      self_fp = open_fp(PID_SELF_CGROUP_PATH);
-      if (!self_fp) {
-        goto DONE;
-      }
-    }
-    char self_cgroup[CGROUP_LINE_MAX];
-    if (read_cgroup(self_fp, cgroup_keys[i], self_cgroup, sizeof(self_cgroup)) != 0) {
+    if (!self->resolved[i]) {
+      /* The pid has a path for this key but we have none to compare it
+       * against. Try the next key rather than guess. */
       continue;
     }
     /* The pid is ours when its cgroup is ours or sits below it. The comparison
@@ -2318,25 +2297,24 @@ int check_device_pid_in_proc_cgroup_path(unsigned int device_pid, const char *pi
      * decision instead of a copy of it. Every cgroup-version and
      * cgroupns-mode shape it has to handle is documented on that function,
      * with the real paths each one produces. */
-    if (cgroup_path_is_ours(self_cgroup, pid_cgroup)) {
+    if (cgroup_path_is_ours(self->paths[i], pid_cgroup)) {
       ret = 0;
     }
-    LOGGER(DETAIL, "\ncontainer process cgroup: %s\ndevice process cgroup: %s", self_cgroup, pid_cgroup);
+    LOGGER(DETAIL, "\ncontainer process cgroup: %s\ndevice process cgroup: %s",
+           self->paths[i], pid_cgroup);
     // Arriving here means that the cgroup path above has been successfully extracted according to the
     // current cgroup mode, and should not continue to attempt in the next loop.
     break;
   }
-DONE:
-  if (self_fp) fclose(self_fp);
-  if (fp) fclose(fp);
+  fclose(fp);
   return ret;
 }
 
 // Check if the device PID is the host PID of the current container.
-int check_device_pid_in_host_cgroup_container(unsigned int device_pid) {
+int check_device_pid_in_host_cgroup_container(unsigned int device_pid, self_cgroup_t *self) {
   char host_pid_path[PATH_MAX];
   snprintf(host_pid_path, sizeof(host_pid_path), HOST_PROC_CGROUP_PID_PATH, device_pid);
-  return check_device_pid_in_proc_cgroup_path(device_pid, host_pid_path);
+  return check_device_pid_in_proc_cgroup_path(device_pid, host_pid_path, self);
 }
 
 static int int_compare(const void *a, const void *b) {
@@ -2369,7 +2347,7 @@ int check_device_pid_in_ordered_container_pids(unsigned int device_pid, const in
   return found ? 0 : -1;
 }
 
-int check_device_pid_in_local_container_pid(unsigned int device_pid) {
+int check_device_pid_in_local_container_pid(unsigned int device_pid, self_cgroup_t *self) {
   if (device_pid == 0) {
     return -1;
   }
@@ -2389,7 +2367,7 @@ int check_device_pid_in_local_container_pid(unsigned int device_pid) {
     char pid_cgroup_path[PATH_MAX];
     snprintf(pid_cgroup_path, sizeof(pid_cgroup_path), PID_CGROUP_PATH, device_pid);
     // Detect using cgroupv2 and cgroupv1 respectively, and return 0 if one of them is successful.
-    return check_device_pid_in_proc_cgroup_path(device_pid, pid_cgroup_path);
+    return check_device_pid_in_proc_cgroup_path(device_pid, pid_cgroup_path, self);
   }
 
   /* Confirmed ours: the only question left is whether it is on the GPU.
@@ -2455,6 +2433,11 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
   unsigned int i;
   int matchOpenKernel = 0;
   int openKernelMode = (g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE;
+  /* Read once for this whole device query instead of once per pid. Lazily
+   * loaded, so a mode that never consults cgroups pays nothing. */
+  self_cgroup_t self_cg;
+  self_cgroup_init(&self_cg, (g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) ==
+                                 CGROUPV1_COMPATIBILITY_MODE);
 
   if (size_on_device == 0) {
     // If there are no processes running on the device, quickly skip them.
@@ -2479,7 +2462,7 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
         LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         matchClientMode = 1;
         *used_memory += pids_on_device[i].usedGpuMemory;
-      } else if (!matchClientMode && openKernelMode && check_device_pid_in_local_container_pid(pids_on_device[i].pid) == 0) {
+      } else if (!matchClientMode && openKernelMode && check_device_pid_in_local_container_pid(pids_on_device[i].pid, &self_cg) == 0) {
         LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         matchOpenKernel = 1;
         *used_memory += pids_on_device[i].usedGpuMemory;
@@ -2489,11 +2472,11 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
              (g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) == CGROUPV1_COMPATIBILITY_MODE) {
     int matchCGroupMode = 0;
     for (i = 0; i < size_on_device; i++) {
-      if (!matchOpenKernel && check_device_pid_in_host_cgroup_container(pids_on_device[i].pid) == 0) {
+      if (!matchOpenKernel && check_device_pid_in_host_cgroup_container(pids_on_device[i].pid, &self_cg) == 0) {
         LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         matchCGroupMode = 1;
         *used_memory += pids_on_device[i].usedGpuMemory;
-      } else if (!matchCGroupMode && openKernelMode && check_device_pid_in_local_container_pid(pids_on_device[i].pid) == 0) {
+      } else if (!matchCGroupMode && openKernelMode && check_device_pid_in_local_container_pid(pids_on_device[i].pid, &self_cg) == 0) {
         LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         matchOpenKernel = 1;
         *used_memory += pids_on_device[i].usedGpuMemory;
@@ -2501,7 +2484,7 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
     }
   } else if (openKernelMode) {
     for (i = 0; i < size_on_device; i++) {
-      if (check_device_pid_in_local_container_pid(pids_on_device[i].pid) == 0) {
+      if (check_device_pid_in_local_container_pid(pids_on_device[i].pid, &self_cg) == 0) {
         LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         matchOpenKernel = 1;
         *used_memory += pids_on_device[i].usedGpuMemory;
@@ -2892,6 +2875,11 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
   int i;
   int matchOpenKernel = 0;
   int openKernelMode = (g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE;
+  /* Read once for this whole device query instead of once per pid. Lazily
+   * loaded, so a mode that never consults cgroups pays nothing. */
+  self_cgroup_t self_cg;
+  self_cgroup_init(&self_cg, (g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) ==
+                                 CGROUPV1_COMPATIBILITY_MODE);
 
   if (processes_num == 0) {
     // If there are no processes running on the device, quickly skip them.
@@ -2935,7 +2923,7 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
             matchClientMode = 1;
             top_result->user_current += sm_util + codec_util;
             current_processes_num++;
-          } else if (!matchClientMode && openKernelMode && check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
+          } else if (!matchClientMode && openKernelMode && check_device_pid_in_local_container_pid(processes_sample[i].pid, &self_cg) == 0) {
             matchOpenKernel = 1;
             top_result->user_current += sm_util + codec_util;
             current_processes_num++;
@@ -2953,11 +2941,11 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
         codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
         codec_util = CODEC_NORMALIZE(codec_util);
         top_result->sys_current += sm_util + codec_util;
-        if (!matchOpenKernel && check_device_pid_in_host_cgroup_container(processes_sample[i].pid) == 0) {
+        if (!matchOpenKernel && check_device_pid_in_host_cgroup_container(processes_sample[i].pid, &self_cg) == 0) {
           matchCGroupMode = 1;
           top_result->user_current += sm_util + codec_util;
           current_processes_num++;
-        } else if (!matchCGroupMode && openKernelMode && check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
+        } else if (!matchCGroupMode && openKernelMode && check_device_pid_in_local_container_pid(processes_sample[i].pid, &self_cg) == 0) {
           matchOpenKernel = 1;
           top_result->user_current += sm_util + codec_util;
           current_processes_num++;
@@ -2972,7 +2960,7 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
         codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
         codec_util = CODEC_NORMALIZE(codec_util);
         top_result->sys_current += sm_util + codec_util;
-        if (check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
+        if (check_device_pid_in_local_container_pid(processes_sample[i].pid, &self_cg) == 0) {
           matchOpenKernel = 1;
           top_result->user_current += sm_util + codec_util;
           current_processes_num++;

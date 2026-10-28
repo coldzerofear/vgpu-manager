@@ -26,6 +26,10 @@ extern int split_str(const char *line, char *key, size_t key_size,
  * per key would cost a second fopen on a per-PID path. */
 extern int read_cgroup(FILE *fp, const char *cgroup_key,
                        char *cgroup_value, size_t value_size);
+/* The per-device-query snapshot of our own cgroup path. It replaced a per-pid
+ * read of /proc/self/cgroup; see self_cgroup_t in include/hook.h. */
+extern void self_cgroup_init(self_cgroup_t *self, int cgroup_v1);
+extern void self_cgroup_ensure(self_cgroup_t *self);
 
 static int failures = 0;
 
@@ -304,6 +308,59 @@ static void test_read_cgroup_rejects_bad_arguments(void) {
   unlink(tmpl);
 }
 
+/* The snapshot: key order per cgroup version, one read, idempotent.
+ *
+ * The key ORDER is the part worth pinning. It lives here now rather than in
+ * cuda_hook.c, which the no-GPU tests cannot reach, and getting it backwards
+ * on a cgroup v1 host both costs a wasted full rescan of the file and lets a
+ * degenerate unified line decide ownership. */
+static void test_self_cgroup_snapshot(void) {
+  self_cgroup_t s;
+
+  self_cgroup_init(&s, 1);
+  CHECK(s.keys[0] != NULL && strcmp(s.keys[0], "memory") == 0,
+        "cgroup v1 must ask the memory hierarchy first, got '%s'",
+        s.keys[0] ? s.keys[0] : "(null)");
+  CHECK(s.keys[1] != NULL && s.keys[1][0] == '\0',
+        "cgroup v1 must keep the unified line as the fallback");
+  CHECK(s.keys[CGROUP_KEY_SLOTS] == NULL, "the key list must be NULL-terminated");
+  CHECK(s.loaded == 0, "init must not read anything -- the load is lazy");
+  CHECK(s.resolved[0] == 0 && s.resolved[1] == 0, "init must leave nothing resolved");
+
+  self_cgroup_init(&s, 0);
+  CHECK(s.keys[0] != NULL && s.keys[0][0] == '\0',
+        "cgroup v2 must ask the unified line first");
+  CHECK(s.keys[1] != NULL && strcmp(s.keys[1], "memory") == 0,
+        "cgroup v2 must keep the memory hierarchy as the fallback");
+
+  /* Against this machine's real /proc/self/cgroup. At least one key has to
+   * resolve on any live Linux: a v2 host answers "", a v1 host answers
+   * "memory", a hybrid host answers both. */
+  self_cgroup_ensure(&s);
+  CHECK(s.loaded == 1, "ensure must mark the snapshot loaded");
+  CHECK(s.resolved[0] || s.resolved[1],
+        "at least one cgroup key must resolve against /proc/self/cgroup");
+  for (unsigned i = 0; i < CGROUP_KEY_SLOTS; i++) {
+    if (s.resolved[i]) {
+      CHECK(s.paths[i][0] == '/', "a resolved path must be absolute, got '%s'", s.paths[i]);
+    }
+  }
+
+  /* Idempotent: a second ensure() must not disturb what the first read, which
+   * is what makes it safe for every pid in the loop to call it. */
+  char first[CGROUP_LINE_MAX];
+  unsigned keep = s.resolved[0] ? 0 : 1;
+  snprintf(first, sizeof(first), "%s", s.paths[keep]);
+  self_cgroup_ensure(&s);
+  CHECK(strcmp(first, s.paths[keep]) == 0,
+        "a second ensure() changed the snapshot: '%s' -> '%s'", first, s.paths[keep]);
+
+  /* NULL must be inert, not a crash: the caller hands this pointer to every
+   * pid in the loop. */
+  self_cgroup_init(NULL, 1);
+  self_cgroup_ensure(NULL);
+}
+
 int main(void) {
   test_oversized_value_is_refused();
   test_real_path_round_trips();
@@ -313,6 +370,7 @@ int main(void) {
   test_zero_sized_buffers();
   test_read_cgroup_reads_a_real_file();
   test_hybrid_unified_line_can_degenerate();
+  test_self_cgroup_snapshot();
   test_read_cgroup_rejects_bad_arguments();
 
   if (failures) {

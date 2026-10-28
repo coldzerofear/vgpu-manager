@@ -782,6 +782,80 @@ int read_cgroup(FILE *fp, const char *cgroup_key, char *cgroup_value, size_t val
   return -1;
 }
 
+/* Which cgroup key to ask first, and why the order is load-bearing on v1.
+ *
+ * "" matches the cgroup v2 unified line ("0::<path>"); "memory" matches the v1
+ * memory hierarchy. Asking "" first is right on a v2 host, where it is the
+ * only line there is.
+ *
+ * On a cgroup v1 host the unified line may still be present -- systemd's
+ * hybrid layout mounts cgroup2 alongside the v1 hierarchies -- but nothing
+ * guarantees the CONTAINER has a group of its own in it: that is the runtime's
+ * choice, not ours. Measured on a hybrid host (Ubuntu 24.04,
+ * systemd.unified_cgroup_hierarchy=0): runc does give each container its own
+ * "0::/docker/<id>", so the unified line is usable there. But where that group
+ * is absent the line degenerates to a path every container shares, or to "/",
+ * and then this check reads the same string for a sibling container as for us
+ * and claims its process as ours -- over-counting, which throttles the
+ * container against memory it does not hold. Reproduced by placing two
+ * containers in one unified group: "" claimed the sibling, "memory" rejected
+ * it.
+ *
+ * The memory hierarchy carries the per-container path in every v1 layout, so
+ * when the manager has told us this is a v1 host, ask it first and keep "" as
+ * the fallback. The order also saves a whole wasted pass: read_cgroup()
+ * rewinds and rescans per call, and on a 14-line v1 file the "" key scans the
+ * lot before failing -- measured 1660 ns against 297 ns for memory-first.
+ *
+ * On a legacy v1 layout (cgroup2 never mounted) there is no "0::" line at all
+ * -- the kernel skips the default root unless cgrp_dfl_visible -- so "" simply
+ * finds nothing and the order is unobservable. It is the hybrid layout that
+ * makes it matter. */
+void self_cgroup_init(self_cgroup_t *self, int cgroup_v1) {
+  if (self == NULL) {
+    return;
+  }
+  memset(self, 0, sizeof(*self));
+  if (cgroup_v1) {
+    self->keys[0] = "memory";
+    self->keys[1] = "";
+  } else {
+    self->keys[0] = "";
+    self->keys[1] = "memory";
+  }
+  self->keys[CGROUP_KEY_SLOTS] = NULL;
+}
+
+/* Reads /proc/self/cgroup once, filling in the path for each key.
+ *
+ * Deliberately not reported as a hard failure: a key we could not resolve just
+ * means the caller skips that key and tries the next one, which is the same
+ * thing the per-call read used to do when it came back empty. A snapshot with
+ * nothing resolved makes every comparison answer "not ours", which is the
+ * under-count direction -- but the alternative, claiming pids we cannot check,
+ * over-counts, and /proc/self/cgroup being unreadable means something is wrong
+ * with this container rather than with the pid under test. */
+void self_cgroup_ensure(self_cgroup_t *self) {
+  if (self == NULL || self->loaded) {
+    return;
+  }
+  self->loaded = 1;
+  /* "e" = O_CLOEXEC, prevent fork inheritance */
+  FILE *fp = fopen(PID_SELF_CGROUP_PATH, "re");
+  if (fp == NULL) {
+    LOGGER(WARNING, "could not read %s: %s -- cgroup-based ownership checks "
+                    "will answer \"not ours\" for every pid this call",
+           PID_SELF_CGROUP_PATH, strerror(errno));
+    return;
+  }
+  for (unsigned i = 0; i < CGROUP_KEY_SLOTS && self->keys[i] != NULL; i++) {
+    if (read_cgroup(fp, self->keys[i], self->paths[i], sizeof(self->paths[i])) == 0) {
+      self->resolved[i] = 1;
+    }
+  }
+  fclose(fp);
+}
+
 int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids) {
   if (!file_path || !pids || !pids_size) {
     LOGGER(ERROR, "invalid NULL parameter");

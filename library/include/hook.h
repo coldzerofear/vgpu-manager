@@ -122,6 +122,39 @@ extern "C" {
 #define CGROUP_LINE_MAX 4096
 #define CGROUP_KEY_MAX  256
 
+/* "My own cgroup path", read once per device query instead of once per pid.
+ *
+ * check_device_pid_in_proc_cgroup_path() runs per pid inside the device lock
+ * and used to open and read /proc/self/cgroup on every call. A
+ * `pid_cgroup == "/"` short-circuit hid that cost for our own pids under
+ * cgroupns=private, where our processes do render as "/" -- but the same
+ * string is what a process sitting in the HOST root cgroup renders as under
+ * cgroupns=host, so the short-circuit claimed it. That over-counts, and it is
+ * reachable on cgroup v1 nodes: containerd gives containers the host cgroup
+ * namespace there, which a real-hardware matrix hit in all twelve CRI
+ * configurations (162 of 2338 judgements).
+ *
+ * Dropping the short-circuit on its own doubled the per-pid cost -- measured
+ * 4524 -> 9155 ns on cgroup v2 and 2924 -> 5771 ns on v1. Hoisting the read
+ * into this snapshot makes it free (4523 / 2849 ns) and also halves what
+ * every pid that is NOT ours already paid, since the short-circuit never
+ * covered those.
+ *
+ * Stack-local by design: a caller declares one per loop and hands out a
+ * pointer. Two threads of one process can both be inside the device lock
+ * (fcntl byte-range locks are per-process), so a file-static would race.
+ * Loaded lazily on first use so a mode that never consults cgroups -- SESSION,
+ * or a device with no processes on it -- pays nothing. */
+#define CGROUP_KEY_SLOTS 2
+typedef struct {
+  /* NULL-terminated, and the ORDER matters on cgroup v1; see
+   * self_cgroup_init() in src/util.c for which order and why. */
+  const char *keys[CGROUP_KEY_SLOTS + 1];
+  char paths[CGROUP_KEY_SLOTS][CGROUP_LINE_MAX];
+  unsigned char resolved[CGROUP_KEY_SLOTS];
+  unsigned char loaded;
+} self_cgroup_t;
+
 /* Mode the library relaxes its own shared-state files to after creating them.
  * The plugin already creates the enclosing directories 0777 so that a
  * workload running as any uid can populate them; without this the intent

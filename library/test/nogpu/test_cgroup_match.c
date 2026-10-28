@@ -52,6 +52,9 @@ static int failures = 0;
 #define OURS_V2   "/system.slice/docker-a7a10e192cb572ea.scope"
 #define OTHER_V2  "/system.slice/docker-9d3f61a53e8088d3.scope"
 #define OURS_V1   "/docker/3962044a72186484"
+/* A real kubelet path, systemd driver + containerd, shortened for width. */
+#define K8S_SELF  "/kubepods.slice/kubepods-besteffort.slice/" \
+                  "kubepods-besteffort-podm1.slice/cri-containerd-2a4801eee454.scope"
 #define OTHER_V1  "/docker/7dfb32ceb70e11fe"
 
 static void test_captured_matrix(void) {
@@ -69,6 +72,18 @@ static void test_captured_matrix(void) {
     {"/", "/../../user.slice/user-0.slice/session-18.scope", 0, "v2 private, host process"},
     {"/", "/../docker-aa2dc72018ddf4db.scope",   0, "v2 private, sibling container"},
     {"/", "/init.scope",                         1, "no \"..\", so inside our root"},
+
+    /* ---- the shape that made the pid=="/" short-circuit wrong ----
+     * A process in the HOST root cgroup renders as "/" under cgroupns=host.
+     * The short-circuit used to return "ours" on that string alone; a
+     * real-hardware matrix hit it in all twelve CRI configurations on cgroup
+     * v1, because containerd gives containers the host cgroup namespace
+     * there. These two rows are what makes removing it safe: the comparison
+     * answers the private case ("/" is OUR namespace root) and rejects the
+     * host case, from the same input the short-circuit saw. */
+    {"/", "/",                                   1, "cgroupns=private: \"/\" IS our root"},
+    {K8S_SELF, "/",                              0, "cgroupns=host: \"/\" is the HOST root cgroup"},
+    {OURS_V1, "/",                               0, "v1 host ns: a pid in no memory cgroup reads \"/\""},
 
     /* ---- cgroupns=host: our own cgroup is a real path ---- */
     {OURS_V2, OURS_V2,                           1, "v2 host, our own process"},
@@ -120,8 +135,34 @@ static void test_root_rejects_only_on_dotdot(void) {
         "dots inside a name are not an escape");
 }
 
+/* The one case the pid=="/" short-circuit used to get right by accident.
+ *
+ * Under cgroupns=private our container's cgroup root renders as "/". If our
+ * OWN process has been moved into a child cgroup -- which needs write access
+ * to cgroupfs, so privileged or an explicitly writable mount -- then self is
+ * "/x" and a sibling process still at the container root reads "/". The
+ * prefix test rejects it, so that process is not counted: the under-count
+ * direction.
+ *
+ * It is left rejected on purpose. The same string "/" is what a HOST root
+ * cgroup process renders as under cgroupns=host, and claiming it there
+ * over-counts -- which is measured and reachable on cgroup v1 nodes, while
+ * this case needs cgroup write access inside the container. Telling the two
+ * apart needs to know whether "/" means our namespace root or the host root,
+ * and no string rule can decide that; see docs/library_cgroup_ownership_boundaries.md.
+ * This test exists so the trade-off is recorded rather than rediscovered. */
+static void test_self_in_child_cgroup_underreports_root(void) {
+  CHECK(cgroup_path_is_ours("/x", "/") == 0,
+        "known limitation: self in a child cgroup does not claim the container root");
+  CHECK(cgroup_path_is_ours("/x", "/x") == 1, "self's own cgroup is still ours");
+  CHECK(cgroup_path_is_ours("/x", "/x/deeper") == 1, "below self is still ours");
+  CHECK(cgroup_path_is_ours("/x", "/y") == 0,
+        "known limitation: a sibling child cgroup is not claimed either");
+}
+
 int main(void) {
   test_captured_matrix();
+  test_self_in_child_cgroup_underreports_root();
   test_null_is_not_ours();
   test_root_rejects_only_on_dotdot();
 
