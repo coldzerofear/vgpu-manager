@@ -65,6 +65,7 @@ extern int split_str(const char *line, char *key, size_t key_size, char *value, 
 extern int read_cgroup(FILE *fp, const char *cgroup_key, char *cgroup_value, size_t value_size);
 extern void self_cgroup_init(self_cgroup_t *self, int cgroup_v1);
 extern void self_cgroup_ensure(self_cgroup_t *self);
+extern int self_cgroup_ns_is_private(self_cgroup_t *self, unsigned slot);
 
 /* SM throttle controller selection (see util.c). Defaults preserve stock
  * behaviour when env is unset. */
@@ -2261,9 +2262,10 @@ static FILE *open_fp(const char *path) {
  * renders as. The real-hardware matrix caught it in all twelve CRI
  * configurations on cgroup v1, because containerd gives containers the host
  * cgroup namespace there: 162 of 2338 judgements claimed a host process.
- * cgroup_path_is_ours() answers the private case correctly on its own
- * (self "/" is the namespace root, so the test is the absence of a ".."
- * component), which is why the short-circuit could simply go.
+ * cgroup_path_match() answers the private case correctly on its own (self "/"
+ * is the namespace root, so the test is the absence of a ".." component), and
+ * returns NEEDS_NS_MODE for the shapes where the strings genuinely cannot
+ * decide -- which is why the short-circuit could simply go.
  *
  * What the short-circuit really bought was skipping the per-pid read of
  * /proc/self/cgroup; `self` now carries that, read once per device query. See
@@ -2297,8 +2299,24 @@ int check_device_pid_in_proc_cgroup_path(unsigned int device_pid, const char *pi
      * decision instead of a copy of it. Every cgroup-version and
      * cgroupns-mode shape it has to handle is documented on that function,
      * with the real paths each one produces. */
-    if (cgroup_path_is_ours(self->paths[i], pid_cgroup)) {
-      ret = 0;
+    switch (cgroup_path_match(self->paths[i], pid_cgroup)) {
+      case CGROUP_MATCH_OURS:
+        ret = 0;
+        break;
+      case CGROUP_MATCH_NEEDS_NS_MODE:
+        /* The pid is an ancestor or a sibling of our own cgroup with no ".."
+         * to say it left our namespace root. Under cgroupns=private the
+         * namespace root IS this container's cgroup -- verified on a real CRI
+         * Pod, where sibling containers and the sandbox all render with ".."
+         * -- so anything still inside it is ours wherever our own process
+         * happens to sit. Under cgroupns=host it is somebody else's. */
+        if (self_cgroup_ns_is_private(self, i)) {
+          ret = 0;
+        }
+        break;
+      case CGROUP_MATCH_FOREIGN:
+      default:
+        break;
     }
     LOGGER(DETAIL, "\ncontainer process cgroup: %s\ndevice process cgroup: %s",
            self->paths[i], pid_cgroup);

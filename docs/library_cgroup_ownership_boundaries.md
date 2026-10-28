@@ -297,7 +297,7 @@ a=8 / b=15 / c=22）。用原样复现的 `device_pid_in_same_container()` 逐�
 | 容器入口 | **真实 CRI（containerd 2.2.1 CRI 插件）** / Docker 29.1 | 两种运行时都跑，判据不依赖任一运行时 |
 | cgroup driver | systemd / cgroupfs | containerd `SystemdCgroup` + 对应的 `cgroup_parent` 形态 |
 | cgroupns | private / host | CRI 不暴露此开关（containerd 自己决定：v2→private、v1→host），用 Docker `--cgroupns` 显式扫 |
-| pid ns | CONTAINER（默认）/ POD（`shareProcessNamespace`）/ NODE（`hostPID`） | CRI `namespace_options.pid`；Docker `--pid` |
+| pid ns | CONTAINER / POD（`shareProcessNamespace`）/ NODE（`hostPID`） | CRI `namespace_options.pid`；Docker `--pid`。**见 §9.8 的更正**：CRI 一侧我只设了 **sandbox** 的选项，容器自己的 `security_context` 留空（CRI 默认 = POD），所以 CRI 的 CONTAINER / POD 两列实际跑的都是"容器加入 sandbox 的 pid ns"，即 `shareProcessNamespace` 语义 |
 | ipc ns | POD / NODE（`hostIPC`） | CRI `namespace_options.ipc`；Docker `--ipc` |
 | 子 cgroup 嵌套 | 判定方在容器 cgroup 根 / 在子 cgroup | 特权容器内 `mkdir` + 迁移 |
 | 嵌套容器 | DinD（`docker:dind` 内再起容器） | 特权容器 |
@@ -469,3 +469,283 @@ self 原值从同配置、同判定身份的其它行恢复）：
 | B2（判定方在子 cgroup） | 漏算 | privileged + 容器内建 cgroup 并迁移；且只影响 CGROUPV1/V2 主判据（openKernel 链里 ns 腿先答 YES） | 记录 |
 | B3 / B4 / B5 | 漏算 | 宿主侧搬运 / rw 绑挂宿主 cgroupfs / 刻意 unshare / 刻意迁出子树，均需特权 | 记录 |
 | NVML 利用率接口不过滤非本容器条目 | 过算风险 | CUDA 13+；取决于它对不可翻译的 pid 填什么值 | 待 GPU 节点实测（§7 B6） |
+
+## 11 "判定方在子 cgroup、目标在容器 cgroup 根"：实测与加固方案
+
+§10.2 里提到这一格矩阵没覆盖到，这里补上。
+
+### 11.1 k8s 下的三条产生途径
+
+都需要**容器 cgroup 的写权限**：
+
+1. `privileged: true` —— 容器内 `/sys/fs/cgroup` 可写（非特权实测是 ro）。
+2. **`hostPath: /sys/fs/cgroup` 且未写 `readOnly: true`** —— 不需要 privileged，属常见误配
+   （监控类 DaemonSet 常挂此目录）。
+3. **DinD on cgroup v2** —— 最现实的一条，且 §9.6 的 DinD 漏算就是它的一个实例：
+   v2 的 "no internal process" 规则逼 dockerd 把自己迁进 `/init`，库所在进程于是落在子 cgroup 里。
+
+### 11.2 实测（真实 CRI 路径，containerd + kubelet 风格 cgroup_parent）
+
+容器 a 里一个 root 子进程和一个 uid 1000 子进程都留在容器 cgroup 根；判定方用
+`nsenter -t <pid> -m -p -i -u -C` 真正进到子 cgroup `/x`（`-C` 必须带，否则渲染不是 ns 相对的）。
+
+| 判定方位置 | 判定方身份 | 目标 | ns 腿 | cgroup 腿 | 结论 |
+|---|---|---|---|---|---|
+| 容器 cgroup 根（对照） | root | root 进程 | YES | 1 | ✅ |
+| 容器 cgroup 根 | root | uid1000 进程 | UNK | 1 | ✅ |
+| 容器 cgroup 根 | uid1000 | root 进程 | UNK | 1 | ✅ |
+| 子 cgroup `/x` | root | root 进程 | YES | **0** | ns 腿救回 ✅ |
+| 子 cgroup `/x` | root | uid1000 进程 | YES | **0** | ns 腿救回 ✅ |
+| **子 cgroup `/x`** | **uid1000** | **root 进程** | **UNK** | **0** | ❌ **漏算** |
+| 子 cgroup `/x` | uid1000 | uid1000 进程 | YES | **0** | ns 腿救回 ✅ |
+
+`self=/x`、`pid=/`、`cgL=0`、`cgH=0`。实际出错需要两个条件之一：**目标是跨 uid 进程**
+（ns 腿 UNKNOWN，只能交给 cgroup 腿），或 **openKernelMode 关闭**（CGROUPV1/V2 模式下
+cgroup 腿是唯一仲裁，上表四格全漏）。同 uid + openKernelMode 时 ns 腿先答 YES 救回。
+
+### 11.3 为什么不能让 manager 下发容器 cgroup 路径
+
+最自然的修法是让 Go 侧把容器的宿主侧 cgroup 路径下发（env），库拿它当锚点。但
+**device-plugin 的 `Allocate` 发生在容器创建之前，那时还没有 container id**，算不出容器
+cgroup 路径；只有 NRI / DRA 路径能做到。只下发 Pod 级路径会把同 Pod 兄弟容器算进来
+（过算），不可取。所以这条路只覆盖一半，不推荐。
+
+### 11.4 推荐方案：判别"是否处于 private cgroup namespace"，private 时锚定 `/`
+
+根因是锚点错了：拿 `self` 的路径当容器边界，而真正的边界是容器的 cgroup 根；`self`
+比它深时子树取小了。而 private 下容器的 cgroup 根就渲染成 `/`，且 §7 B7 已实测
+cgroupns 根就是容器自己的 cgroup。所以 private 一旦确立，判据就是"**路径里没有 `..`
+段**"，与 `self` 在哪无关 —— 这一格即被修掉。
+
+判别器（两次 `stat`，每进程一次，免权限，**仅 cgroup v2**）：
+
+```
+private  ⟺  /sys/fs/cgroup/cgroup.type 存在        (挂载根不是真正的 cgroup 根)
+        AND  目录 /sys/fs/cgroup<self 路径> 存在     (渲染是 ns 相对而非宿主绝对路径)
+```
+
+实测（cgroup v2 的全部可造形态）：
+
+| 环境 | `cgroup.type` | `/sys/fs/cgroup<self>` | 判别 | 期望 |
+|---|---|---|---|---|
+| 宿主自身 | 否 | 是 | 非 private | ✅ |
+| 非特权容器 cgroupns=private | 是 | 是 | **private** | ✅ |
+| 非特权容器 cgroupns=host | 否 | 是 | 非 private | ✅ |
+| 特权 private + self 在 `/x`（本格） | 是 | 是 | **private → 锚定 `/` → 修掉** | ✅ |
+| CRI（k8s 真实形态） | 是 | 是 | **private** | ✅ |
+
+两个条件都必要：`cgroup.type` 单独不够 —— cgroupns=host 却把容器子 cgroup 绑挂进来时
+它也存在；第二条堵住这一点，因为 host 下 `self` 是宿主绝对路径，在已扎在容器 cgroup 上
+的挂载里解析不出来。
+
+顺带修两处：B1 在 private 下继续正确（宿主根进程渲染 `/../..`，带 `..` → 排除）；
+**DinD 在 v2 上的 cgroup 腿也被修**（self=`/init`，锚定 `/`，内层 `/docker/<id>` 无 `..` → 计入）。
+
+不覆盖 cgroup v1：v1 没有 `cgroup.type`，而 containerd 在 v1 上用 cgroupns=host，那里
+"锚定 self"本来就对 —— 除了这一格，v1 上它仍留着。
+
+降级：`/sys/fs/cgroup` 未挂进容器时判别失败 → 退回今天的行为，不会变差。
+成本：每进程两次 `stat`（缓存），判据多一个布尔分支；相对 4.5 µs/pid 可忽略。
+
+**状态：待拍板，未实施。**
+
+## 12 探测源的选择（实测，替代 §11.4 的 `cgroup.type` 方案）
+
+§11.4 用 `/sys/fs/cgroup/cgroup.type` + `/sys/fs/cgroup<self>` 两次 `stat` 判别 private。
+它有两个毛病：只在 cgroup v2 成立（v1 没有 `cgroup.type`），而且必须凑两个条件才堵得住
+"cgroupns=host 却绑挂了容器子 cgroup"。改用**读宿主 init 的 cgroup**，一个条件、版本无关：
+
+```
+private  ⟺  宿主 init 的 cgroup 路径里有 ".." 段
+```
+
+`..` 段不可伪造（`mkdir ".."` 不可能），而 cgroupns=host 下任何路径都不会出现 `..`
+（没有边界可越，930 条记录无一例外）。
+
+### 12.1 两个候选探测源的实测对比
+
+`.host_proc` 的挂载条件只有一个：**非 client 模式**
+（`pkg/deviceplugin/vgpu/vnum_plugin.go` 与 `pkg/kubeletplugin/vgpu.go` 都是
+`if clientMode { registry } else { .host_proc }`）。所以**纯 openKernelMode 是挂的**，
+只有 CLIENT 模式没有。CLIENT 模式下只能退到容器本地 `/proc/1/cgroup`。
+
+| 环境 | 本地 pid 1 是谁 | 本地 `/proc/1/cgroup` | 本地判别 | `.host_proc/1/cgroup` | host_proc 判别 |
+|---|---|---|---|---|---|
+| CRI，容器级 pid 不写（= sandbox 的 ns） | `/pause` | `/../<sandbox-id>` | **private** ✅ | `/../../../../init.scope` | **private** ✅ |
+| CRI，sandbox pid=POD | `/pause` | `/../<sandbox-id>` | **private** ✅ | `/../../../../init.scope` | **private** ✅ |
+| CRI，sandbox pid=NODE(hostPID) | `/sbin/init` | `/../../../../init.scope` | **private** ✅ | 同左 | **private** ✅ |
+| **CRI，容器级 pid=CONTAINER（k8s 默认）** | 本容器自己的进程 | `/` | **无证据** ⚠ | `/../../../../init.scope` | **private** ✅ |
+| Docker cgroupns=private pid=own | 本容器自己的进程 | `/` | 无证据 ⚠ | `/../../init.scope` | **private** ✅ |
+| Docker cgroupns=private pid=shared | 另一容器的进程 | `/../docker-<ref>.scope` | **private** ✅ | `/../../init.scope` | **private** ✅ |
+| Docker cgroupns=private pid=host | `/sbin/init` | `/../../init.scope` | **private** ✅ | 同左 | **private** ✅ |
+| Docker cgroupns=host pid=own | 本容器自己的进程 | `/system.slice/docker-<self>.scope` | 无证据 → host ✅ | `/init.scope` | **host** ✅ |
+| Docker cgroupns=host pid=shared | 另一容器的进程 | `/system.slice/docker-<ref>.scope` | 无证据 → host ✅ | `/init.scope` | **host** ✅ |
+| Docker cgroupns=host pid=host | `/sbin/init` | `/init.scope` | 无证据 → host ✅ | `/init.scope` | **host** ✅ |
+
+两条结论：
+
+- **`.host_proc/1/cgroup` 双向可靠，且与 pid namespace 模式无关**。`.host_proc` 是宿主
+  `/proc` 的 bind mount，procfs 的 pid namespace 在挂载时固定为宿主的，所以 `.host_proc/1`
+  **永远是宿主 init**，不会变成 pause。10 种配置全部判对。
+- **本地 `/proc/1/cgroup` 是单向证据**：带 `..` ⇒ private（可信），不带 ⇒ 无结论。
+  担心的"探到 pod sandbox"实测是**有益而非有害**：sandbox 是兄弟容器，在我们的 cgroupns
+  根之外，渲染带 `..`，正是正确的 private 证据。而 cgroupns=host 的三种 pid 模式下**一次
+  都没有产生假 private**（没有 `..` 可产生）。
+  唯一拿不到证据的是 **k8s 默认的"每容器自己的 pid ns"**（pid 1 是本容器进程，渲染 `/`），
+  此时退回今天的行为。
+
+### 12.2 最终探测逻辑
+
+```
+1) 读 .host_proc/1/cgroup（非 CLIENT 模式一定在）
+     有 ".." 段 -> private ；无 -> host（权威，到此为止）
+2) 读不到（CLIENT 模式不挂）-> 读本地 /proc/1/cgroup
+     有 ".." 段 -> private ；无 -> 不作结论，按 host 走（= 今天的行为）
+```
+
+伪造方向：若有人用自己的 volumeMount 盖掉 `.host_proc` 伪造 private，后果是在 cgroupns=host
+下把外部进程算进自己 → 过算 → 自伤；伪造不出漏算。
+
+## 13 一处矩阵标注更正（§9.1 的 pid ns 维度）
+
+实测发现：CRI 一侧我只设置了 **sandbox** 的 `namespace_options.pid`，而容器自己的
+`linux.security_context` 留空 —— CRI 对容器的默认是 `POD`，于是容器一律加入 sandbox 的
+pid namespace。实测对照：
+
+| 容器级 `namespace_options.pid` | pid ns inode | 本地 pid 1 | 可见 pid 数 | `/proc/1/cgroup` |
+|---|---|---|---|---|
+| 不写（CRI 默认 = POD，我矩阵用的） | `pid:[4026532236]` | `/pause` | 6 | `/../<sandbox-id>` |
+| `1`（CONTAINER，**k8s 默认**） | `pid:[4026532238]` | 本容器自己的进程 | 5 | `/` |
+
+所以 §9 的 CRI 行里，`pid=CONTAINER` 与 `pid=POD` 两列实际跑的是同一种 pid namespace
+语义（容器共享 sandbox 的 ns，等价于 `shareProcessNamespace: true`）；**k8s 的默认形态
+（每容器自己的 pid namespace）没有被覆盖**。
+
+这不影响 §9 的结论，而且方向是保守的：每容器自己的 pid ns 时，容器本地 `/proc` 里**只有
+自己的进程**，本地那条腿根本不会被问到外部 pid（CUDA 13 之后 NVML 在容器内也只返回本
+命名空间的 pid）。也就是说矩阵跑的是更难的那一侧，更容易暴露问题。`.host_proc` 腿用的是
+宿主 pid，完全不受这个维度影响。
+
+## 14 双重兜底：两个探测源的开销实测与串联顺序
+
+### 14.1 开销（同机，-O2，20 万次；探测结果都缓存在 per-device-query 快照里）
+
+| 环境 | A = `cgroup.type` + `/sys/fs/cgroup<self>` 两次 stat | B = 读 init 的 cgroup（一次 open+read+解析） | 参考：单次 stat |
+|---|---|---|---|
+| 宿主（非 private） | **914 ns**（第一次 stat 就失败，短路） | 3435 ns | 894 ns |
+| 容器 cgroupns=private, self=`/` | 2478–3443 ns（两次 stat 都成功） | 3561–4486 ns | 1198–1750 ns |
+| 容器 cgroupns=host | **963 ns**（短路） | 4591 ns | 955 ns |
+
+A 在"非 private"时因为第一个 stat 就失败而短路，只要 ~0.9 µs；在 private 时两次都成功，
+约 2.5–3.4 µs，与 B 同量级。两者都是**每次设备查询一次**，而一次设备查询稳态 153 µs ——
+A 与 B 的差额最多约 3 µs ≈ 2%，且只在探测真正被触达的配置里发生（v2+private 的 k8s
+主路径是零次）。**所以 A/B 之间的取舍不该按开销定，要按健全性和简洁性定。**
+
+### 14.2 两种串联顺序
+
+- **A 先、B 兜底**：cgroup v1 上 `cgroup.type` 根本不存在，A 恒不成立，于是**每次都白付一次 A
+  再去付 B**（0.9 + 3.5 µs）。A 在 v1 上贡献为零。
+- **B 先、A 兜底（推荐）**：B 只在"`.host_proc` 读不到（CLIENT 模式）**且** 本地 `/proc/1`
+  没有 `..`（k8s 默认的每容器自己 pid ns）"时才不结论，A 只在这个口子里跑。常见路径的探测
+  成本就等于 B 单独的成本。
+
+"A 被 hostPath 覆盖怎么办"在 B 先的顺序下不成问题：A 被覆盖时 B 已经给出答案，根本不会
+问到 A。反过来说，B 先的顺序**同时具备两种保护** —— B 版本无关且双向可靠，A 专门补 B
+不可用的那个口子。
+
+### 14.3 最终三级链
+
+```
+1) .host_proc/1/cgroup      (非 CLIENT 模式一定挂)
+      有 ".." 段 -> private        无 ".." -> host(权威, 结束)      读不到 -> 下一级
+2) 本地 /proc/1/cgroup
+      有 ".." 段 -> private        无 ".." -> 不结论(pid ns 可能是私有的) -> 下一级
+3) cgroup.type 存在 且 /sys/fs/cgroup<self> 是目录
+      成立 -> private              否则 -> host (= 今天的行为)
+```
+
+各模式下实际触达次数：
+
+| 模式 | 第 1 级 | 第 2 级 | 第 3 级 | 该次设备查询的探测开销 |
+|---|---|---|---|---|
+| CGROUPV1 / CGROUPV2（含叠加 openKernel） | 命中 | 不执行 | 不执行 | B 一次，约 3.5–4.6 µs |
+| CLIENT + hostPID / shareProcessNamespace | 读不到 | 命中（`..`） | 不执行 | 约 3.5 µs |
+| CLIENT + k8s 默认 pid ns + cgroup v2 | 读不到 | 不结论 | 命中 | 约 7 µs |
+| CLIENT + k8s 默认 pid ns + cgroup v1 | 读不到 | 不结论 | 不成立 | 约 4.4 µs，退回今天的行为 |
+| **v2 + cgroupns=private（k8s 主路径）** | **根本不触达**（判据步骤①②就答完了） | — | — | **0** |
+
+### 14.4 A 必须是两条件版
+
+`cgroup.type` 单独不安全：它说的是"cgroupfs **挂载根**不是真正的 cgroup 根"，而我们要问的是
+"**cgroup namespace 根**是否在宿主根之下"——挂载和命名空间是两件事。cgroupns=host 却把容器
+子 cgroup 绑挂进来时，`cgroup.type` 也存在 → 假 private → 过算。第二个条件堵住它：host 下
+`self` 是宿主绝对路径，在已扎到子 cgroup 上的挂载里解析不出来。
+
+唯一的尖角：第二个条件要拼 `"/sys/fs/cgroup" + self`，而 self 最长 `CGROUP_LINE_MAX`(4096)，
+拼完可能超过 `PATH_MAX`。**截断必须判为"不成立"（fail closed）**，否则会往过算方向错。
+真实 k8s 路径约 190 字节，永远碰不到，但代码必须写对。
+
+## 15 加固已实施：三态判据 + 两级 cgroupns 判别
+
+### 15.1 判据改成三态（`include/cgroup_match.h`）
+
+```c
+typedef enum {
+  CGROUP_MATCH_FOREIGN       = 0,  /* 已定: 不是本容器的 */
+  CGROUP_MATCH_OURS          = 1,  /* 已定: 是本容器的 */
+  CGROUP_MATCH_NEEDS_NS_MODE = 2,  /* 字符串定不了, 需要 cgroupns 模式 */
+} cgroup_match_t;
+
+cgroup_path_match(self, pid):
+  0. self 为 NULL/空, 或 pid 不是绝对路径        -> FOREIGN
+  1. self == pid                                 -> OURS      (k8s 容器唯一形状, 6.8 ns)
+  2. pid 带 ".." 段                               -> FOREIGN   (必须在 3 之前)
+  3. pid 等于 self 或在其之下(self=="/" 即任意)   -> OURS
+  4. 否则(祖先/兄弟, 且无 "..")                   -> NEEDS_NS_MODE
+```
+
+步骤 2 必须先于 3：`self == "/"` 时任何绝对路径都前缀匹配，包括 `/../x`。
+步骤 0 的"绝对路径"守卫是新加的：`read_cgroup()` 在畸形行上可能回出空串，而空串在
+步骤 3 里会被 `self == "/"` 读成"在我们根之下"——那等于拿解析失败去认领一个 pid。
+
+这个顺序也是开销的关键：**cgroupns=private 下本容器进程在步骤 1 结束、外部进程在步骤 2
+结束，步骤 4 永不触达**，所以 k8s 主路径的判别探测次数是 0。
+
+### 15.2 判别器（`src/util.c`，两级）
+
+```c
+int cgroup_ns_private_from_init(const char *init_cgroup_path, const char *key);  /* 1/0/-1 */
+int self_cgroup_ns_is_private(self_cgroup_t *self, unsigned slot);
+```
+
+- 第 1 级 `.host_proc/1/cgroup`（宿主 init）：双向权威。**它的可用性与"cgroup 腿是主判据"
+  是同一个条件**——manager 在 client gate 关闭时才挂 `.host_proc`，而同一个 gate 关闭时
+  才会下发 CGROUPV1/CGROUPV2 而不是 CLIENT。procfs 的 pid namespace 在挂载时固定为宿主的，
+  所以 `.host_proc/1` 不会变成 Pod 的 pause 进程。
+- 第 2 级 本地 `/proc/1/cgroup`（CLIENT 模式）：只接受正证据。实测本地 pid 1 在
+  `shareProcessNamespace` 下是 pause（`/../<sandbox-id>`，兄弟容器、在我们根之外，正是
+  正确证据）、在 `hostPID` 下是宿主 init，而在 k8s 默认的每容器 pid ns 下是我们自己的
+  init（渲染 `/`，证明不了任何事）。所以"没有 `..`"在这一级不作结论。
+- 两级都拿不到证据 → 按 host 走，即探测存在之前的行为。
+
+结果缓存在**调用方栈上的 `self_cgroup_t`**（新增 `signed char ns_private[2]`）：零全局状态
+⇒ 不涉及 fork 安全、不需要原子操作、不需要 atfork。
+
+### 15.3 退化验证（三组，每组都必须让测试失败）
+
+| 注入的退化 | 被哪个用例抓住 |
+|---|---|
+| `..` 检查移到前缀判定之后 | `test_child_cgroup_shapes_need_the_ns_mode`：`("/x", "/../y")` 应为 FOREIGN |
+| 歧义一律判 FOREIGN（= 不修这一格） | `test_captured_matrix` **8 处**：`(K8S_SELF, "/")`、`(OURS_V1, "/")`、兄弟容器、宿主进程…… |
+| 判别器恒答 host | `test_ns_mode_probe` **3 处**：v2 private、v2 private 四级、v1 hybrid private |
+
+### 15.4 这次修掉的
+
+| 项 | 改动前 | 改动后 |
+|---|---|---|
+| §11 那一格（self 在子 cgroup、目标在容器 cgroup 根） | 漏算（已实测） | ✅ private 下修掉 |
+| B2（self 在子 cgroup、目标在兄弟子 cgroup） | 漏算 | ✅ private 下修掉 |
+| DinD 的 cgroup 腿（v2，self=`/init`） | 漏算 | ✅ 修掉（锚定命名空间根） |
+| B1（宿主根 cgroup 进程） | 已由 `1214809` 修 | ✅ 继续正确（步骤 2 / 判别器答 host） |
+| v1 + cgroupns=host 下的那一格 | 漏算 | ❌ 不修（判别器答 host→锚定 self；标准 k8s Pod 不具备触发条件） |
+| DinD 的 ns 腿（`ns=NO` 是终态） | 漏算 | ❌ 不动 |

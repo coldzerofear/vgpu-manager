@@ -116,6 +116,12 @@ extern "C" {
 
 #define HOST_PROC_CGROUP_PID_PATH (VGPU_MANAGER_PATH "/.host_proc/%u/cgroup")
 
+/* The HOST's init, and this container's local pid 1. Both are read to settle
+ * CGROUP_MATCH_NEEDS_NS_MODE; see self_cgroup_ns_is_private() in src/util.c
+ * for which one answers in which mode and why. */
+#define HOST_PROC_INIT_CGROUP_PATH (VGPU_MANAGER_PATH "/.host_proc/1/cgroup")
+#define PID_INIT_CGROUP_PATH "/proc/1/cgroup"
+
 /* A systemd+containerd cgroup path is ~190 bytes on its own and may nest
  * deeper, so buffers holding one are sized for a path rather than a guess.
  * The old 128-byte guess overflowed by 64 bytes on a stock Kubernetes node. */
@@ -153,6 +159,12 @@ typedef struct {
   char paths[CGROUP_KEY_SLOTS][CGROUP_LINE_MAX];
   unsigned char resolved[CGROUP_KEY_SLOTS];
   unsigned char loaded;
+  /* Whether we are in a private cgroup namespace, per key: -1 not probed yet,
+   * 0 no (or could not tell), 1 yes. Probed at most once per key per device
+   * query, and only when the strings came back CGROUP_MATCH_NEEDS_NS_MODE --
+   * which on cgroup v2 with cgroupns=private, what containerd gives
+   * containers, never happens. */
+  signed char ns_private[CGROUP_KEY_SLOTS];
 } self_cgroup_t;
 
 /* Mode the library relaxes its own shared-state files to after creating them.

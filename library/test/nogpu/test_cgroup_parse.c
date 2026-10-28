@@ -30,6 +30,10 @@ extern int read_cgroup(FILE *fp, const char *cgroup_key,
  * read of /proc/self/cgroup; see self_cgroup_t in include/hook.h. */
 extern void self_cgroup_init(self_cgroup_t *self, int cgroup_v1);
 extern void self_cgroup_ensure(self_cgroup_t *self);
+/* Settles CGROUP_MATCH_NEEDS_NS_MODE. The path is a parameter so this can be
+ * tested against fixtures instead of the live /proc. */
+extern int cgroup_ns_private_from_init(const char *init_cgroup_path, const char *cgroup_key);
+extern int self_cgroup_ns_is_private(self_cgroup_t *self, unsigned slot);
 
 static int failures = 0;
 
@@ -263,9 +267,9 @@ static void test_hybrid_unified_line_can_degenerate(void) {
   /* And the consequence, stated in the matcher's own terms: the degenerate
    * answer is not specific to any container, so it cannot distinguish ours
    * from a sibling's, while the memory path can. */
-  CHECK(cgroup_path_is_ours(unified, "/") == 1,
+  CHECK(cgroup_path_match(unified, "/") == CGROUP_MATCH_OURS,
         "a degenerate \"/\" self path claims an unrelated \"/\"");
-  CHECK(cgroup_path_is_ours(memory, REAL_PATH) == 1,
+  CHECK(cgroup_path_match(memory, REAL_PATH) == CGROUP_MATCH_OURS,
         "the per-container path must still claim our own process");
 
   fclose(r);
@@ -361,6 +365,100 @@ static void test_self_cgroup_snapshot(void) {
   self_cgroup_ensure(NULL);
 }
 
+/* Writes one cgroup fixture and returns 0 on success. */
+static int write_fixture(char *tmpl, const char *line) {
+  int fd = mkstemp(tmpl);
+  FILE *f;
+  if (fd < 0) {
+    return -1;
+  }
+  f = fdopen(fd, "w");
+  if (!f) {
+    close(fd);
+    unlink(tmpl);
+    return -1;
+  }
+  fputs(line, f);
+  fclose(f);
+  return 0;
+}
+
+/* The cgroupns-mode probe: a ".." component in an init process's cgroup path.
+ *
+ * The strings are the ones measured on real hosts. Under cgroupns=private the
+ * host's init sits outside our namespace root and the kernel spells that with
+ * "..", so its presence proves private and -- when the file really is the
+ * HOST's init -- its absence proves host. */
+static void test_ns_mode_probe(void) {
+  struct {
+    const char *line;
+    const char *key;
+    int want;
+    const char *origin;
+  } cases[] = {
+    {"0::/../../init.scope\n",                    "",       1, "v2, cgroupns=private"},
+    {"0::/../../../../init.scope\n",              "",       1, "v2 private, four levels (CRI Pod)"},
+    {"0::/init.scope\n",                          "",       0, "v2, cgroupns=host"},
+    {"0::/\n",                                    "",       0, "host init in the root cgroup"},
+    {"13:memory:/../../init.scope\n",             "memory", 1, "v1 hybrid, cgroupns=private"},
+    {"13:memory:/init.scope\n",                   "memory", 0, "v1, cgroupns=host"},
+    {"0::/..foo/init.scope\n",                    "",       0, "\"..foo\" is a name, not an escape"},
+    {"0::/init.scope\n",                          "memory", -1, "key absent from the file"},
+    {"garbage without colons\n",                  "",      -1, "unparsable file"},
+  };
+
+  for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    char tmpl[] = "/tmp/vgpu_nsmode_XXXXXX";
+    int got;
+    if (write_fixture(tmpl, cases[i].line) != 0) {
+      printf("SKIP: could not write a fixture\n");
+      return;
+    }
+    got = cgroup_ns_private_from_init(tmpl, cases[i].key);
+    CHECK(got == cases[i].want, "%s: key=\"%s\" -> %d, want %d",
+          cases[i].origin, cases[i].key, got, cases[i].want);
+    unlink(tmpl);
+  }
+
+  /* A missing file is "could not tell", not "host": the caller has a second
+   * source to try before it settles on the pre-probe behaviour. */
+  CHECK(cgroup_ns_private_from_init("/tmp/vgpu_nsmode_definitely_absent", "") == -1,
+        "an unreadable file must report -1, not 0");
+  CHECK(cgroup_ns_private_from_init(NULL, "") == -1, "NULL path must report -1");
+}
+
+/* The snapshot's view of the probe: guards, and that a cached answer is used
+ * rather than re-read. Caching is what makes it safe for every pid in the loop
+ * to ask. */
+static void test_ns_mode_cached_in_snapshot(void) {
+  self_cgroup_t s;
+
+  self_cgroup_init(&s, 0);
+  CHECK(s.ns_private[0] == -1 && s.ns_private[1] == -1,
+        "init must leave the ns mode unprobed");
+
+  /* A cached answer must be returned as-is. Checked by planting one: if the
+   * function re-read /proc instead, this would come back as whatever the
+   * machine running the test happens to be. */
+  s.ns_private[0] = 1;
+  CHECK(self_cgroup_ns_is_private(&s, 0) == 1, "a cached 1 must be returned");
+  s.ns_private[0] = 0;
+  CHECK(self_cgroup_ns_is_private(&s, 0) == 0, "a cached 0 must be returned");
+
+  /* Guards. The caller hands this pointer and index to every pid in the loop. */
+  CHECK(self_cgroup_ns_is_private(NULL, 0) == 0, "NULL must be inert");
+  CHECK(self_cgroup_ns_is_private(&s, CGROUP_KEY_SLOTS) == 0,
+        "an out-of-range slot must be inert");
+
+  /* Against this machine's real files. Whatever it answers, it must be a
+   * boolean and it must stick. */
+  self_cgroup_init(&s, 0);
+  int first = self_cgroup_ns_is_private(&s, 0);
+  CHECK(first == 0 || first == 1, "the probe must answer 0 or 1, got %d", first);
+  CHECK(self_cgroup_ns_is_private(&s, 0) == first, "a second call must agree");
+  CHECK(s.ns_private[0] == (signed char)first, "the answer must be cached");
+}
+
 int main(void) {
   test_oversized_value_is_refused();
   test_real_path_round_trips();
@@ -371,6 +469,8 @@ int main(void) {
   test_read_cgroup_reads_a_real_file();
   test_hybrid_unified_line_can_degenerate();
   test_self_cgroup_snapshot();
+  test_ns_mode_probe();
+  test_ns_mode_cached_in_snapshot();
   test_read_cgroup_rejects_bad_arguments();
 
   if (failures) {

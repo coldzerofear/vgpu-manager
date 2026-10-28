@@ -38,46 +38,29 @@ limitations under the License.
 #include <string.h>
 
 /*
- * Whether pid_cgroup is our cgroup or sits below it. Both arguments are the
- * path field of a /proc/<pid>/cgroup line, as read_cgroup() returns it.
+ * The shapes this has to tell apart. Every string below was captured on a real
+ * host (Ubuntu 24.04, kernel 7.0, containerd 2.2.1 CRI + Docker 29.1) across
+ * cgroup v2, systemd hybrid v1 and legacy v1, with cgroupns private and host:
  *
- * Prefix, not an exact compare: a process of this container may live in a
- * cgroup below ours -- systemd inside the container, a nested runtime, a
- * framework that makes its own cgroup -- and an exact compare would call it
- * someone else's. Nor strstr(), which the cgroup v1 path used to do: that
- * matches our path appearing anywhere inside a longer one.
+ *   cgroupns=private -- self == "/", we are AT the namespace root
+ *       ours, at the root:  "/"
+ *       ours, nested:       "/nested"
+ *       host process:       "/../../init.scope"
+ *       sibling container:  "/../docker-<other-id>.scope"
+ *       sibling in a Pod:   "/../cri-containerd-<other-id>.scope"
+ *       host root cgroup:   "/../.."
  *
- * Two shapes, because what "below ours" means depends on where our own cgroup
- * namespace root is. Every string below was captured on a real host (Ubuntu
- * 24.04, kernel 7.0, Docker 29.1) across cgroup v1 and v2 and cgroupns
- * private and host:
+ *   cgroupns=host -- self is a real path, we are BELOW the root
+ *       ours:               "/kubepods.slice/.../cri-containerd-<id>.scope"
+ *       ours, nested:       "/kubepods.slice/.../cri-containerd-<id>.scope/x"
+ *       sibling container:  "/kubepods.slice/.../cri-containerd-<other>.scope"
+ *       host process:       "/user.slice/user-0.slice/session-18.scope"
+ *       host root cgroup:   "/"
+ *       cgroup v1 form:     "/docker/<id>"
  *
- *   WE ARE AT THE NAMESPACE ROOT -- cgroupns=private, self == "/"
- *     Every absolute path starts with "/", so the prefix alone says nothing.
- *     The real question is whether the pid escaped our root, and the kernel
- *     answers it by spelling the path with "..":
- *         ours, at the root:  "/"
- *         ours, nested:       "/nested"
- *         host process:       "/../../init.scope"
- *         sibling container:  "/../docker-<other-id>.scope"
- *     So the test is the absence of "/..", not a boundary check. Requiring a
- *     boundary here is what made "/nested" look foreign, and it under-counted
- *     every process the container placed in a child cgroup -- measured, not
- *     theorised: it was 4 of 50 cases in the cgroup v2 matrix.
- *
- *   WE ARE BELOW THE ROOT -- cgroupns=host, self == "/system.slice/..."
- *         ours:               "/system.slice/docker-<id>.scope"
- *         ours, nested:       "/system.slice/docker-<id>.scope/nested"
- *         host process:       "/user.slice/user-0.slice/session-18.scope"
- *         sibling container:  "/system.slice/docker-<other-id>.scope"
- *         cgroup v1 form:     "/docker/<id>"
- *     A plain prefix would let "/a/bc" pass as being under "/a/b", so the
- *     character after the prefix has to be a separator or the end of string.
- *
- * Returns 1 when the pid is ours, 0 otherwise. A NULL or empty self path
- * returns 0: with nothing to compare against, claiming the pid would be a
- * guess, and over-counting is not the safer guess here -- the caller has a
- * second cgroup key to try.
+ * Note the last line of each block: a process in the host's root cgroup and
+ * our own container's root render as the same two characters, "/", in the two
+ * modes. That is the whole reason this function is three-valued.
  */
 /*
  * Whether any component of the path is exactly "..", which is how the kernel
@@ -102,26 +85,88 @@ static inline int cgroup_path_escapes_root(const char *path) {
   return 0;
 }
 
-static inline int cgroup_path_is_ours(const char *self_cgroup, const char *pid_cgroup) {
+/*
+ * Three-valued on purpose: some shapes cannot be settled by the strings alone.
+ *
+ * The anchor this compares against is our OWN cgroup, and that is only the
+ * container's boundary while nothing has moved us: if our process sits in a
+ * CHILD cgroup of the container's, the subtree rooted at self is too small and
+ * a sibling process still at the container root is not under it. Measured on a
+ * real CRI pod (containerd + kubelet-style cgroup_parent): self "/x", a
+ * same-container process "/" -> rejected, which under-counts.
+ *
+ * The string "/" is exactly where the two readings collide:
+ *     cgroupns=private   "/" is OUR container's cgroup root      -> ours
+ *     cgroupns=host      "/" is the HOST root cgroup             -> not ours
+ * Same two characters, opposite answers, and nothing in the path length,
+ * depth or ancestry carries the mode. So the caller -- which may read files --
+ * resolves it; this function stays pure, which is what lets the no-GPU tests
+ * exercise the shipped decision rather than a copy of it.
+ *
+ * The ".." test runs BEFORE the prefix test, and that ordering is what keeps
+ * the ambiguous branch rare: a path with a ".." component is outside our
+ * namespace root, and cgroupns=host never produces one (no boundary to
+ * cross -- 930 real-hardware records, no exception). So under
+ * cgroupns=private, which is what containerd gives containers on cgroup v2,
+ * our own processes answer at step 1 and everything foreign answers at step 2
+ * -- the mode is never asked for.
+ */
+typedef enum {
+  CGROUP_MATCH_FOREIGN       = 0, /* settled: not this container's */
+  CGROUP_MATCH_OURS          = 1, /* settled: this container's */
+  CGROUP_MATCH_NEEDS_NS_MODE = 2, /* undecidable from the strings; needs the cgroupns mode */
+} cgroup_match_t;
+
+static inline cgroup_match_t cgroup_path_match(const char *self_cgroup, const char *pid_cgroup) {
   size_t self_len;
 
-  if (self_cgroup == NULL || pid_cgroup == NULL) {
-    return 0;
+  if (self_cgroup == NULL || pid_cgroup == NULL || self_cgroup[0] == '\0') {
+    /* Nothing to compare against. Claiming the pid would be a guess, and
+     * over-counting is not the safer guess: it throttles the container
+     * against memory it does not hold. */
+    return CGROUP_MATCH_FOREIGN;
   }
+  if (pid_cgroup[0] != '/') {
+    /* Every cgroup path the kernel renders is absolute. Anything else came
+     * from a malformed line, and step 3 below would read an empty path as
+     * "below our namespace root" when self is "/" -- claiming a pid on the
+     * strength of a parse failure. */
+    return CGROUP_MATCH_FOREIGN;
+  }
+  /* 1. The only shape a standard Kubernetes container ever produces: every
+   *    process of a container shares one cgroup, so self and the pid read the
+   *    same string. Measured 6.8 ns, cheaper than the comparison below. */
   if (strcmp(self_cgroup, pid_cgroup) == 0) {
-    return 1;
+    return CGROUP_MATCH_OURS;
   }
+  /* 2. Outside our namespace root. Must precede step 3: with self == "/"
+   *    every absolute path is a prefix match, including "/../x". */
+  if (cgroup_path_escapes_root(pid_cgroup)) {
+    return CGROUP_MATCH_FOREIGN;
+  }
+  /* 3. At or below our own cgroup.
+   *
+   *    Prefix, not an exact compare: a process of this container may live in a
+   *    cgroup below ours -- systemd inside the container, a nested runtime, a
+   *    framework that makes its own cgroup. Nor strstr(), which the cgroup v1
+   *    path used to do: that matches our path appearing anywhere inside a
+   *    longer one. The character after the prefix has to be a separator or the
+   *    end of string, or "/a/bc" would pass as being under "/a/b".
+   *
+   *    self == "/" means we are at the namespace root, so every path that
+   *    survived step 2 is below us. */
   self_len = strlen(self_cgroup);
-  if (self_len == 0) {
-    return 0;
-  }
-  if (strncmp(pid_cgroup, self_cgroup, self_len) != 0) {
-    return 0;
-  }
   if (self_len == 1 && self_cgroup[0] == '/') {
-    return !cgroup_path_escapes_root(pid_cgroup);
+    return CGROUP_MATCH_OURS;
   }
-  return pid_cgroup[self_len] == '\0' || pid_cgroup[self_len] == '/';
+  if (strncmp(pid_cgroup, self_cgroup, self_len) == 0 &&
+      (pid_cgroup[self_len] == '\0' || pid_cgroup[self_len] == '/')) {
+    return CGROUP_MATCH_OURS;
+  }
+  /* 4. An ancestor of our cgroup, or a sibling of it, with no ".." to say it
+   *    left our namespace root. Under cgroupns=private that is still inside
+   *    this container; under cgroupns=host it is not. */
+  return CGROUP_MATCH_NEEDS_NS_MODE;
 }
 
 #endif /* _VGPU_CGROUP_MATCH_H_ */
