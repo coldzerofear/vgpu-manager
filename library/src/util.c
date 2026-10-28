@@ -711,36 +711,57 @@ int split_str(const char *line, char *key, size_t key_size,
   return 0;
 }
 
-/* Reads the cgroup path for cgroup_key out of a /proc/<pid>/cgroup file.
- * cgroup_value is written in place by split_str -- its contents are only
- * meaningful when this returns 0. */
-int read_cgroup(const char *pid_path, const char *cgroup_key,
-                char *cgroup_value, size_t value_size) {
-  int ret = -1;
-  FILE *f = fopen(pid_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
-  if (f == NULL) {
-    return ret;
+/*
+ * Reads the cgroup path for cgroup_key from an open /proc/<pid>/cgroup.
+ *
+ *   line: <hierarchy-id>:<controller-list>:<cgroup-path>
+ *
+ *   cgroup_key == ""  -> controller-list must be empty (v2 "0::/path")
+ *   cgroup_key != ""  -> key must be one ','-separated member of the list
+ *
+ * Returns 0 on match (cgroup_value = path, NUL-terminated, truncated to
+ * value_size), -1 otherwise.  cgroup_value is written only on success.
+ */
+int read_cgroup(FILE *fp, const char *cgroup_key, char *cgroup_value, size_t value_size) {
+  if (fp == NULL || cgroup_key == NULL || cgroup_value == NULL || value_size == 0) {
+    return -1;
   }
+
   char buff[CGROUP_LINE_MAX];
-  while (fgets(buff, sizeof(buff), f)) {
-    size_t len = strlen(buff);
-    size_t index = 0;
-    for (; index < len && buff[index] != ':'; index++) {}
-    if (index == len) {
-      continue;
+  const size_t key_len = strlen(cgroup_key);
+
+  while (fgets(buff, sizeof(buff), fp)) {
+    char *first = strchr(buff, ':');
+    if (first == NULL) continue;
+    char *second = strchr(first + 1, ':');
+    if (second == NULL) continue;
+
+    if (key_len == 0) {
+      if (second != first + 1) continue;
+    } else {
+      int matched = 0;
+      const char *p = first + 1, *end = second;
+      while (p < end) {
+        const char *comma = memchr(p, ',', (size_t)(end - p));
+        const char *mend = comma ? comma : end;
+        if ((size_t)(mend - p) == key_len &&
+            memcmp(p, cgroup_key, key_len) == 0) {
+          matched = 1;
+          break;
+        }
+        p = comma ? comma + 1 : end;
+      }
+      if (!matched) continue;
     }
-    char key[CGROUP_KEY_MAX];
-    if (split_str(&buff[index + 1], key, sizeof(key),
-                  cgroup_value, value_size, ':') != 0) {
-      continue;
-    }
-    if (strcmp(key, cgroup_key) == 0) {
-      ret = 0;
-      break;
-    }
+
+    const char *path = second + 1;
+    size_t path_len = strcspn(path, "\r\n");
+    if (path_len >= value_size) path_len = value_size - 1;
+    memcpy(cgroup_value, path, path_len);
+    cgroup_value[path_len] = '\0';
+    return 0;
   }
-  fclose(f);
-  return ret;
+  return -1;
 }
 
 int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids) {
