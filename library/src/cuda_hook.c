@@ -36,6 +36,7 @@
 #include "include/nvml-helper.h"
 #include "include/sm_delta.h"
 #include "include/array_size.h"
+#include "include/cgroup_match.h"
 
 #define DEVICE_BATCH_SIZE        4
 
@@ -2286,21 +2287,13 @@ int check_device_pid_in_proc_cgroup_path(unsigned int device_pid, const char *pi
     if (read_cgroup(self_fp, cgroup_keys[i], self_cgroup, sizeof(self_cgroup)) != 0) {
       continue;
     }
-    /* cgroupns=host
-     * Usually a relative path that requires precise string matching.
-     * eg. cgroupv2: 0::/system.slice/docker-<容器ID>.scope
-     *     cgroupv1: 12:memory:/docker/<容器ID>
-     *
-     * Prefix, not strcmp: a process of this container may sit in a cgroup
-     * BELOW ours (systemd inside the container, a nested runtime, a framework
-     * that makes its own cgroup), and an exact compare would call that pid
-     * someone else's and under-count its memory. The boundary check is what
-     * keeps the prefix honest -- "/a/bc" must not match "/a/b" -- and it is
-     * also why this is not the strstr() the cgroup v1 path used to do, which
-     * would match our path appearing anywhere in a longer one. */
-    size_t self_len = strlen(self_cgroup);
-    if (self_len > 0 && strncmp(pid_cgroup, self_cgroup, self_len) == 0 &&
-        (pid_cgroup[self_len] == '\0' || pid_cgroup[self_len] == '/')) {
+    /* The pid is ours when its cgroup is ours or sits below it. The comparison
+     * itself lives in include/cgroup_match.h -- it is pure string work, and
+     * putting it there is what lets the no-GPU tests exercise the shipped
+     * decision instead of a copy of it. Every cgroup-version and
+     * cgroupns-mode shape it has to handle is documented on that function,
+     * with the real paths each one produces. */
+    if (cgroup_path_is_ours(self_cgroup, pid_cgroup)) {
       ret = 0;
     }
     LOGGER(DETAIL, "\ncontainer process cgroup: %s\ndevice process cgroup: %s", self_cgroup, pid_cgroup);
