@@ -2288,9 +2288,7 @@ int check_device_pid_in_proc_cgroup_path(unsigned int device_pid, const char *pi
   const char *cgroup_keys_v2[] = {"", "memory", NULL};
   const char **cgroup_keys =
       ((g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) ==
-       CGROUPV1_COMPATIBILITY_MODE)
-          ? cgroup_keys_v1
-          : cgroup_keys_v2;
+       CGROUPV1_COMPATIBILITY_MODE) ? cgroup_keys_v1 : cgroup_keys_v2;
   for (int i = 0; cgroup_keys[i] != NULL; i++) {
     char pid_cgroup[CGROUP_LINE_MAX];
     if (read_cgroup(fp, cgroup_keys[i], pid_cgroup, sizeof(pid_cgroup)) != 0) {

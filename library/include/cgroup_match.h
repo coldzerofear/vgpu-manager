@@ -108,6 +108,9 @@ static inline int cgroup_path_is_ours(const char *self_cgroup, const char *pid_c
   if (self_cgroup == NULL || pid_cgroup == NULL) {
     return 0;
   }
+  if (strcmp(self_cgroup, pid_cgroup) == 0) {
+    return 1;
+  }
   self_len = strlen(self_cgroup);
   if (self_len == 0) {
     return 0;
