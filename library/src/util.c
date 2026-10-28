@@ -817,8 +817,12 @@ void self_cgroup_init(self_cgroup_t *self, int cgroup_v1) {
     return;
   }
   memset(self, 0, sizeof(*self));
-  self->ns_private[0] = -1;
-  self->ns_private[1] = -1;
+  /* memset leaves these 0, which would read as "probed, and the answer is
+   * host". -1 is "not probed yet". A loop rather than two assignments so
+   * raising CGROUP_KEY_SLOTS cannot silently leave a slot pre-answered. */
+  for (unsigned i = 0; i < CGROUP_KEY_SLOTS; i++) {
+    self->ns_private[i] = -1;
+  }
   if (cgroup_v1) {
     self->keys[0] = "memory";
     self->keys[1] = "";
@@ -846,9 +850,18 @@ void self_cgroup_ensure(self_cgroup_t *self) {
   /* "e" = O_CLOEXEC, prevent fork inheritance */
   FILE *fp = fopen(PID_SELF_CGROUP_PATH, "re");
   if (fp == NULL) {
-    LOGGER(WARNING, "could not read %s: %s -- cgroup-based ownership checks "
-                    "will answer \"not ours\" for every pid this call",
-           PID_SELF_CGROUP_PATH, strerror(errno));
+    /* Rate-limited on powers of two, like note_pid_inspect_denied(): this
+     * runs once per device query, and a device query happens per allocation,
+     * so an unthrottled line here would be one per allocation. The count is
+     * the interesting part -- a handful is a transient, a count that climbs
+     * with every allocation says this container really cannot read it. */
+    static volatile uint64_t self_cgroup_unreadable;
+    uint64_t total = __sync_add_and_fetch(&self_cgroup_unreadable, 1);
+    if ((total & (total - 1)) == 0) {
+      LOGGER(WARNING, "could not read %s: %s -- cgroup-based ownership checks "
+                      "will answer \"not ours\" for every pid. Failures so far: %" PRIu64,
+             PID_SELF_CGROUP_PATH, strerror(errno), total);
+    }
     return;
   }
   for (unsigned i = 0; i < CGROUP_KEY_SLOTS && self->keys[i] != NULL; i++) {
@@ -878,11 +891,16 @@ void self_cgroup_ensure(self_cgroup_t *self) {
  * searching for a substring.)
  */
 int cgroup_ns_private_from_init(const char *init_cgroup_path, const char *cgroup_key) {
-  char value[CGROUP_LINE_MAX];
+  char value[CGROUP_INIT_LINE_MAX];
   int ret = -1;
-  /* "e" = O_CLOEXEC, prevent fork inheritance */
-  FILE *fp = fopen(init_cgroup_path, "re");
+  FILE *fp;
 
+  if (init_cgroup_path == NULL) {
+    /* fopen(NULL, ...) is undefined behaviour, not a guaranteed failure. */
+    return ret;
+  }
+  /* "e" = O_CLOEXEC, prevent fork inheritance */
+  fp = fopen(init_cgroup_path, "re");
   if (fp == NULL) {
     return ret;
   }

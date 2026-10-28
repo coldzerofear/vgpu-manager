@@ -749,3 +749,93 @@ int self_cgroup_ns_is_private(self_cgroup_t *self, unsigned slot);
 | B1（宿主根 cgroup 进程） | 已由 `1214809` 修 | ✅ 继续正确（步骤 2 / 判别器答 host） |
 | v1 + cgroupns=host 下的那一格 | 漏算 | ❌ 不修（判别器答 host→锚定 self；标准 k8s Pod 不具备触发条件） |
 | DinD 的 ns 腿（`ns=NO` 是终态） | 漏算 | ❌ 不动 |
+
+## 16 第二轮全量真机矩阵：两轮对比
+
+两轮用的是**同一套脚本、同一台机器**，只换了被测代码：
+第一轮 = `e0624ba`（基线），第二轮 = `1214809` + `9ccc71a`（删短路 + self 读提升 + 三态判据 + cgroupns 两级判别）。
+第二轮另外补了两个第一轮没有的场景：**GAP**（判定方在子 cgroup、目标在容器 cgroup 根）与
+**DINDSHAPE**（不依赖 `docker:dind` 镜像地复现 DinD 的 cgroup 形状）。
+
+### 16.1 过算（不可容忍的方向）—— 112 → 0
+
+| cgroup | 第一轮 | 第二轮 |
+|---|---|---|
+| v2 | **28** | **0** |
+| v1 (hybrid) | **84** | **0** |
+| 合计 | **112** | **0** |
+
+```
+过算条数
+第一轮  ████████████████████████████████████████████████████  112
+第二轮                                                          0
+```
+
+112 条全部是 `host-rootcg`（宿主根 cgroup 里的进程被 `pid == "/"` 短路认领）。
+v1 上它在**真实 CRI 路径的全部 12 个配置**里都出现，因为 containerd 在 v1 上给容器用宿主
+cgroup 命名空间；`1214809` 删掉短路后归零。
+
+### 16.2 逐场景前后对照（实测字符串）
+
+| 场景 | 第一轮 | 第二轮 | 结论 |
+|---|---|---|---|
+| 宿主根 cgroup 进程（v2 cgroupns=host） | 过算 28 | **0** | ✅ 修掉 |
+| 宿主根 cgroup 进程（v1 CRI 全 12 配置） | 过算 84 | **0** | ✅ 修掉 |
+| **B2**：self=`/x`、目标=`/y`（v2 private） | `cgL=0` | **`cgL=1`** | ✅ 修掉 |
+| **B2**：self=`/x`、目标=`/y`（v1 private） | `cgL=0` | **`cgL=1`** | ✅ 修掉 |
+| **本格**：self=`/x`、目标=`/`（v2 private，GAP 8 格） | `cgL=0`（实测漏算） | **8/8 `cgL=1`、`cgH=1`，`nsmode=host_proc:private`** | ✅ 修掉 |
+| 本格（v1 cgroupns=host，GAP 8 格） | 第一轮未测 | `cgL=0`、`nsmode=host_proc:host` | ❌ 按设计不修 |
+| **DinD 内层容器的 cgroup 腿（v2）** | `cgL=0`、`cgH=0` | **`cgL=1`、`cgH=1`** | ✅ 修掉 |
+| DinD 内层容器的 ns 腿（`ns=NO` 终态） | 漏算 | 漏算 | 已拍板接受 |
+| DinD 内层容器（v1 cgroupns=host） | 第一轮未测 | `cgL=0` | ❌ v1+host 残留 |
+
+### 16.3 三条判定链各自的覆盖量（第二轮）
+
+用户要求覆盖 openKernel 路径，这里把三条链分开统计。**openKernel 链** =
+`pid_exist` → ns 比对 → UNKNOWN 落 cgroup 回退（读容器本地 `/proc`）；
+**CGROUPV1/V2 链** = 读 `.host_proc` 的 cgroup 主判据；**合成** = 主判据不成立落 openKernel 兜底。
+
+| 数据集 | openKernel 链 | CGROUPV1/V2 链 | 合成 |
+|---|---|---|---|
+| v2 | 判定 257，不符 **4** | 判定 314，不符 **0** | 判定 377，不符 **2** |
+| v1 (hybrid) | 判定 267，不符 **6** | 判定 320，不符 **4** | 判定 387，不符 **6** |
+| GAP v2（本格 8 格） | 判定 8，不符 **0** | 判定 8，不符 **0** | 判定 8，不符 **0** |
+
+剩余不符的构成：v2 的 4+2 全是 **DinD 的 ns 腿**（`ns=NO` 是终态，cgroup 腿已答对但用不上）；
+v1 的 6+4+6 是 **DinD** 加 **v1+cgroupns=host 下的本格**，两者都是明确决定不修的。
+**没有任何一条是过算。**
+
+### 16.4 四个维度仍然不参与判定（第二轮复核）
+
+| cgroup | 维度 | 取值 | 符合 | 过算 | 漏算 |
+|---|---|---|---|---|---|
+| v2 | cgroupns | private / host | 218 / 212 | 0 / 0 | 2 / 0 |
+| v2 | pid | CONTAINER / POD / NODE / own / shared / host | 160 / 160 / 184 / 128 / 136 / 144 | 全 0 | 全 0 |
+| v2 | ipc | POD / NODE / own / host | 252 / 252 / 204 / 204 | 全 0 | 全 0 |
+| v2 | driver | cgroupfs / systemd | 252 / 252 | 0 / 0 | 0 / 0 |
+| v1 | cgroupns | private / host | 216 / 216 | 0 / 0 | 2 / 2 |
+| v1 | pid / ipc / driver | 同上各取值 | — | 全 0 | 全 0 |
+
+与第一轮的差别：第一轮 `cgroupns=host` 一列恒有 12 条过算，第二轮归零；
+`hostPID` / `shareProcessNamespace` / `hostIPC` / cgroup driver 四个维度两轮都是全 0，
+再次确认它们不进判据 —— 只决定容器能看见哪些 pid。
+
+### 16.5 本轮没跑的与为什么
+
+- **legacy v1**（cgroup2 从未挂载）第二轮没重跑。第一轮已确认那个布局**根本没有 `0::` 行**
+  （内核对默认根有 `!cgrp_dfl_visible` 跳过），所以判据的输入与 hybrid 相比只少了一行，
+  而两处修复都与 cgroup 版本无关（短路的删除、`..` 判据、init 探测在 v1 的 memory 行上同样成立）。
+- **k8s 默认的"每容器自己的 pid namespace"** 仍未覆盖（见 §13）：CRI 一侧容器的
+  `security_context` 留空 = CRI 默认 POD = 加入 sandbox 的 ns。方向保守，矩阵跑的是更难的一侧。
+
+### 16.6 两处 harness 自身的问题（不是代码问题）
+
+- `docker pull docker:dind` 在这台机器上挂了 15 分钟无进展，而脚本没给它超时，把第一次
+  第二轮跑死。已给所有 pull 加 `timeout`，并补了不依赖镜像的 DINDSHAPE 复现。
+- `cri.sh` 结束时把 containerd 驱动留在 `systemd`，而 `gap.sh` 用 cgroupfs 风格的
+  `cgroup_parent` → runc 的 systemd cgroup manager 拒掉非 slice 路径 → `runp` 失败，
+  `GAP/v2` 第一次没跑成。已让 `gap.sh` 自己先把驱动复位。
+- `NEST` / `DINDSHAPE` 在 **v2 + cgroupns=host + 特权** 下的构造是**退化的**：那时
+  `/sys/fs/cgroup` 就是宿主根，`mkdir` 出来的 `/x`、`/y`、`/docker/abc123` 是宿主顶层
+  cgroup，进程真的离开了容器 cgroup，所以 `cgL=0` 是正确答案而非漏算。这些行已从统计中剔除
+  （v2 共 4 行；v1 下 Docker 绑挂的是容器自己的控制器目录，构造有效，保留）。

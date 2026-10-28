@@ -128,6 +128,16 @@ extern "C" {
 #define CGROUP_LINE_MAX 4096
 #define CGROUP_KEY_MAX  256
 
+/* An init process's cgroup path is read only to look for a ".." component, and
+ * the real strings are tiny: "/init.scope" under cgroupns=host, and at most
+ * "/../../../../init.scope" under private (four levels, measured on a CRI
+ * Pod). Sizing that buffer at CGROUP_LINE_MAX would put another 4 KiB on a
+ * stack that is already ~62 KiB deep on the utilization path. If a path ever
+ * does exceed this, read_cgroup() refuses it rather than truncating, the probe
+ * reports "could not tell", and the caller falls through to its next source --
+ * the degrading direction, not a wrong answer. */
+#define CGROUP_INIT_LINE_MAX 1024
+
 /* "My own cgroup path", read once per device query instead of once per pid.
  *
  * check_device_pid_in_proc_cgroup_path() runs per pid inside the device lock
