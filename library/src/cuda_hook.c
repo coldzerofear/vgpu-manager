@@ -2234,7 +2234,7 @@ static void initialization() {
   balance_batches(device_count);
 }
 
-FILE *fp open_fp(const char *path) {
+static FILE *open_fp(const char *path) {
   /* No file_exist() pre-check: it only duplicated what fopen already reports,
    * and the gap between the two was a time-of-check/time-of-use window. */
   FILE *fp = fopen(path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
@@ -2251,7 +2251,7 @@ FILE *fp open_fp(const char *path) {
 
 int check_device_pid_in_proc_cgroup_path(unsigned int device_pid, const char *pid_cgroup_path) {
   int ret = -1;
-  FILE *fp = NULL
+  FILE *fp = NULL;
   FILE *self_fp = NULL;
   if (device_pid == 0) {
     return ret;
@@ -2265,14 +2265,14 @@ int check_device_pid_in_proc_cgroup_path(unsigned int device_pid, const char *pi
   const char *cgroup_keys[] = {"", "memory", NULL};
   for (int i = 0; cgroup_keys[i] != NULL; i++) {
     char pid_cgroup[CGROUP_LINE_MAX];
-    if (read_cgroup(fp, cgroup_keys[i], pid_cgroup, sizeof(pid_cgroup) != 0) {
+    if (read_cgroup(fp, cgroup_keys[i], pid_cgroup, sizeof(pid_cgroup)) != 0) {
       continue;
     }
     // cgroupns=private
     // It is generally the root directory, and if not, the following precise comparison will be made.
     // eg. cgroupv2: 0::/
     //     cgroupv1: 12:memory:/
-    if (device_pid_cgroup[0] == "/" && device_pid_cgroup[1] == "\0") {
+    if (pid_cgroup[0] == '/' && pid_cgroup[1] == '\0') {
       ret = 0;
       goto DONE;
     }
@@ -2283,20 +2283,30 @@ int check_device_pid_in_proc_cgroup_path(unsigned int device_pid, const char *pi
       }
     }
     char self_cgroup[CGROUP_LINE_MAX];
-    if (read_cgroup(self_fp, cgroup_keys[i], self_cgroup, sizeof(self_cgroup) != 0) {
+    if (read_cgroup(self_fp, cgroup_keys[i], self_cgroup, sizeof(self_cgroup)) != 0) {
       continue;
     }
-    // cgroupns=host
-    // Usually a relative path that requires precise string matching.
-    // eg. cgroupv2: 0::/system.slice/docker-<容器ID>.scope
-    //     cgroupv1: 12:memory:/docker/<容器ID>
-    if (strcmp(pid_cgroup, self_cgroup) == 0) {
+    /* cgroupns=host
+     * Usually a relative path that requires precise string matching.
+     * eg. cgroupv2: 0::/system.slice/docker-<容器ID>.scope
+     *     cgroupv1: 12:memory:/docker/<容器ID>
+     *
+     * Prefix, not strcmp: a process of this container may sit in a cgroup
+     * BELOW ours (systemd inside the container, a nested runtime, a framework
+     * that makes its own cgroup), and an exact compare would call that pid
+     * someone else's and under-count its memory. The boundary check is what
+     * keeps the prefix honest -- "/a/bc" must not match "/a/b" -- and it is
+     * also why this is not the strstr() the cgroup v1 path used to do, which
+     * would match our path appearing anywhere in a longer one. */
+    size_t self_len = strlen(self_cgroup);
+    if (self_len > 0 && strncmp(pid_cgroup, self_cgroup, self_len) == 0 &&
+        (pid_cgroup[self_len] == '\0' || pid_cgroup[self_len] == '/')) {
       ret = 0;
     }
     LOGGER(DETAIL, "\ncontainer process cgroup: %s\ndevice process cgroup: %s", self_cgroup, pid_cgroup);
     // Arriving here means that the cgroup path above has been successfully extracted according to the
     // current cgroup mode, and should not continue to attempt in the next loop.
-    break
+    break;
   }
 DONE:
   if (self_fp) fclose(self_fp);

@@ -20,7 +20,10 @@
 
 extern int split_str(const char *line, char *key, size_t key_size,
                      char *value, size_t value_size, char d);
-extern int read_cgroup(const char *pid_path, const char *cgroup_key,
+/* Takes an open stream, not a path: one /proc/<pid>/cgroup is now asked for
+ * more than one controller (the v2 shape then the v1 shape), and reopening it
+ * per key would cost a second fopen on a per-PID path. */
+extern int read_cgroup(FILE *fp, const char *cgroup_key,
                        char *cgroup_value, size_t value_size);
 
 static int failures = 0;
@@ -134,35 +137,102 @@ static void test_read_cgroup_reads_a_real_file(void) {
     printf("SKIP: fdopen failed\n");
     return;
   }
-  /* Two leading hierarchies so the match is not just "first line wins". */
+  /* Two leading hierarchies so the match is not just "first line wins", plus a
+   * comma-joined controller list and a v2 unified line -- the shapes a real
+   * file mixes and the ones the key matcher has to tell apart. */
   fprintf(f, "12:pids:" REAL_PATH "\n");
   fprintf(f, "11:memory:" REAL_PATH "\n");
+  fprintf(f, "5:net_prio,net_cls:" REAL_PATH "\n");
+  fprintf(f, "0::" REAL_PATH "\n");
   fclose(f);
 
+  FILE *r = fopen(tmpl, "re");
+  CHECK(r != NULL, "could not reopen the temp cgroup file");
+  if (r == NULL) {
+    unlink(tmpl);
+    return;
+  }
+
   char value[CGROUP_LINE_MAX];
-  int rc = read_cgroup(tmpl, "memory", value, sizeof(value));
+  int rc = read_cgroup(r, "memory", value, sizeof(value));
   CHECK(rc == 0, "read_cgroup must find the memory hierarchy, got rc=%d", rc);
   CHECK(strcmp(value, REAL_PATH) == 0, "value was '%s'", value);
 
-  /* An undersized buffer must fail rather than return a truncated path:
-   * the caller substring-matches it against the host's path, and a
-   * truncated prefix would answer the wrong question. */
+  /* The same stream, asked for a second controller. This is how the caller
+   * uses it -- v2 shape then v1 shape on one open file -- and it only works
+   * because read_cgroup rewinds: a previous miss (or hit) leaves the stream
+   * part-way through, and without the rewind every later key would fail for
+   * the position rather than for the contents. */
+  rc = read_cgroup(r, "pids", value, sizeof(value));
+  CHECK(rc == 0, "a second key on the same stream must still be found "
+                 "(read_cgroup must rewind), got rc=%d", rc);
+  CHECK(strcmp(value, REAL_PATH) == 0, "value was '%s'", value);
+
+  /* A key inside a comma-joined controller list. */
+  rc = read_cgroup(r, "net_cls", value, sizeof(value));
+  CHECK(rc == 0, "a key in a comma-joined list must be found, got rc=%d", rc);
+
+  /* An empty key addresses the v2 unified line, and ONLY that line: on a v1
+   * host every line carries a controller name, so asking for "" must not
+   * match one of them. */
+  rc = read_cgroup(r, "", value, sizeof(value));
+  CHECK(rc == 0, "the empty key must match the \"0::\" unified line, got rc=%d", rc);
+  CHECK(strcmp(value, REAL_PATH) == 0, "value was '%s'", value);
+
+  /* A controller that is a prefix of a real one must not match. */
+  rc = read_cgroup(r, "mem", value, sizeof(value));
+  CHECK(rc != 0, "\"mem\" must not match the \"memory\" hierarchy");
+
+  /* An undersized buffer must fail rather than return a truncated path: the
+   * caller prefix-matches it against another process's path, and a path cut at
+   * a '/' also prefixes sibling cgroups -- a sibling container's process would
+   * be claimed as ours. */
   char small[128];
-  rc = read_cgroup(tmpl, "memory", small, sizeof(small));
+  rc = read_cgroup(r, "memory", small, sizeof(small));
   CHECK(rc != 0, "an undersized buffer must not report success");
 
   /* A hierarchy that is not in the file. */
-  rc = read_cgroup(tmpl, "cpuset", value, sizeof(value));
+  rc = read_cgroup(r, "cpuset", value, sizeof(value));
   CHECK(rc != 0, "an absent hierarchy must not report success");
 
+  fclose(r);
   unlink(tmpl);
 }
 
-static void test_read_cgroup_missing_file(void) {
+/* Opening is the caller's job now, so what used to be "a missing file" is a
+ * NULL stream here. The other guards are checked alongside it: every one of
+ * them is a path that must not write to the output buffer. */
+static void test_read_cgroup_rejects_bad_arguments(void) {
   char value[CGROUP_LINE_MAX];
-  CHECK(read_cgroup("/nonexistent/vgpu/cgroup", "memory", value,
-                    sizeof(value)) != 0,
-        "a missing file must not report success");
+  char tmpl[] = "/tmp/vgpu_cgroup_null_XXXXXX";
+  int fd = mkstemp(tmpl);
+
+  CHECK(read_cgroup(NULL, "memory", value, sizeof(value)) != 0,
+        "a NULL stream must not report success");
+
+  if (fd < 0) {
+    printf("SKIP %s: mkstemp failed\n", __func__);
+    return;
+  }
+  FILE *f = fdopen(fd, "w+");
+  if (f == NULL) {
+    close(fd);
+    unlink(tmpl);
+    printf("SKIP %s: fdopen failed\n", __func__);
+    return;
+  }
+  fprintf(f, "11:memory:" REAL_PATH "\n");
+  fflush(f);
+
+  CHECK(read_cgroup(f, NULL, value, sizeof(value)) != 0,
+        "a NULL key must not report success");
+  CHECK(read_cgroup(f, "memory", NULL, sizeof(value)) != 0,
+        "a NULL output buffer must not report success");
+  CHECK(read_cgroup(f, "memory", value, 0) != 0,
+        "a zero-sized output buffer must not report success");
+
+  fclose(f);
+  unlink(tmpl);
 }
 
 int main(void) {
@@ -173,7 +243,7 @@ int main(void) {
   test_trimming_matches_legacy_behaviour();
   test_zero_sized_buffers();
   test_read_cgroup_reads_a_real_file();
-  test_read_cgroup_missing_file();
+  test_read_cgroup_rejects_bad_arguments();
 
   if (failures) {
     printf("%d check(s) failed\n", failures);

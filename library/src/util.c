@@ -721,11 +721,19 @@ int split_str(const char *line, char *key, size_t key_size,
  *
  * Returns 0 on match (cgroup_value = path, NUL-terminated, truncated to
  * value_size), -1 otherwise.  cgroup_value is written only on success.
+ *
+ * Rewinds first, so the search always covers the whole file. Callers hand the
+ * same FILE* in twice -- once per cgroup version they try -- and a miss on the
+ * first key leaves the stream at EOF, which would make every later key fail
+ * for the position rather than for the contents. On a cgroup v1 host that is
+ * exactly the sequence that happens: the empty (v2) key matches nothing, and
+ * "memory" would then be asked of a stream with nothing left to read.
  */
 int read_cgroup(FILE *fp, const char *cgroup_key, char *cgroup_value, size_t value_size) {
   if (fp == NULL || cgroup_key == NULL || cgroup_value == NULL || value_size == 0) {
     return -1;
   }
+  rewind(fp);
 
   char buff[CGROUP_LINE_MAX];
   const size_t key_len = strlen(cgroup_key);
@@ -756,7 +764,17 @@ int read_cgroup(FILE *fp, const char *cgroup_key, char *cgroup_value, size_t val
 
     const char *path = second + 1;
     size_t path_len = strcspn(path, "\r\n");
-    if (path_len >= value_size) path_len = value_size - 1;
+    if (path_len >= value_size) {
+      /* Fail rather than truncate. The caller prefix-matches this against
+       * another process's path, and a truncated path is a prefix of OTHER
+       * cgroups too: cut "/kubepods/pod-A/container-1" at a '/' and it also
+       * prefixes "/kubepods/pod-A/container-2", so a sibling container's
+       * process would be claimed as ours and over-counted. A caller that gets
+       * no answer treats the pid as undecidable, which is the safe direction.
+       * A stock Kubernetes path is ~191 bytes, which is why the buffers here
+       * are CGROUP_LINE_MAX and not something smaller. */
+      continue;
+    }
     memcpy(cgroup_value, path, path_len);
     cgroup_value[path_len] = '\0';
     return 0;

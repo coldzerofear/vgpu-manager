@@ -45,7 +45,7 @@
 #include "include/hook.h"
 
 extern int device_pid_in_same_container(unsigned int pid);
-extern int read_cgroup(const char *pid_path, const char *cgroup_key,
+extern int read_cgroup(FILE *fp, const char *cgroup_key,
                        char *cgroup_value, size_t value_size);
 extern int gpu_device_fd_in_process(unsigned int pid);
 
@@ -412,11 +412,13 @@ static void test_inspect_denial_is_reported(void) {
  * to prevent.
  */
 static void test_local_cgroup_can_identify_this_container(void) {
-  char self_v1[CGROUP_LINE_MAX] = {0};
-  char child_v1[CGROUP_LINE_MAX] = {0};
   char child_path[64];
-  int v2_premise = 0;
-  int v1_premise = 0;
+  char self_cg[CGROUP_LINE_MAX] = {0};
+  char child_cg[CGROUP_LINE_MAX] = {0};
+  const char *const keys[] = {"", "memory", NULL};
+  const char *matched_key = NULL;
+  int private_premise = 0;
+  int host_premise = 0;
 
   pid_t child = spawn_holder(NULL);
   if (child <= 0) {
@@ -425,52 +427,66 @@ static void test_local_cgroup_can_identify_this_container(void) {
   }
   snprintf(child_path, sizeof(child_path), "/proc/%d/cgroup", (int)child);
 
-  /* v2 premise: some line of the child's cgroup file is exactly "0::/".
-   *
-   * Read the way check_device_pid_in_proc_cgroupv2_path() reads it -- whole
-   * line, strcmp against "0::/" -- and NOT via read_cgroup() with an empty
-   * controller key. Those are not the same test: read_cgroup() splits on ':'
-   * and on a v1 host its first line yields a non-empty controller name, so
-   * asking it for "" can still succeed against a line this check would
-   * reject. Modelling the premise with a different parser than the code uses
-   * would make this test agree with itself rather than with the code. */
-  FILE *cf = fopen(child_path, "re");
-  if (cf != NULL) {
-    char line[CGROUP_LINE_MAX];
-    while (fgets(line, sizeof(line), cf) != NULL) {
-      size_t len = strlen(line);
-      if (len > 0 && line[len - 1] == '\n') {
-        line[len - 1] = '\0';
-      }
-      if (strcmp(line, "0::/") == 0) {
-        v2_premise = 1;
-        break;
-      }
-    }
-    fclose(cf);
+  FILE *child_fp = fopen(child_path, "re");
+  FILE *self_fp = fopen(PID_SELF_CGROUP_PATH, "re");
+  if (child_fp == NULL || self_fp == NULL) {
+    printf("SKIP %s: could not open the cgroup files\n", __func__);
+    if (child_fp) fclose(child_fp);
+    if (self_fp) fclose(self_fp);
+    reap(child);
+    return;
   }
 
-  /* v1 premise: our own memory-controller path is specific, and the child's
-   * contains it. */
-  memset(child_v1, 0, sizeof(child_v1));
-  if (read_cgroup(PID_SELF_CGROUP_PATH, "memory", self_v1, sizeof(self_v1)) == 0 &&
-      read_cgroup(child_path, "memory", child_v1, sizeof(child_v1)) == 0 &&
-      self_v1[0] == '/' && self_v1[1] != '\0' &&
-      strstr(child_v1, self_v1) != NULL) {
-    v1_premise = 1;
+  /* Walk the same key list, in the same order, with the same reader the code
+   * uses, and stop at the first key that yields a path -- that is how
+   * check_device_pid_in_proc_cgroup_path() decides which cgroup version it is
+   * looking at. Reusing one open stream per file across both keys is also part
+   * of what is being checked: read_cgroup must rewind, or the second key would
+   * fail on position rather than contents. */
+  for (int i = 0; keys[i] != NULL; i++) {
+    if (read_cgroup(child_fp, keys[i], child_cg, sizeof(child_cg)) != 0) {
+      continue;
+    }
+    matched_key = keys[i];
+
+    /* cgroupns=private: the pid reads a bare "/". */
+    if (child_cg[0] == '/' && child_cg[1] == '\0') {
+      private_premise = 1;
+      break;
+    }
+
+    /* cgroupns=host: our own path is specific, and the pid's is it or below
+     * it. Prefix with a boundary check, exactly as the code does -- "/a/bc"
+     * must not count as being under "/a/b". */
+    if (read_cgroup(self_fp, keys[i], self_cg, sizeof(self_cg)) == 0) {
+      size_t self_len = strlen(self_cg);
+      if (self_len > 0 && strncmp(child_cg, self_cg, self_len) == 0 &&
+          (child_cg[self_len] == '\0' || child_cg[self_len] == '/')) {
+        host_premise = 1;
+      }
+    }
+    break;
   }
 
   /* Reported either way: which premise holds is a property of the host, so
    * printing it is what makes a failure here actionable. */
-  printf("      (cgroup premises: v2(line==\"0::/\")=%d v1(specific+contains)=%d; "
-         "own memory path=\"%s\")\n",
-         v2_premise, v1_premise, self_v1[0] != '\0' ? self_v1 : "(none)");
+  printf("      (cgroup premises: key=\"%s\" private(pid==\"/\")=%d "
+         "host(prefix)=%d; pid=\"%s\" self=\"%s\")\n",
+         matched_key != NULL ? matched_key : "(none matched)",
+         private_premise, host_premise,
+         child_cg[0] != '\0' ? child_cg : "(none)",
+         self_cg[0] != '\0' ? self_cg : "(none)");
 
-  CHECK(v2_premise || v1_premise,
-        "neither cgroup shape can identify a process of this container, so the "
-        "UNKNOWN fallback would answer \"not ours\" for every pid it cannot "
-        "inspect and under-count its memory");
+  CHECK(matched_key != NULL,
+        "neither the v2 nor the v1 controller key yielded a cgroup path, so "
+        "the fallback cannot read this host's cgroups at all");
+  CHECK(private_premise || host_premise,
+        "a process of this container was not recognised by either cgroup "
+        "shape, so the UNKNOWN fallback would answer \"not ours\" for every "
+        "pid it cannot inspect and under-count its memory");
 
+  fclose(child_fp);
+  fclose(self_fp);
   reap(child);
 }
 
