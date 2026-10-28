@@ -2262,8 +2262,35 @@ int check_device_pid_in_proc_cgroup_path(unsigned int device_pid, const char *pi
   if (!fp) {
     return ret;
   }
-  // The decision path containing cgroupv1 and cgroupv2.
-  const char *cgroup_keys[] = {"", "memory", NULL};
+  /* Which key to ask first, and why the order is load-bearing on cgroup v1.
+   *
+   * "" matches the cgroup v2 unified line ("0::<path>"); "memory" matches the
+   * v1 memory hierarchy. Asking "" first is right on a v2 host, where it is
+   * the only line there is.
+   *
+   * On a cgroup v1 host the unified line may still be present -- systemd's
+   * hybrid layout mounts cgroup2 alongside the v1 hierarchies -- but nothing
+   * guarantees the CONTAINER has a group of its own in it: that is the
+   * runtime's choice, not ours. Measured on a hybrid host (Ubuntu 24.04,
+   * systemd.unified_cgroup_hierarchy=0): Docker 29 does give each container
+   * its own "0::/docker/<id>", so the unified line is usable there. But where
+   * that group is absent the line degenerates to a path every container
+   * shares, or to "/" -- and then this check reads the same string for a
+   * sibling container as for us and claims its process as ours. That
+   * over-counts, and over-counting throttles the container against memory it
+   * does not hold. Reproduced by placing two containers in one unified group:
+   * "" claimed the sibling, "memory" rejected it.
+   *
+   * The memory hierarchy carries the per-container path in every v1 layout, so
+   * when the manager has told us this is a v1 host, ask it first and keep ""
+   * only as a fallback. */
+  const char *cgroup_keys_v1[] = {"memory", "", NULL};
+  const char *cgroup_keys_v2[] = {"", "memory", NULL};
+  const char **cgroup_keys =
+      ((g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) ==
+       CGROUPV1_COMPATIBILITY_MODE)
+          ? cgroup_keys_v1
+          : cgroup_keys_v2;
   for (int i = 0; cgroup_keys[i] != NULL; i++) {
     char pid_cgroup[CGROUP_LINE_MAX];
     if (read_cgroup(fp, cgroup_keys[i], pid_cgroup, sizeof(pid_cgroup)) != 0) {

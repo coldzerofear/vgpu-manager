@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "include/hook.h"
+#include "include/cgroup_match.h"
 
 extern int split_str(const char *line, char *key, size_t key_size,
                      char *value, size_t value_size, char d);
@@ -199,6 +200,74 @@ static void test_read_cgroup_reads_a_real_file(void) {
   unlink(tmpl);
 }
 
+/* Why the CALLER'S key order matters on a cgroup v1 host, pinned here because
+ * the order itself lives in cuda_hook.c, which the no-GPU tests cannot reach.
+ *
+ * This is the hybrid shape measured on a real host (Ubuntu 24.04 booted with
+ * systemd.unified_cgroup_hierarchy=0): the v1 hierarchies carry a path per
+ * container, and cgroup2 is mounted as well -- but whether the container has a
+ * group of its own in the unified hierarchy is the runtime's choice. Where it
+ * does not, the unified line degenerates while the memory line stays correct,
+ * and the two keys then disagree about the same process. Asking "" first would
+ * read the degenerate answer: every container on the host reads the same
+ * string, so a sibling container's process prefix-matches ours and gets
+ * claimed -- over-counting, which throttles the container against memory it
+ * does not hold. Hence {"memory", ""} when the manager says cgroup v1.
+ *
+ * If this test ever starts reporting the two keys as equal, the fixture has
+ * stopped representing the shape and the order has stopped being testable. */
+static void test_hybrid_unified_line_can_degenerate(void) {
+  char tmpl[] = "/tmp/vgpu_cgroup_hybrid_XXXXXX";
+  int fd = mkstemp(tmpl);
+  if (fd < 0) {
+    printf("SKIP: mkstemp failed\n");
+    return;
+  }
+  FILE *f = fdopen(fd, "w");
+  if (!f) {
+    close(fd);
+    unlink(tmpl);
+    printf("SKIP: fdopen failed\n");
+    return;
+  }
+  fprintf(f, "13:memory:" REAL_PATH "\n");
+  fprintf(f, "9:pids:" REAL_PATH "\n");
+  fprintf(f, "0::/\n");            /* the degenerate unified line */
+  fclose(f);
+
+  FILE *r = fopen(tmpl, "re");
+  CHECK(r != NULL, "could not reopen the hybrid fixture");
+  if (r == NULL) {
+    unlink(tmpl);
+    return;
+  }
+
+  char unified[CGROUP_LINE_MAX], memory[CGROUP_LINE_MAX];
+  CHECK(read_cgroup(r, "", unified, sizeof(unified)) == 0,
+        "the unified line must still be readable");
+  CHECK(read_cgroup(r, "memory", memory, sizeof(memory)) == 0,
+        "the memory hierarchy must still be readable");
+  CHECK(strcmp(unified, "/") == 0,
+        "the fixture's unified line should be \"/\", got '%s'", unified);
+  CHECK(strcmp(memory, REAL_PATH) == 0,
+        "the memory hierarchy should carry the per-container path, got '%s'",
+        memory);
+  CHECK(strcmp(unified, memory) != 0,
+        "the two keys must disagree here, or this fixture no longer "
+        "represents the shape that makes the key order load-bearing");
+
+  /* And the consequence, stated in the matcher's own terms: the degenerate
+   * answer is not specific to any container, so it cannot distinguish ours
+   * from a sibling's, while the memory path can. */
+  CHECK(cgroup_path_is_ours(unified, "/") == 1,
+        "a degenerate \"/\" self path claims an unrelated \"/\"");
+  CHECK(cgroup_path_is_ours(memory, REAL_PATH) == 1,
+        "the per-container path must still claim our own process");
+
+  fclose(r);
+  unlink(tmpl);
+}
+
 /* Opening is the caller's job now, so what used to be "a missing file" is a
  * NULL stream here. The other guards are checked alongside it: every one of
  * them is a path that must not write to the output buffer. */
@@ -243,6 +312,7 @@ int main(void) {
   test_trimming_matches_legacy_behaviour();
   test_zero_sized_buffers();
   test_read_cgroup_reads_a_real_file();
+  test_hybrid_unified_line_can_degenerate();
   test_read_cgroup_rejects_bad_arguments();
 
   if (failures) {
