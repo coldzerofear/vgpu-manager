@@ -241,15 +241,27 @@ static int64_t v15_control(int64_t total, int up_limit, int user_current,
  * Both generations measure consumption through the refill mark (mark -
  * bucket) and drain when the observed cut asks. The baseline is v15 as it
  * shipped (share and bucket capped at the pool); the candidate is the
- * shipped cycle -- sm_delta_control with its headroom, and the bucket
- * clamped to sm_delta_bucket_ceiling() of the share the controller state
- * holds, as refill_ceiling() in cuda_hook.c does it. R is in tokens of
- * whichever charge the caller models; the plant does not care. */
+ * shipped cycle -- sm_delta_est_control, which falls back to
+ * sm_delta_control without a usable sample, and the bucket held between
+ * sm_delta_debt_floor() and sm_delta_est_bucket_ceiling() of the share the
+ * controller state holds, as refill_ceiling() in cuda_hook.c does it. R is
+ * in tokens of whichever charge the caller models; the plant does not care. */
 typedef struct {
   int64_t bucket, share, mark;
   int mark_valid, calls, throttled;
   int hist[8];
+  sm_delta_est_t est;          /* the candidate's sample-driven estimate state */
+  int hold_acc, hold_n, held;  /* g_plant_hold: the sample being accumulated / the one shown */
+  uint64_t held_ts;
 } plant_t;
+
+/* Measurement model. 0 (the campaigns' original model): a fresh reading every
+ * cycle, `delay` cycles late. H > 0: what NVML does on parts with a slow
+ * sample period (the RTX 2080 Ti measured 1 s = 10 cycles): a new sample
+ * every H cycles, the mean of the H cycles before it, shown until the next
+ * one. Either way each reading carries the timestamp of the period it
+ * describes, which the candidate pairs with its consumption records. */
+static int g_plant_hold = 0;
 
 static int plant_cycle(plant_t *p, int64_t total, int64_t R, int u, int delay, int t,
                        int candidate, int hard, int inc_divisor) {
@@ -263,17 +275,34 @@ static int plant_cycle(plant_t *p, int64_t total, int64_t R, int u, int delay, i
     p->throttled = 1;
   }
   int util = R == 0 ? 0 : (int)(c * 100 / R);
-  int m = p->hist[t % delay];
-  p->hist[t % delay] = util;
+  int m;
+  uint64_t sample_ts;
+  if (g_plant_hold > 0) {
+    p->hold_acc += util;
+    if (++p->hold_n == g_plant_hold) {
+      p->held = p->hold_acc / g_plant_hold;
+      p->held_ts = (uint64_t)(t + 1) * 100;
+      p->hold_acc = 0;
+      p->hold_n = 0;
+    }
+    m = p->held;
+    sample_ts = p->held_ts;
+  } else {
+    m = p->hist[t % delay];
+    p->hist[t % delay] = util;
+    /* cycle k covers (k*100, (k+1)*100]; the reading shown is cycle t - delay */
+    sample_ts = t >= delay ? (uint64_t)(t + 1 - delay) * 100 : 0;
+  }
   int boot = p->calls < 2;
   p->calls++;
 
   int64_t consumed = p->mark_valid ? p->mark - p->bucket : -1;
   int drain = 0;
   int64_t out = candidate
-      ? sm_delta_control(total, u, m, p->share, p->bucket, boot, consumed, inc_divisor, 64, &drain)
+      ? sm_delta_est_control(&p->est, total, u, m, sample_ts, (uint32_t)(t + 1) * 100, p->share,
+                             p->bucket, boot, consumed, inc_divisor, 64, &drain)
       : v15_control(total, u, m, p->share, p->bucket, boot, consumed, V15_INC_DIVISOR, 64, &drain);
-  if (drain) {
+  if (drain && p->bucket > 0) {
     p->bucket = 0;
   }
   int lo = u / 10 < 1 ? 1 : u / 10;
@@ -283,12 +312,13 @@ static int plant_cycle(plant_t *p, int64_t total, int64_t R, int u, int delay, i
     p->share = out;
     p->bucket += out;
   }
-  int64_t ceiling = candidate ? sm_delta_bucket_ceiling(total, p->share) : total;
+  int64_t ceiling = candidate ? sm_delta_est_bucket_ceiling(p->share) : total;
+  int64_t floor = candidate ? sm_delta_debt_floor(p->share, ceiling) : 0;
   if (p->bucket > ceiling) {
     p->bucket = ceiling;
   }
-  if (p->bucket < 0) {
-    p->bucket = 0;
+  if (p->bucket < floor) {
+    p->bucket = floor;
   }
   /* Serial plant: "the read plus every applied change" is just the bucket. */
   p->mark = p->bucket;

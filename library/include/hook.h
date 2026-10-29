@@ -598,14 +598,35 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
  * sizeof(sm_node_region_t): a later version may grow the struct without
  * changing the file size, so the region is never resized, so an older process
  * still holding a mapping can never have its tail fall past EOF (which would
- * be SIGBUS on access). Current use is 128 + 16*128 = 2176B. */
+ * be SIGBUS on access). Current use is 128 + 16*384 = 6272B. */
 #define SM_NODE_FILE_SIZE 8192
 
 #define SM_NODE_MAGIC          0x534D4E44U   /* "SMND" */
 /* BUMP THIS whenever any field below changes type, order, or offset.
  * The guard compares it and rebuilds the region on mismatch; forgetting to
  * bump it means a new library silently reads an old layout's bytes. */
-#define SM_NODE_LAYOUT_VERSION 4U   /* v4: + delta_mark / delta_mark_valid (observed consumption) */
+#define SM_NODE_LAYOUT_VERSION 5U   /* v5: + sample timestamp, sample-driven estimate state; two cache lines */
+
+/* Sample-driven estimate state (include/sm_delta.h, sm_delta_est_control).
+ * Defined here so the shared region can hold it: the sample window spans
+ * cycles won by different processes, so it is controller state like the mark.
+ * The ring keeps the last SM_DELTA_EST_RING cycles' consumption with the
+ * wall-clock millisecond each was read at, so a sample is paired with exactly
+ * the cycles its timestamps cover, however late the driver publishes it. */
+#define SM_DELTA_EST_RING 16
+typedef struct {
+  uint64_t last_ts;                      /* ms of the last sample seen (0: none)     */
+  uint64_t win_ts;                       /* ms the open estimate window starts at    */
+  int64_t  win_reading_ms;               /* sum of reading x period over the window  */
+  int64_t  win_ms;                       /* sampled time in the window               */
+  int32_t  have_est;                     /* an estimate has been taken               */
+  int32_t  zero_starved;                 /* last fresh sample read 0 while starved   */
+
+  uint32_t head;                         /* records written (ring index = head % N)  */
+  uint32_t starved_mask;                 /* bit k: record k's bucket ran (about) dry */
+  uint32_t t_ms[SM_DELTA_EST_RING];      /* wall-clock ms the record was read at     */
+  int64_t  consumed[SM_DELTA_EST_RING];  /* tokens consumed in the cycle it closes   */
+} sm_delta_est_t;
 
 /* No volatile, no _Atomic. volatile provides no concurrency guarantee (today's
  * correctness comes entirely from the CAS macro), and _Atomic risks a
@@ -689,7 +710,11 @@ typedef struct {
    * first refill after a rebuild. */
   int64_t delta_mark;
   int32_t delta_mark_valid;
-  uint8_t _pad[CACHELINE_SIZE - 116];
+  /* NVML timestamp of the published sample: a standby sees a fresh sample
+   * exactly when the owner did (sm_delta_est_control acts once per sample). */
+  uint64_t s_sample_ts;
+  sm_delta_est_t est;
+  uint8_t _pad[3 * CACHELINE_SIZE - CACHELINE_SIZE - sizeof(sm_delta_est_t)];
 } __attribute__((aligned(CACHELINE_SIZE))) sm_node_dev_t;
 
 typedef struct {
@@ -706,8 +731,10 @@ typedef struct {
   sm_node_dev_t devices[MAX_DEVICE_COUNT];
 } sm_node_region_t;
 
-_Static_assert(sizeof(sm_node_dev_t) == CACHELINE_SIZE,
-               "sm_node_dev_t must occupy exactly one padded cache line");
+_Static_assert(offsetof(sm_node_dev_t, est) == CACHELINE_SIZE,
+               "estimate state starts on the second cache line, off the hot one");
+_Static_assert(sizeof(sm_node_dev_t) == 3 * CACHELINE_SIZE,
+               "sm_node_dev_t must occupy exactly three padded cache lines");
 _Static_assert(_Alignof(sm_node_dev_t) == CACHELINE_SIZE,
                "sm_node_dev_t must be cache-line aligned or false sharing returns");
 _Static_assert(offsetof(sm_node_region_t, devices) == CACHELINE_SIZE,
@@ -740,6 +767,10 @@ typedef struct {
    * they don't cause repeated resets. HOST_COMPATIBILITY_MODE has no
    * container boundary -> this field stays 0. */
   int external_process_num;
+  /* Newest NVML timestamp among the samples read this cycle (0: none). It
+   * moves only when the driver produces a new sample, which on some parts is
+   * once a second while the watcher runs every 100 ms. */
+  uint64_t sample_ts;
 } utilization_t;
 
 typedef enum VGPU_COMPATIBILITY_MODE_enum {

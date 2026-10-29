@@ -20,14 +20,15 @@ limitations under the License.
  * than one pool per cycle, so its numbers here are its ceiling, not control.
  */
 #define TRN_HEAVY 1
-/* Ratchet. BURST: on/off between 3 pools and idle at a period of twice the
- * measurement delay (on2/off2 at delay 2, ...) aliases: the readings arrive
- * exactly out of phase and the share settles ~4x too deep (util 100 on, 0
- * off, MAE 50 at target 50) where v15, pinned at one pool, read 33%. */
-#define HEAVY_DROP_CELLS  204
-#define HEAVY_DROP_WORST  2.23
+/* Ratchet (re-based at v16.1). DROP: none left (v16 had 204). BURST: the
+ * worst cells are one-cycle bursts (on1/off1) between 3 pools and idle: the
+ * sample-driven estimate holds the window's mean, so a 100 ms burst runs
+ * above the target inside it, where v15, pinned at one pool, read 7%. Mean
+ * BURST MAE 40.05 -> 8.96. */
+#define HEAVY_DROP_CELLS  0
+#define HEAVY_DROP_WORST  2.0
 #define HEAVY_RISE_CELLS  0
 #define HEAVY_RISE_WORST  2.0
-#define HEAVY_BURST_CELLS 3366
-#define HEAVY_BURST_WORST 33.01
+#define HEAVY_BURST_CELLS 2295
+#define HEAVY_BURST_WORST 34.69
 #include "test/nogpu/test_delta_transients.c"

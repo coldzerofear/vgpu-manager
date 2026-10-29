@@ -93,7 +93,11 @@
   （HAMi-core #274 同源）。新 delta = 粒度种子（pool·5/1310720，2026-10 由 81920 细化，见 docs/sm_delta_validation.md 代际战役）+ share 比例项（误差/6 阻尼）+ 涨侧 pool/10 封顶
   + 爆冲门控应急 floor（`include/sm_delta.h`，纯函数可测）。**v16（2026-10）**：launch 按 grid×block 线程数计费、FACTOR 256、
   share 可按实测需求超过一个池（桶随之 2×share）、限额 91～95 饱和即可下调（docs/sm_delta_validation.md 第 11 节）。闭环仿真 60 格全胜旧公式（MAE 0.3-12 vs 钉死），
-  卡型无关，扛 4-tick 反馈延迟与负载突变；**待真机验证**。默认 `delta`；AIMD/auto 保留为备选。
+  卡型无关，扛 4-tick 反馈延迟与负载突变。**v16.1（2026-10，RTX 2080 Ti 真机验证）**：NVML 进程样本在部分卡上 1 s 才刷新，
+  控制器改为「新样本到来时按 窗口令牌消耗×目标/读数 一步估计 share、样本之间保持」（`sm_delta_est_control`，按样本时间戳
+  对齐消耗环形记录、≥500 ms 窗口）、透支结转（长 kernel 不再有 ~17% 下限）、桶上限 2×share；估计状态在 sm_node 共享区
+  （布局 v5）。真机硬路径 L≤80 吞吐误差 5.5→1.8、1 s 波动 13→0.7、≥90 可限住（docs/sm_delta_validation.md 第 12 节）。
+  默认 `delta`；AIMD/auto 保留为备选（计划移除）。
 - **共享令牌桶默认开启**（`CUDA_SM_SHARED_BUCKET=0` 可关；会话模式下拒绝关闭）：一个远程容器 = 每条连接一个子进程，进程内桶会让每个子进程各自按完整
   `hard_core` 限速 → 容器拿到 N× 配额；且 N 个 watcher 各自轮询 NVML。共享桶（`<session>/.sm_node`）的 CAS 补给
   选举 + 采样所有权同时解决两者（standby 完全跳过 NVML）。显式 `CUDA_SM_SHARED_BUCKET=0` 在会话模式下被拒绝；

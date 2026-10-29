@@ -79,8 +79,12 @@ limitations under the License.
 static const long   BUDGET_CELLS[] = {HEAVY_DROP_CELLS, HEAVY_RISE_CELLS, HEAVY_BURST_CELLS};
 static const double BUDGET_WORST[] = {HEAVY_DROP_WORST, HEAVY_RISE_WORST, HEAVY_BURST_WORST};
 #else
-static const long   BUDGET_CELLS[] = {0, 0, 0};
-static const double BUDGET_WORST[] = {CELL_CAP, CELL_CAP, CELL_CAP};
+/* BURST since v16.1: one-cycle bursts (on1/off1, 100 ms) under readings that
+ * are fresh every cycle. The estimate holds the sample window's mean (>= 500
+ * ms), so a 100 ms burst inside it may run above the target while the window
+ * reads it; no NVML part samples that fast. Mean BURST MAE 20.75 -> 4.97. */
+static const long   BUDGET_CELLS[] = {0, 0, 954};
+static const double BUDGET_WORST[] = {CELL_CAP, CELL_CAP, 11.01};
 #endif
 
 enum { DROP, RISE, BURST, NCLASS };

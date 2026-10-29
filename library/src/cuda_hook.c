@@ -445,7 +445,7 @@ static void initialization();
 
 static void rate_limiter(int64_t tokens, int host_index);
 
-static int64_t change_token(int64_t, int64_t, int);
+static int64_t change_token(int64_t, int64_t, int64_t, int);
 
 static int64_t delta(int up_limit, int user_current, int64_t share, int host_index);
 
@@ -656,9 +656,10 @@ dynamic_config_t g_dynamic_config = {
  * that landed, so clamping included). The watcher adds it to the refill mark
  * (see g_delta_mark). */
 /* ceiling: the most the bucket may hold after this change -- the pool, or the
- * delta controller's headroom ceiling once its share is past the pool (see
- * refill_ceiling). */
-static int64_t change_token(int64_t delta, int64_t ceiling, int host_index) {
+ * delta controller's ceiling (see refill_ceiling). floor: the least -- 0
+ * forgives any overdraft, a negative floor carries it (refill_ceiling's
+ * *floor). */
+static int64_t change_token(int64_t delta, int64_t ceiling, int64_t floor, int host_index) {
   int64_t cuda_cores_before = 0, cuda_cores_after = 0;
   volatile int64_t *bucket = sm_bucket_of(host_index);
 
@@ -669,8 +670,9 @@ static int64_t change_token(int64_t delta, int64_t ceiling, int host_index) {
 
     if (unlikely(cuda_cores_after > ceiling)) {
       cuda_cores_after = ceiling;
-    } else if (unlikely(cuda_cores_after < 0)) {
-      cuda_cores_after = 0;
+    } else if (unlikely(cuda_cores_after < floor)) {
+      /* Debt beyond the floor is forgiven. */
+      cuda_cores_after = floor;
     }
   } while (!CAS(bucket, cuda_cores_before, cuda_cores_after));
   return cuda_cores_after - cuda_cores_before;
@@ -738,6 +740,13 @@ static int64_t g_delta_mark[MAX_DEVICE_COUNT]       = {0};
 static int     g_delta_mark_valid[MAX_DEVICE_COUNT] = {0};
 static int     g_delta_mark_fresh[MAX_DEVICE_COUNT] = {0};
 
+/* Sample-driven estimate state (include/sm_delta.h, sm_delta_est_control):
+ * controller state, loaded from / published to the shared region with the
+ * mark. g_delta_sample_ts is this cycle's NVML sample timestamp (us), set by
+ * the watcher before the controller runs. */
+static sm_delta_est_t g_delta_est[MAX_DEVICE_COUNT];
+static uint64_t g_delta_sample_ts[MAX_DEVICE_COUNT] = {0};
+
 /* After the winner's refill (or bypass store): finish this cycle's mark. */
 static void delta_mark_refill(int host_index, int64_t applied) {
   if (g_delta_mark_fresh[host_index]) {
@@ -766,16 +775,21 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
   int64_t bucket = *sm_bucket_of(host_index);
   int64_t consumed = g_delta_mark_valid[host_index] ? g_delta_mark[host_index] - bucket : -1;
   int drain = 0;
-  int64_t next = sm_delta_control(g_total_cuda_cores[host_index], up_limit, user_current,
-                                  share, bucket, boot, consumed,
-                                  g_dynamic_config.delta_increment_divisor,
-                                  g_dynamic_config.delta_ramp_floor_divisor, &drain);
+  struct timeval now;
+  gettimeofday(&now, NULL);
+  uint32_t now_ms = (uint32_t)((uint64_t)now.tv_sec * 1000ULL + (uint64_t)now.tv_usec / 1000ULL);
+  int64_t next = sm_delta_est_control(&g_delta_est[host_index], g_total_cuda_cores[host_index],
+                                      up_limit, user_current, g_delta_sample_ts[host_index] / 1000ULL,
+                                      now_ms, share, bucket, boot, consumed,
+                                      g_dynamic_config.delta_increment_divisor,
+                                      g_dynamic_config.delta_ramp_floor_divisor, &drain);
   g_delta_mark[host_index] = bucket;
   g_delta_mark_fresh[host_index] = 1;
-  if (drain) {
+  /* A drain empties a backlog; it must never repay a debt (-bucket > 0). */
+  if (drain && bucket > 0) {
     /* Through change_token's CAS so concurrent deductions are not undone;
      * a stale `bucket` only makes the result clamp at 0, which is the aim. */
-    g_delta_mark[host_index] += change_token(-bucket, g_total_cuda_cores[host_index], host_index);
+    g_delta_mark[host_index] += change_token(-bucket, g_total_cuda_cores[host_index], 0, host_index);
   }
   return next;
 }
@@ -1213,15 +1227,21 @@ static int session_has_core_limit(void) {
 
 static int64_t shares[MAX_DEVICE_COUNT]    = {0};
 
-/* The bucket ceiling for this cycle's refill: the pool, or two cycles of
- * share once the delta controller's share is past it (sm_delta_bucket_ceiling)
- * -- from the share the controller state now holds, fresh after a normal
- * cycle, unchanged after a bypass. */
-static int64_t refill_ceiling(int host_index) {
+/* The bucket bounds for this cycle's refill, from the share the controller
+ * state now holds (fresh after a normal cycle, unchanged after a bypass).
+ * After a delta cycle: DELTA_BUCKET_CYCLES of share above, DELTA_DEBT_CYCLES
+ * of overdraft carried below (sm_delta_est_bucket_ceiling /
+ * sm_delta_debt_floor). After any other controller: the pool above and no
+ * debt, as before. *floor may be NULL where debt is forgiven anyway. */
+static int64_t refill_ceiling(int host_index, int64_t *floor) {
   int64_t total = g_total_cuda_cores[host_index];
   int ran = g_delta_ran[host_index];
   g_delta_ran[host_index] = 0;
-  return ran ? sm_delta_bucket_ceiling(total, shares[host_index]) : total;
+  int64_t ceiling = ran ? sm_delta_est_bucket_ceiling(shares[host_index]) : total;
+  if (floor != NULL) {
+    *floor = ran ? sm_delta_debt_floor(shares[host_index], ceiling) : 0;
+  }
+  return ceiling;
 }
 static int sys_frees[MAX_DEVICE_COUNT]      = {0};
 static int avg_sys_frees[MAX_DEVICE_COUNT]  = {0};
@@ -1440,6 +1460,7 @@ static void sm_ctl_load(int host_index) {
   g_aimd_md_cooldown[host_index]         = d->md_cooldown;
   g_delta_mark[host_index]               = d->delta_mark;
   g_delta_mark_valid[host_index]         = d->delta_mark_valid;
+  g_delta_est[host_index]                = d->est;
 }
 
 static void sm_ctl_publish(int host_index) {
@@ -1458,6 +1479,7 @@ static void sm_ctl_publish(int host_index) {
   d->md_cooldown       = g_aimd_md_cooldown[host_index];
   d->delta_mark        = g_delta_mark[host_index];
   d->delta_mark_valid  = g_delta_mark_valid[host_index];
+  d->est               = g_delta_est[host_index];
   __atomic_store_n(&d->share, shares[host_index], __ATOMIC_RELEASE);  /* publish */
 }
 
@@ -1527,6 +1549,7 @@ static void sm_publish_sample(int host_index) {
   d->s_sys_current       = top_results[host_index].sys_current;
   d->s_sys_process_num   = top_results[host_index].sys_process_num;
   d->s_external_proc_num = top_results[host_index].external_process_num;
+  d->s_sample_ts         = top_results[host_index].sample_ts;
   __atomic_store_n(&d->sample_published_ns, now, __ATOMIC_RELEASE);
 }
 
@@ -1551,6 +1574,7 @@ static int sm_load_published_sample(int host_index) {
   top_results[host_index].sys_current          = d->s_sys_current;
   top_results[host_index].sys_process_num      = d->s_sys_process_num;
   top_results[host_index].external_process_num = d->s_external_proc_num;
+  top_results[host_index].sample_ts            = d->s_sample_ts;
   top_results[host_index].valid                = 1;
   return 1;
 }
@@ -1571,6 +1595,8 @@ static void *utilization_watcher(void *arg) {
     shares[host_index] = 0;
     g_delta_mark_valid[host_index] = 0;
     g_delta_mark_fresh[host_index] = 0;
+    memset(&g_delta_est[host_index], 0, sizeof(g_delta_est[host_index]));
+    g_delta_sample_ts[host_index] = 0;
     sys_frees[host_index] = 0;
     avg_sys_frees[host_index] = 0;
     pre_external_process_nums[host_index] = 0;
@@ -1581,6 +1607,7 @@ static void *utilization_watcher(void *arg) {
     top_results[host_index].valid = 0;
     top_results[host_index].sys_process_num = 0;
     top_results[host_index].external_process_num = 0;
+    top_results[host_index].sample_ts = 0;
   }
   int dev_count = batch->end_index - batch->start_index;
   struct timespec wait = {
@@ -1676,6 +1703,7 @@ static void *utilization_watcher(void *arg) {
         continue;
       }
       sm_ctl_load(host_index);
+      g_delta_sample_ts[host_index] = top_results[host_index].sample_ts;
 
       sys_frees[host_index] = MAX_UTILIZATION - top_results[host_index].sys_current;
 
@@ -1722,11 +1750,11 @@ static void *utilization_watcher(void *arg) {
             volatile int64_t *bucket = sm_bucket_of(host_index);
             int64_t cur = __atomic_load_n(bucket, __ATOMIC_RELAXED);
             delta_mark_refill(host_index,
-                              change_token(bypass_target - cur, refill_ceiling(host_index), host_index));
+                              change_token(bypass_target - cur, refill_ceiling(host_index, NULL), 0, host_index));
           } else {
             /* Plain store, so no applied delta to add: the store itself is the
              * mark. Racing launches are lost here anyway (historical path). */
-            int64_t ceiling = refill_ceiling(host_index);
+            int64_t ceiling = refill_ceiling(host_index, NULL);
             if (bypass_target > ceiling) bypass_target = ceiling;
             g_dev_hot[host_index].cur_cuda_cores = bypass_target;
             g_delta_mark[host_index] = bypass_target;
@@ -1841,8 +1869,10 @@ static void *utilization_watcher(void *arg) {
           shares[host_index] = g_sm_controller(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
         }
       }
+      int64_t refill_lo = 0;
+      int64_t refill_hi = refill_ceiling(host_index, &refill_lo);
       delta_mark_refill(host_index,
-                        change_token(shares[host_index], refill_ceiling(host_index), host_index));
+                        change_token(shares[host_index], refill_hi, refill_lo, host_index));
       sm_ctl_publish(host_index);
       if ((g_share_log_tick[host_index]++ % WATCHER_UTIL_LOG_STRIDE) == 0) {
         g_share_log_tick[host_index] = 1;
@@ -2884,6 +2914,12 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
   }
   if (unlikely(ret)) return;
 
+  top_result->sample_ts = 0;
+  for (unsigned int k = 0; k < processes_num; k++) {
+    if (processes_sample[k].timeStamp > top_result->sample_ts) {
+      top_result->sample_ts = processes_sample[k].timeStamp;
+    }
+  }
   top_result->user_current = 0;
   top_result->sys_current = 0;
   // In some versions of the driver, it is not possible to rely on nvmlDeviceGetComputeRunningProcesses

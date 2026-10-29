@@ -396,6 +396,197 @@ static inline int64_t sm_delta_control(int64_t total, int up_limit, int user_cur
   return sm_delta_observe(total, up_limit, user_current, share, next, bucket, consumed, drain);
 }
 
+/* ---- Sample-driven estimate (v16.1) ----
+ *
+ * Measured on an RTX 2080 Ti (driver 595): NVML process utilization arrives
+ * once per ~1000 ms, each sample the mean of the second before it. The
+ * watcher runs every 100 ms, so the step above acted ten times on one stale
+ * reading, overshot, and held every target in a 2-3 s limit cycle (1 s
+ * throughput sd 8-17 points). The sample period is a property of the part and
+ * driver (NVML documents 1/6 s to 1 s), so it is detected, not assumed: a
+ * sample is fresh when its timestamp moves.
+ *
+ * Between samples the bucket measures what the reading cannot: the tokens the
+ * container consumed. Over one sample window, consumption C (tokens/cycle)
+ * produced reading m, so the share that holds the target u is C * u / m --
+ * the charge's tokens-per-utilization-point measured on this workload, this
+ * part, at this clock. That is the step taken on each fresh sample; between
+ * samples share holds. It needs no gain, so it is the same on every card:
+ *
+ *   - the limit cycle goes (hard-path sim, 1 s samples: 1 s sd 16 -> 0.4);
+ *   - targets >= 90 hold: a saturated reading (93-99 on the 2080 Ti) gives
+ *     C * u / m below C, where the observed cut's "10 points over" gate never
+ *     opened at u = 90;
+ *   - a deep share is reached in one sample instead of growing 10% a cycle
+ *     (elementwise at 250 pools/cycle: 10 s+ -> 1-2 s).
+ *
+ * A zero reading carries no ratio. If the window was starved (the bucket ran
+ * dry in most cycles) util was < 1, so C * u is a lower bound on the share the
+ * target needs and is taken as is. Otherwise a zero is idleness and share
+ * holds; before the first estimate (cold start) the step grows as before.
+ * Growing on a stale zero is what made an on/off workload's idle second
+ * inflate share 9x for the next burst.
+ *
+ * The pairing is by timestamp, not by arrival. A sample describes the period
+ * between its timestamp and the previous one, and reaches the watcher some
+ * time later (56-95 ms on the 2080 Ti). The ring records each cycle's
+ * consumption with the wall-clock time it was read; a cycle covers the time
+ * since the record before it and is weighted by its overlap with the
+ * sample's period. Pairing by arrival instead mixed cycles after the period
+ * into it: harmless at a 1 s period, but at 1/6 s with 100-300 ms of
+ * publishing latency it took the target error from 2 to 6-11 points (sim).
+ *
+ * When the estimate is below the bucket, the backlog is surplus from a share
+ * that no longer applies and is drained. */
+#define DELTA_EST_MIN_READING 1
+/* The estimate spans at least this much sampled time. A sample period
+ * shorter than a phase of the workload pairs one phase's consumption with
+ * the reading and applies the share to the next: a load alternating every
+ * cycle locked into antiphase and sat at 50% under a 99% target (sim, fresh
+ * samples each cycle). Readings within the window are averaged by period.
+ * Slow parts (1 s samples) act on every sample, as before. */
+#define DELTA_EST_MIN_WINDOW_MS 500
+
+/* now_ms: wall-clock ms of this cycle's read (CLOCK_REALTIME, the clock NVML
+ * stamps samples with). sample_ts_ms: the current sample's timestamp in ms,
+ * 0 when there is none. Times are compared as wrapping 32-bit differences. */
+static inline int64_t sm_delta_est_control(sm_delta_est_t *st, int64_t total, int up_limit,
+                                           int user_current, uint64_t sample_ts_ms,
+                                           uint32_t now_ms, int64_t share, int64_t bucket,
+                                           int boot, int64_t consumed, int inc_divisor,
+                                           int ramp_divisor, int *drain) {
+  *drain = 0;
+  int demand = bucket <= 0 || (consumed >= 0 && consumed >= share - share / 8);
+  if (consumed >= 0) {
+    uint32_t h = st->head % SM_DELTA_EST_RING;
+    st->t_ms[h] = now_ms;
+    st->consumed[h] = consumed;
+    if (demand) {
+      st->starved_mask |= 1u << h;
+    } else {
+      st->starved_mask &= ~(1u << h);
+    }
+    st->head++;
+  }
+  if (sample_ts_ms != 0 && sample_ts_ms != st->last_ts) {
+    uint64_t prev = st->last_ts;
+    st->last_ts = sample_ts_ms;
+    if (prev == 0) {
+      st->win_ts = sample_ts_ms;   /* the first sample only opens the window */
+    } else {
+      int64_t period = (int32_t)((uint32_t)sample_ts_ms - (uint32_t)prev);
+      if (period > 0) {
+        st->win_reading_ms += (int64_t)user_current * period;
+        st->win_ms += period;
+      }
+    }
+    if (prev != 0 && st->win_ms >= DELTA_EST_MIN_WINDOW_MS) {
+      uint64_t from = st->win_ts;
+      int reading = (int)(st->win_reading_ms / st->win_ms);
+      st->win_ts = sample_ts_ms;
+      st->win_reading_ms = 0;
+      st->win_ms = 0;
+      /* Weighted mean of the records over (from, sample]; weights in
+       * thousandths of a cycle. */
+      __int128 num = 0, starved_num = 0;
+      int64_t den = 0, starved_den = 0, active_den = 0;
+      int32_t end = (int32_t)((uint32_t)sample_ts_ms - (uint32_t)from);
+      for (uint32_t i = 0; i + 1 < SM_DELTA_EST_RING && i + 1 < st->head; i++) {
+        uint32_t k = (st->head - 1 - i) % SM_DELTA_EST_RING;
+        uint32_t kp = (st->head - 2 - i) % SM_DELTA_EST_RING;
+        int32_t t1 = (int32_t)(st->t_ms[k] - (uint32_t)from);
+        int32_t t0 = (int32_t)(st->t_ms[kp] - (uint32_t)from);
+        if (t1 <= 0) {
+          break;
+        }
+        int32_t lo = t0 > 0 ? t0 : 0, hi = t1 < end ? t1 : end, len = t1 - t0;
+        if (hi <= lo || len <= 0) {
+          continue;
+        }
+        int64_t w = (int64_t)(hi - lo) * 1000 / len;
+        num += (__int128)st->consumed[k] * w;
+        den += w;
+        /* Idle is tokens left unused. A cycle that waited on an empty
+         * bucket is busy -- a long kernel overdraws it and the next cycles
+         * wait while the GPU runs it -- so it is active, consumption or not. */
+        if (st->consumed[k] > 0 || ((st->starved_mask >> k) & 1u)) {
+          active_den += w;
+        }
+        if ((st->starved_mask >> k) & 1u) {
+          starved_num += (__int128)st->consumed[k] * w;
+          starved_den += w;
+        }
+      }
+      /* Rounded, not truncated: a light load consumes a handful of tokens a
+       * cycle, where truncation halved share at a 99% target (2 * 99/100 -> 1). */
+      int64_t cbar = den > 0 ? (int64_t)((num + den / 2) / den) : 0;
+      /* A constrained window -- the bucket ran dry in a quarter or more of
+       * its active cycles -- is sized by the cycles that hit the share, not
+       * by the mean: share is a per-cycle cap, and a load whose phases
+       * alternate faster than the window (heavy cycles throttled, light ones
+       * under the cap) needs the heavy cycles' share. The mean put such a
+       * load at 55% of a 99% target (sim). Those cycles consumed what they
+       * were given, so their mean is the share in force; the reading is
+       * scaled to active time so an on/off load's idle cycles neither
+       * inflate nor dilute it. An unconstrained window (a surplus, e.g. a
+       * heavy load turned light) keeps the mean: it cuts to what is used in
+       * one step. */
+      int constrained = active_den > 0 && 4 * starved_den >= active_den;
+      st->zero_starved = reading < DELTA_EST_MIN_READING && den > 0 && 2 * starved_den >= den;
+      int m = reading >= DELTA_EST_MIN_READING ? reading : (st->zero_starved ? 1 : 0);
+      if (m >= 1 && cbar > 0 && up_limit >= 1 && up_limit < 100) {
+        /* cbar is one cycle's consumption, under two cycles of a share capped
+         * at DELTA_HEADROOM_POOLS pools: the product fits 128 bits for any pool. */
+        int64_t lim = total > INT64_MAX / DELTA_HEADROOM_POOLS ? INT64_MAX
+                                                               : total * DELTA_HEADROOM_POOLS;
+        __int128 est = ((__int128)cbar * up_limit + m / 2) / m;
+        if (constrained && starved_den > 0) {
+          /* m * den / active_den: the reading over active time, >= m. */
+          __int128 m_active = (__int128)m * den / active_den;
+          if (m_active < 1) {
+            m_active = 1;
+          }
+          est = (((starved_num + starved_den / 2) / starved_den) * up_limit + m_active / 2) / m_active;
+        }
+        int64_t next = est > lim ? lim : (est < 0 ? 0 : (int64_t)est);
+        st->have_est = 1;
+        if (bucket > next) {
+          *drain = 1;
+        }
+        return next;
+      }
+    }
+  }
+  if (st->last_ts != 0 && ((st->have_est && !st->zero_starved) || !demand)) {
+    return share;
+  }
+  return sm_delta_control(total, up_limit, user_current, share, bucket, boot, consumed,
+                          inc_divisor, ramp_divisor, drain);
+}
+
+/* The bucket holds at most this many cycles of share (at least one token):
+ * an idle stretch banks two cycles, not a pool -- v16's pool floor let a
+ * light workload bank 60+ cycles and spend them in its next burst. */
+#define DELTA_BUCKET_CYCLES 2
+/* A launch may overdraw the bucket by up to this many cycles of share and
+ * the debt is carried into the next refills. Clamping it at 0 (v16) let a
+ * kernel dearer than a cycle's share run once per cycle whatever the limit:
+ * a 20 ms persistent kernel floored at ~17%. The bound keeps one absurdly
+ * charged launch from blocking the container for more than ~10 s. */
+#define DELTA_DEBT_CYCLES 100
+
+static inline int64_t sm_delta_est_bucket_ceiling(int64_t share) {
+  if (share > INT64_MAX / DELTA_BUCKET_CYCLES) {
+    return INT64_MAX;
+  }
+  return share * DELTA_BUCKET_CYCLES < 1 ? 1 : share * DELTA_BUCKET_CYCLES;
+}
+
+static inline int64_t sm_delta_debt_floor(int64_t share, int64_t ceiling) {
+  int64_t d = share > INT64_MAX / 2 / DELTA_DEBT_CYCLES ? INT64_MAX / 2 : share * DELTA_DEBT_CYCLES;
+  return -(d > ceiling ? d : ceiling);
+}
+
 /* ---- Launch charge (v16) ----
  *
  * A launch costs its thread count, grid x block. v15 charged the grid alone,

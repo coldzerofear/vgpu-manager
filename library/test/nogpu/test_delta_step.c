@@ -520,6 +520,105 @@ static void test_invariants(void) {
     }
   }
 
+  /* v16.1 sample-driven estimate. One cycle = 100 ms; samples and cycle
+   * reads on the same millisecond grid, so window weights are exact. */
+  {
+    int ok = 1, drain = 0;
+    const int64_t total = 1000000;
+    sm_delta_est_t st;
+    int64_t r = 0;
+
+    /* acts once per window: the first sample opens it, the next one 500 ms
+     * later closes it at starved-mean * target / reading; holds in between */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      r = sm_delta_est_control(&st, total, 25, 50, t < 6 ? 100 : 600, t * 100, 5000, 0, 0,
+                               5000, DIV, 64, &drain);
+    }
+    ok &= r == 5000 * 25 / 50 && st.have_est;
+    ok &= sm_delta_est_control(&st, total, 25, 50, 600, 700, 2500, 0, 0, 2500, DIV, 64, &drain) == 2500;
+    int once = ok;
+
+    /* a sample every cycle: nothing until 500 ms of samples are in */
+    memset(&st, 0, sizeof st);
+    int early = 0;
+    for (int t = 1; t <= 5; t++) {
+      r = sm_delta_est_control(&st, total, 25, 50, t * 100, t * 100, 5000, 0, 0, 5000, DIV, 64, &drain);
+      early |= st.have_est;
+    }
+    ok &= !early;
+    r = sm_delta_est_control(&st, total, 25, 50, 600, 600, 5000, 0, 0, 5000, DIV, 64, &drain);
+    ok &= r == 2500 && st.have_est;
+    int window = ok;
+
+    /* aligned by timestamp: the sample (ts 600) arrives at 900 and the
+     * cycles after 600 were idle -- they are not part of its window */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 9; t++) {
+      int64_t c = t <= 6 ? 5000 : 0;
+      r = sm_delta_est_control(&st, total, 25, 50, t < 9 ? 100 : 600, t * 100, 5000,
+                               c ? 0 : 5000, 0, c, DIV, 64, &drain);
+    }
+    ok &= r == 2500;
+    int aligned = ok;
+
+    /* a starved zero means util < 1: consumption * target is a lower bound */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      r = sm_delta_est_control(&st, total, 40, 0, t < 6 ? 100 : 600, t * 100, 1000, 0, 0,
+                               1000, DIV, 64, &drain);
+    }
+    ok &= r == 1000 * 40 && st.zero_starved;
+    int lower = ok;
+
+    /* an idle zero (nothing consumed, bucket full) holds share, before and
+     * after an estimate */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 12; t++) {
+      r = sm_delta_est_control(&st, total, 40, 0, t < 6 ? 100 : 600, t * 100, 7000, 7000, 0, 0,
+                               DIV, 64, &drain);
+    }
+    ok &= r == 7000;
+    int idle = ok;
+
+    /* an unconstrained window (surplus) cuts to mean consumption in one step
+     * and drains the backlog */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      r = sm_delta_est_control(&st, total, 50, 100, t < 6 ? 100 : 600, t * 100, 100000, 150000,
+                               0, 10000, DIV, 64, &drain);
+    }
+    ok &= r == 10000 * 50 / 100 && drain == 1;
+    int cut = ok;
+
+    /* a constrained window is sized by the cycles that hit the share: heavy
+     * cycles (8000, starved) alternate with light ones (100, under the cap);
+     * the mean would give 2025 */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      int heavy = t % 2 == 0;
+      r = sm_delta_est_control(&st, total, 30, 60, t < 6 ? 100 : 600, t * 100, 8000,
+                               heavy ? 0 : 7900, 0, heavy ? 8000 : 100, DIV, 64, &drain);
+    }
+    ok &= r == 8000 * 30 / 60;
+    int constrained = ok;
+
+    /* bucket bounds: two cycles of share above (at least a token), a hundred
+     * below, saturating */
+    ok &= sm_delta_est_bucket_ceiling(0) == 1 && sm_delta_est_bucket_ceiling(5000) == 10000
+       && sm_delta_est_bucket_ceiling(INT64_MAX - 1) == INT64_MAX;
+    ok &= sm_delta_debt_floor(5000, 10000) == -500000 && sm_delta_debt_floor(0, 1) == -1
+       && sm_delta_debt_floor(INT64_MAX / 4, INT64_MAX) == -INT64_MAX;
+    if (!ok) {
+      printf("  [FAIL] estimate: once %d window %d aligned %d lower %d idle %d cut %d constrained %d bounds %d\n",
+             once, window, aligned, lower, idle, cut, constrained, ok);
+      failures++;
+    } else {
+      printf("  [ok] estimate: once per >=500 ms window, timestamp-aligned, starved-zero bound, idle holds, "
+             "surplus cut+drain, constrained by starved cycles; bucket 2 cycles up, 100 down\n");
+    }
+  }
+
   /* v16 charge: grid x block threads, saturating instead of wrapping. */
   {
     int ok = sm_launch_tokens(1, 1, 1, 1, 1, 1) == 1
