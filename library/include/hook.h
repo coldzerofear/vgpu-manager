@@ -108,17 +108,74 @@ extern "C" {
 
 #define PID_SELF_CGROUP_PATH "/proc/self/cgroup"
 
+#define PID_CGROUP_PATH "/proc/%u/cgroup"
+
 #define PID_SELF_NS_PATH "/proc/self/ns"
 
 #define HOST_PROC_PATH (VGPU_MANAGER_PATH "/.host_proc")
 
 #define HOST_PROC_CGROUP_PID_PATH (VGPU_MANAGER_PATH "/.host_proc/%u/cgroup")
 
+/* The HOST's init, and this container's local pid 1. Both are read to settle
+ * CGROUP_MATCH_NEEDS_NS_MODE; see self_cgroup_ns_is_private() in src/util.c
+ * for which one answers in which mode and why. */
+#define HOST_PROC_INIT_CGROUP_PATH (VGPU_MANAGER_PATH "/.host_proc/1/cgroup")
+#define PID_INIT_CGROUP_PATH "/proc/1/cgroup"
+
 /* A systemd+containerd cgroup path is ~190 bytes on its own and may nest
  * deeper, so buffers holding one are sized for a path rather than a guess.
  * The old 128-byte guess overflowed by 64 bytes on a stock Kubernetes node. */
 #define CGROUP_LINE_MAX 4096
 #define CGROUP_KEY_MAX  256
+
+/* An init process's cgroup path is read only to look for a ".." component, and
+ * the real strings are tiny: "/init.scope" under cgroupns=host, and at most
+ * "/../../../../init.scope" under private (four levels, measured on a CRI
+ * Pod). Sizing that buffer at CGROUP_LINE_MAX would put another 4 KiB on a
+ * stack that is already ~62 KiB deep on the utilization path. If a path ever
+ * does exceed this, read_cgroup() refuses it rather than truncating, the probe
+ * reports "could not tell", and the caller falls through to its next source --
+ * the degrading direction, not a wrong answer. */
+#define CGROUP_INIT_LINE_MAX 1024
+
+/* "My own cgroup path", read once per device query instead of once per pid.
+ *
+ * check_device_pid_in_proc_cgroup_path() runs per pid inside the device lock
+ * and used to open and read /proc/self/cgroup on every call. A
+ * `pid_cgroup == "/"` short-circuit hid that cost for our own pids under
+ * cgroupns=private, where our processes do render as "/" -- but the same
+ * string is what a process sitting in the HOST root cgroup renders as under
+ * cgroupns=host, so the short-circuit claimed it. That over-counts, and it is
+ * reachable on cgroup v1 nodes: containerd gives containers the host cgroup
+ * namespace there, which a real-hardware matrix hit in all twelve CRI
+ * configurations (162 of 2338 judgements).
+ *
+ * Dropping the short-circuit on its own doubled the per-pid cost -- measured
+ * 4524 -> 9155 ns on cgroup v2 and 2924 -> 5771 ns on v1. Hoisting the read
+ * into this snapshot makes it free (4523 / 2849 ns) and also halves what
+ * every pid that is NOT ours already paid, since the short-circuit never
+ * covered those.
+ *
+ * Stack-local by design: a caller declares one per loop and hands out a
+ * pointer. Two threads of one process can both be inside the device lock
+ * (fcntl byte-range locks are per-process), so a file-static would race.
+ * Loaded lazily on first use so a mode that never consults cgroups -- SESSION,
+ * or a device with no processes on it -- pays nothing. */
+#define CGROUP_KEY_SLOTS 2
+typedef struct {
+  /* NULL-terminated, and the ORDER matters on cgroup v1; see
+   * self_cgroup_init() in src/util.c for which order and why. */
+  const char *keys[CGROUP_KEY_SLOTS + 1];
+  char paths[CGROUP_KEY_SLOTS][CGROUP_LINE_MAX];
+  unsigned char resolved[CGROUP_KEY_SLOTS];
+  unsigned char loaded;
+  /* Whether we are in a private cgroup namespace, per key: -1 not probed yet,
+   * 0 no (or could not tell), 1 yes. Probed at most once per key per device
+   * query, and only when the strings came back CGROUP_MATCH_NEEDS_NS_MODE --
+   * which on cgroup v2 with cgroupns=private, what containerd gives
+   * containers, never happens. */
+  signed char ns_private[CGROUP_KEY_SLOTS];
+} self_cgroup_t;
 
 /* Mode the library relaxes its own shared-state files to after creating them.
  * The plugin already creates the enclosing directories 0777 so that a
@@ -942,6 +999,19 @@ void free_gpu_virt_memory(CUdeviceptr dptr);
 void free_gpu_virt_memory_by_graph(CUgraph graph);
 
 int get_gpu_virt_memory_type(CUdeviceptr dptr);
+
+/* Results of device_pid_in_same_container() (src/util.c). Three-valued because
+ * "we may not look at this pid" is a different answer from "this pid is not
+ * ours": a denial has to be resolved by the caller, which knows the
+ * compatibility mode, rather than silently read as "not ours" -- that would
+ * under-count a process that IS ours, and under-counting is the quota-escape
+ * direction.
+ *
+ * YES/NO keep the 0 / -1 this function has always returned, so an existing
+ * `== 0` test still means "confirmed ours". */
+#define PID_IN_CONTAINER_YES      0
+#define PID_IN_CONTAINER_UNKNOWN  1
+#define PID_IN_CONTAINER_NO     (-1)
 
 int get_nvml_device_index_by_cuda_device(CUdevice device);
 

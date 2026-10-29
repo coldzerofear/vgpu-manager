@@ -207,8 +207,6 @@ func GetCompatibilityMode(devManager *manager.DeviceManager) util.CompatibilityM
 		mode |= util.ClientRegMode
 	case cgroups.IsCgroup2UnifiedMode():
 		mode |= util.CGroupv2Mode
-	case cgroups.IsCgroup2HybridMode():
-		mode |= util.CGroupv2Mode
 	default:
 		mode |= util.CGroupv1Mode
 	}

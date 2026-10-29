@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include "include/hook.h"
+#include "include/cgroup_match.h"
 #include "include/sm_delta.h"
 
 #include <stdint.h>
@@ -711,35 +712,254 @@ int split_str(const char *line, char *key, size_t key_size,
   return 0;
 }
 
-/* Reads the cgroup path for cgroup_key out of a /proc/<pid>/cgroup file.
- * cgroup_value is written in place by split_str -- its contents are only
- * meaningful when this returns 0. */
-int read_cgroup(const char *pid_path, const char *cgroup_key,
-                char *cgroup_value, size_t value_size) {
+/*
+ * Reads the cgroup path for cgroup_key from an open /proc/<pid>/cgroup.
+ *
+ *   line: <hierarchy-id>:<controller-list>:<cgroup-path>
+ *
+ *   cgroup_key == ""  -> controller-list must be empty (v2 "0::/path")
+ *   cgroup_key != ""  -> key must be one ','-separated member of the list
+ *
+ * Returns 0 on match (cgroup_value = path, NUL-terminated, truncated to
+ * value_size), -1 otherwise.  cgroup_value is written only on success.
+ *
+ * Rewinds first, so the search always covers the whole file. Callers hand the
+ * same FILE* in twice -- once per cgroup version they try -- and a miss on the
+ * first key leaves the stream at EOF, which would make every later key fail
+ * for the position rather than for the contents. On a cgroup v1 host that is
+ * exactly the sequence that happens: the empty (v2) key matches nothing, and
+ * "memory" would then be asked of a stream with nothing left to read.
+ */
+int read_cgroup(FILE *fp, const char *cgroup_key, char *cgroup_value, size_t value_size) {
+  if (fp == NULL || cgroup_key == NULL || cgroup_value == NULL || value_size == 0) {
+    return -1;
+  }
+  rewind(fp);
+
+  char buff[CGROUP_LINE_MAX];
+  const size_t key_len = strlen(cgroup_key);
+
+  while (fgets(buff, sizeof(buff), fp)) {
+    char *first = strchr(buff, ':');
+    if (first == NULL) continue;
+    char *second = strchr(first + 1, ':');
+    if (second == NULL) continue;
+
+    if (key_len == 0) {
+      if (second != first + 1) continue;
+    } else {
+      int matched = 0;
+      const char *p = first + 1, *end = second;
+      while (p < end) {
+        const char *comma = memchr(p, ',', (size_t)(end - p));
+        const char *mend = comma ? comma : end;
+        if ((size_t)(mend - p) == key_len &&
+            memcmp(p, cgroup_key, key_len) == 0) {
+          matched = 1;
+          break;
+        }
+        p = comma ? comma + 1 : end;
+      }
+      if (!matched) continue;
+    }
+
+    const char *path = second + 1;
+    size_t path_len = strcspn(path, "\r\n");
+    if (path_len >= value_size) {
+      /* Fail rather than truncate. The caller prefix-matches this against
+       * another process's path, and a truncated path is a prefix of OTHER
+       * cgroups too: cut "/kubepods/pod-A/container-1" at a '/' and it also
+       * prefixes "/kubepods/pod-A/container-2", so a sibling container's
+       * process would be claimed as ours and over-counted. A caller that gets
+       * no answer treats the pid as undecidable, which is the safe direction.
+       * A stock Kubernetes path is ~191 bytes, which is why the buffers here
+       * are CGROUP_LINE_MAX and not something smaller. */
+      continue;
+    }
+    memcpy(cgroup_value, path, path_len);
+    cgroup_value[path_len] = '\0';
+    return 0;
+  }
+  return -1;
+}
+
+/* Which cgroup key to ask first, and why the order is load-bearing on v1.
+ *
+ * "" matches the cgroup v2 unified line ("0::<path>"); "memory" matches the v1
+ * memory hierarchy. Asking "" first is right on a v2 host, where it is the
+ * only line there is.
+ *
+ * On a cgroup v1 host the unified line may still be present -- systemd's
+ * hybrid layout mounts cgroup2 alongside the v1 hierarchies -- but nothing
+ * guarantees the CONTAINER has a group of its own in it: that is the runtime's
+ * choice, not ours. Measured on a hybrid host (Ubuntu 24.04,
+ * systemd.unified_cgroup_hierarchy=0): runc does give each container its own
+ * "0::/docker/<id>", so the unified line is usable there. But where that group
+ * is absent the line degenerates to a path every container shares, or to "/",
+ * and then this check reads the same string for a sibling container as for us
+ * and claims its process as ours -- over-counting, which throttles the
+ * container against memory it does not hold. Reproduced by placing two
+ * containers in one unified group: "" claimed the sibling, "memory" rejected
+ * it.
+ *
+ * The memory hierarchy carries the per-container path in every v1 layout, so
+ * when the manager has told us this is a v1 host, ask it first and keep "" as
+ * the fallback. The order also saves a whole wasted pass: read_cgroup()
+ * rewinds and rescans per call, and on a 14-line v1 file the "" key scans the
+ * lot before failing -- measured 1660 ns against 297 ns for memory-first.
+ *
+ * On a legacy v1 layout (cgroup2 never mounted) there is no "0::" line at all
+ * -- the kernel skips the default root unless cgrp_dfl_visible -- so "" simply
+ * finds nothing and the order is unobservable. It is the hybrid layout that
+ * makes it matter. */
+void self_cgroup_init(self_cgroup_t *self, int cgroup_v1) {
+  if (self == NULL) {
+    return;
+  }
+  memset(self, 0, sizeof(*self));
+  /* memset leaves these 0, which would read as "probed, and the answer is
+   * host". -1 is "not probed yet". A loop rather than two assignments so
+   * raising CGROUP_KEY_SLOTS cannot silently leave a slot pre-answered. */
+  for (unsigned i = 0; i < CGROUP_KEY_SLOTS; i++) {
+    self->ns_private[i] = -1;
+  }
+  if (cgroup_v1) {
+    self->keys[0] = "memory";
+    self->keys[1] = "";
+  } else {
+    self->keys[0] = "";
+    self->keys[1] = "memory";
+  }
+  self->keys[CGROUP_KEY_SLOTS] = NULL;
+}
+
+/* Reads /proc/self/cgroup once, filling in the path for each key.
+ *
+ * Deliberately not reported as a hard failure: a key we could not resolve just
+ * means the caller skips that key and tries the next one, which is the same
+ * thing the per-call read used to do when it came back empty. A snapshot with
+ * nothing resolved makes every comparison answer "not ours", which is the
+ * under-count direction -- but the alternative, claiming pids we cannot check,
+ * over-counts, and /proc/self/cgroup being unreadable means something is wrong
+ * with this container rather than with the pid under test. */
+void self_cgroup_ensure(self_cgroup_t *self) {
+  if (self == NULL || self->loaded) {
+    return;
+  }
+  self->loaded = 1;
+  /* "e" = O_CLOEXEC, prevent fork inheritance */
+  FILE *fp = fopen(PID_SELF_CGROUP_PATH, "re");
+  if (fp == NULL) {
+    /* Rate-limited on powers of two, like note_pid_inspect_denied(): this
+     * runs once per device query, and a device query happens per allocation,
+     * so an unthrottled line here would be one per allocation. The count is
+     * the interesting part -- a handful is a transient, a count that climbs
+     * with every allocation says this container really cannot read it. */
+    static volatile uint64_t self_cgroup_unreadable;
+    uint64_t total = __sync_add_and_fetch(&self_cgroup_unreadable, 1);
+    if ((total & (total - 1)) == 0) {
+      LOGGER(WARNING, "could not read %s: %s -- cgroup-based ownership checks "
+                      "will answer \"not ours\" for every pid. Failures so far: %" PRIu64,
+             PID_SELF_CGROUP_PATH, strerror(errno), total);
+    }
+    return;
+  }
+  for (unsigned i = 0; i < CGROUP_KEY_SLOTS && self->keys[i] != NULL; i++) {
+    if (read_cgroup(fp, self->keys[i], self->paths[i], sizeof(self->paths[i])) == 0) {
+      self->resolved[i] = 1;
+    }
+  }
+  fclose(fp);
+}
+
+/* Does this init process's cgroup path say we are in a private cgroup
+ * namespace? Returns 1 yes, 0 no, -1 could not read it.
+ *
+ * The evidence is a ".." path component. The kernel renders
+ * /proc/<pid>/cgroup relative to the READER's cgroup namespace root and spells
+ * anything outside that root with "..", so an init process showing ".." proves
+ * our root sits strictly below the host's -- that is, we are in a container's
+ * own cgroup namespace. Under cgroupns=host there is no boundary to cross and
+ * no path ever contains ".." (930 real-hardware records, no exception), so the
+ * absence of one is equally informative when the file we read is the HOST's
+ * init.
+ *
+ * A ".." component cannot be forged: "mkdir .." is impossible, so no cgroup
+ * can be NAMED "..", and the only producer of such a component is the kernel's
+ * own out-of-namespace rendering. (A cgroup may legitimately be named "..foo",
+ * which is why cgroup_path_escapes_root() compares components rather than
+ * searching for a substring.)
+ */
+int cgroup_ns_private_from_init(const char *init_cgroup_path, const char *cgroup_key) {
+  char value[CGROUP_INIT_LINE_MAX];
   int ret = -1;
-  FILE *f = fopen(pid_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
-  if (f == NULL) {
+  FILE *fp;
+
+  if (init_cgroup_path == NULL) {
+    /* fopen(NULL, ...) is undefined behaviour, not a guaranteed failure. */
     return ret;
   }
-  char buff[CGROUP_LINE_MAX];
-  while (fgets(buff, sizeof(buff), f)) {
-    size_t len = strlen(buff);
-    size_t index = 0;
-    for (; index < len && buff[index] != ':'; index++) {}
-    if (index == len) {
-      continue;
-    }
-    char key[CGROUP_KEY_MAX];
-    if (split_str(&buff[index + 1], key, sizeof(key),
-                  cgroup_value, value_size, ':') != 0) {
-      continue;
-    }
-    if (strcmp(key, cgroup_key) == 0) {
-      ret = 0;
-      break;
-    }
+  /* "e" = O_CLOEXEC, prevent fork inheritance */
+  fp = fopen(init_cgroup_path, "re");
+  if (fp == NULL) {
+    return ret;
   }
-  fclose(f);
+  if (read_cgroup(fp, cgroup_key, value, sizeof(value)) == 0) {
+    ret = cgroup_path_escapes_root(value) ? 1 : 0;
+  }
+  fclose(fp);
+  return ret;
+}
+
+/* Settles CGROUP_MATCH_NEEDS_NS_MODE: is the path "/" our container's cgroup
+ * root (cgroupns=private) or the host's (cgroupns=host)?
+ *
+ * Two sources, in this order:
+ *
+ *   1. The HOST's init, via .host_proc. Authoritative in both directions, and
+ *      guaranteed to be there exactly where it is needed: the manager mounts
+ *      .host_proc when the client-mode feature gate is off, and the same gate
+ *      is what makes it hand us CGROUPV1 or CGROUPV2 rather than CLIENT -- so
+ *      seeing either cgroup bit means .host_proc is mounted. Those are also
+ *      the two modes where this cgroup comparison is the PRIMARY judge rather
+ *      than a fallback.
+ *
+ *      It is the host's init whatever the pid namespace does: procfs binds its
+ *      pid namespace at mount time, so .host_proc/1 cannot become the Pod's
+ *      pause process.
+ *
+ *   2. This container's local pid 1, for CLIENT mode, which has no .host_proc.
+ *      Positive evidence only: measured, local pid 1 is the pause container
+ *      under shareProcessNamespace ("/../<sandbox-id>" -- a sibling container,
+ *      so outside our root, so correct evidence) and the host's init under
+ *      hostPID, but it is our OWN init under Kubernetes' default per-container
+ *      pid namespace, where it renders "/" and proves nothing. A missing ".."
+ *      therefore settles nothing here, and cgroupns=host never produced a
+ *      false positive across every configuration measured.
+ *
+ * No evidence means "not private", which is what this code did before the
+ * probe existed -- so the worst case is the behaviour we already shipped.
+ *
+ * Cached in the caller's stack-allocated snapshot rather than a file-static:
+ * no global state means no fork hazard and no atomics to reason about. The
+ * cost of re-probing per device query is one small file read, measured
+ * 3.4-4.6 us against a 153 us device query, and only in the modes that reach
+ * the ambiguous branch at all.
+ */
+int self_cgroup_ns_is_private(self_cgroup_t *self, unsigned slot) {
+  int ret;
+
+  if (self == NULL || slot >= CGROUP_KEY_SLOTS || self->keys[slot] == NULL) {
+    return 0;
+  }
+  if (self->ns_private[slot] >= 0) {
+    return self->ns_private[slot];
+  }
+  ret = cgroup_ns_private_from_init(HOST_PROC_INIT_CGROUP_PATH, self->keys[slot]);
+  if (ret < 0) {
+    ret = (cgroup_ns_private_from_init(PID_INIT_CGROUP_PATH, self->keys[slot]) == 1) ? 1 : 0;
+  }
+  self->ns_private[slot] = (signed char)ret;
   return ret;
 }
 
@@ -804,45 +1024,6 @@ int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_s
   return 0;
 }
 
-char *GetNthMapsToken(char *line, int n) {
-  char *context = NULL;
-  // coverity[var_deref_model] Yes, we're using strtok_r correctly
-  char *token = strtok_r(line, " ", &context);
-  while (token && --n > 0) {
-    token = strtok_r(NULL, " ", &context);
-  }
-  return token;
-}
-
-int library_exists_in_process_maps(char const *libName, unsigned int pid) {
-  int ret = -1;
-  char fileName[512];
-  snprintf(fileName, sizeof(fileName), "/proc/%u/maps", pid);
-
-  FILE *fMaps = fopen(fileName, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
-  if (NULL == fMaps) {
-    return ret;
-  }
-
-  // Read the file line by line
-  char line[1024];
-  while (fgets(line, sizeof(line), fMaps)) {
-    char *libPath = GetNthMapsToken(line, 6);
-    if (libPath == NULL) {
-      continue;
-    }
-    char *p = strstr(libPath, libName);
-    if (p == NULL) {
-      continue;
-    }
-    ret = 0;
-    break;
-  }
-
-  fclose(fMaps);
-  return ret;
-}
-
 /* Every NVIDIA device node a GPU process can hold open shares this prefix:
  * nvidia0..N, nvidiactl, nvidia-uvm, nvidia-uvm-tools and nvidia-caps entries.
  * Anchored at the start rather than searched for anywhere in the target so a
@@ -853,9 +1034,9 @@ int library_exists_in_process_maps(char const *libName, unsigned int pid) {
 
 /* Whether the process holds an open descriptor on an NVIDIA device node.
  *
- * This is the primary test for "is this pid using the GPU";
- * library_exists_in_process_maps() above is kept only as a fallback. Two
- * reasons it leads.
+ * This is the ONLY test for "is this pid using the GPU". It replaced a scan of
+ * /proc/<pid>/maps that matched "nvidia" anywhere in a mapping's path; that
+ * scan was kept as a fallback for a while and is now gone. Two reasons.
  *
  * COST. Generating /proc/<pid>/maps makes the kernel walk the target's whole
  * VMA tree holding its mmap_lock, so that read costs what the target's address
@@ -1079,6 +1260,63 @@ static int self_ns_inode(const char *ns_type, unsigned slot, ino_t *ino) {
   return 0;
 }
 
+/* Report that we were not allowed to inspect a pid, which is NOT the same
+ * thing as that pid not being ours.
+ *
+ * /proc/<pid>/ns entries need PTRACE_MODE_READ, so a process owned by another uid
+ * is unreadable from here and device_pid_in_same_container() has to answer
+ * "not ours". Two cases hide behind that one answer, and they are opposites:
+ *
+ *   ENOENT -- the pid exited between NVML sampling it and us reading it. The
+ *             common case on this path, and correctly "not ours".
+ *   EACCES/EPERM -- the pid is real and might well be ours, but it runs as a
+ *             different uid (runAsUser, a deliberately de-privileged child, a
+ *             sidecar) and we may not look. Answering "not ours" then
+ *             UNDER-COUNTS its memory, which is the quota-escape direction.
+ *
+ * The denial is REPORTED here and resolved by the caller, not decided here:
+ * this file deliberately knows nothing about compatibility modes, and the
+ * fallback that can still settle ownership -- the cgroup check -- lives with
+ * them. What must never happen is a denial silently reading as "not ours":
+ * that under-counts a process that IS ours, which is the quota-escape
+ * direction. Nothing can remove the ambiguity from here; it needs
+ * CAP_SYS_PTRACE, which is not ours to grant.
+ *
+ * Rate-limited on powers of two rather than logged once: the count is the
+ * interesting part. One denial in a whole run is a transient to ignore; a
+ * count that climbs with every allocation says the deployment really does run
+ * GPU processes under another uid. This runs per-pid inside the device lock,
+ * so an unthrottled line here would be one per pid per allocation.
+ */
+static void note_pid_inspect_denied(unsigned int pid, const char *ns_type, int err) {
+  static volatile uint64_t denied_total;
+  uint64_t total = __sync_add_and_fetch(&denied_total, 1);
+
+  if ((total & (total - 1)) == 0) {
+    LOGGER(WARNING, "not permitted to inspect pid %u (/proc/%u/ns/%s: %s); ownership cannot be "
+                    "confirmed from the namespaces, so the caller decides -- reported because a "
+                    "denial must not be mistaken for a pid that simply exited. "
+                    "Denials so far: %" PRIu64,
+           pid, pid, ns_type, strerror(err), total);
+  }
+}
+
+/* Three-valued; the caller distinguishes all three (see hook.h for the names).
+ *
+ *   YES     confirmed ours -- the namespace inodes match.
+ *   UNKNOWN the pid exists but we may not inspect it (another uid). The caller
+ *           resolves this; it is NOT "not ours".
+ *   NO      confirmed not ours -- inodes differ, or the pid is gone.
+ *
+ * Why UNKNOWN is a separate answer: from CUDA 13.x the driver lists only the
+ * pids of the caller's own PID namespace, so for an ordinary container every
+ * pid NVML hands us is already one of ours and this function is a confirmation
+ * rather than a filter. Folding a permission denial into "not ours" would
+ * under-count a process that is ours, and under-counting is the quota-escape
+ * direction. What a denial means instead is decided by
+ * check_device_pid_in_local_container_pid(), which knows the compatibility
+ * mode and can fall back to the cgroup check.
+ */
 int device_pid_in_same_container(unsigned int pid) {
   /* The mount namespace is the load-bearing test, and on its own it already
    * answers both threats this function exists for: with hostPID=true we can
@@ -1101,17 +1339,27 @@ int device_pid_in_same_container(unsigned int pid) {
     struct stat device_st;
     snprintf(device_path, sizeof(device_path), "/proc/%u/ns/%s", pid, g_ns_names[i]);
     if (stat(device_path, &device_st) != 0) {
-      return -1;
+      /* A permission denial means "cannot tell", which the caller resolves.
+       * Anything else -- ENOENT above all, the pid having exited between NVML
+       * sampling it and now -- is genuinely not ours. */
+      if (unlikely(errno == EACCES || errno == EPERM)) {
+        note_pid_inspect_denied(pid, g_ns_names[i], errno);
+        return PID_IN_CONTAINER_UNKNOWN;
+      }
+      return PID_IN_CONTAINER_NO;
     }
     ino_t self_ino;
     if (self_ns_inode(g_ns_names[i], i, &self_ino) != 0) {
-      return -1;
+      /* Our OWN namespace is unreadable, so there is nothing to compare
+       * against. Not a statement about the target pid, so stay conservative;
+       * self_ns_inode() does not cache the failure, so the next call retries. */
+      return PID_IN_CONTAINER_NO;
     }
     if (device_st.st_ino != self_ino) {
-      return -1;
+      return PID_IN_CONTAINER_NO;
     }
   }
-  return 0;
+  return PID_IN_CONTAINER_YES;
 }
 
 /* Widens a shared-state file this library just created, so that another uid
