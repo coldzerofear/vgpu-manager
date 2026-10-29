@@ -617,10 +617,13 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
 typedef struct {
   uint64_t last_ts;                      /* ms of the last sample seen (0: none)     */
   uint64_t win_ts;                       /* ms the open estimate window starts at    */
-  int64_t  win_reading_ms;               /* sum of reading x period over the window  */
-  int64_t  win_ms;                       /* sampled time in the window               */
+  int32_t  win_reading_ms;               /* sum of reading x period over the window  */
+  int32_t  win_ms;                       /* sampled time in the window               */
+  int64_t  ref_consumed;                 /* per-cycle consumption the estimate saw   */
   int32_t  have_est;                     /* an estimate has been taken               */
   int32_t  zero_starved;                 /* last fresh sample read 0 while starved   */
+  int32_t  drop_cycles;                  /* consecutive cycles of a demand drop      */
+  int32_t  _rsv;
 
   uint32_t head;                         /* records written (ring index = head % N)  */
   uint32_t starved_mask;                 /* bit k: record k's bucket ran (about) dry */

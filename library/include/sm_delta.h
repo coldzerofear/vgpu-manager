@@ -446,6 +446,15 @@ static inline int64_t sm_delta_control(int64_t total, int up_limit, int user_cur
  * samples each cycle). Readings within the window are averaged by period.
  * Slow parts (1 s samples) act on every sample, as before. */
 #define DELTA_EST_MIN_WINDOW_MS 500
+/* Demand-drop guard (below): a cycle consuming under 1/FACTOR of the
+ * consumption the estimate was made on, with tokens left in the bucket, for
+ * CYCLES cycles in a row. On the RTX 2080 Ti it took GEMM / elementwise phases
+ * alternating every 3 s from 21.5 / 31.2 to 13.0 / 26.1 points of mean error
+ * at targets 20 / 50 (hard path; soft 28.0 / 36.8 -> 14.1 / 24.1), steady
+ * state unchanged. Capping each upward estimate at 4x instead did nothing
+ * for the alternation (23.0 / 31.5). */
+#define DELTA_EST_DROP_FACTOR 4
+#define DELTA_EST_DROP_CYCLES 2
 
 /* now_ms: wall-clock ms of this cycle's read (CLOCK_REALTIME, the clock NVML
  * stamps samples with). sample_ts_ms: the current sample's timestamp in ms,
@@ -476,13 +485,13 @@ static inline int64_t sm_delta_est_control(sm_delta_est_t *st, int64_t total, in
     } else {
       int64_t period = (int32_t)((uint32_t)sample_ts_ms - (uint32_t)prev);
       if (period > 0) {
-        st->win_reading_ms += (int64_t)user_current * period;
-        st->win_ms += period;
+        st->win_reading_ms += user_current * (int32_t)period;
+        st->win_ms += (int32_t)period;
       }
     }
     if (prev != 0 && st->win_ms >= DELTA_EST_MIN_WINDOW_MS) {
       uint64_t from = st->win_ts;
-      int reading = (int)(st->win_reading_ms / st->win_ms);
+      int reading = st->win_reading_ms / st->win_ms;
       st->win_ts = sample_ts_ms;
       st->win_reading_ms = 0;
       st->win_ms = 0;
@@ -550,12 +559,39 @@ static inline int64_t sm_delta_est_control(sm_delta_est_t *st, int64_t total, in
         }
         int64_t next = est > lim ? lim : (est < 0 ? 0 : (int64_t)est);
         st->have_est = 1;
+        st->ref_consumed = cbar;
+        st->drop_cycles = 0;
         if (bucket > next) {
           *drain = 1;
         }
         return next;
       }
     }
+  }
+  /* Demand drop between samples: the bucket has tokens left, yet the cycle
+   * consumed a DROP_FACTOR-th of what the estimate was made on -- the load
+   * changed shape (a light phase after a heavy one), and the share sized for
+   * the old phase would run the new one unthrottled until the next sample.
+   * Assume the new phase is busy: consumption * target / 100 cannot run it
+   * past the target; the next sample re-estimates. Idle cycles (0) are not
+   * a drop. */
+  if (st->have_est && consumed > 0 && bucket > 0 &&
+      up_limit >= 1 && up_limit < 100 &&
+      consumed * DELTA_EST_DROP_FACTOR < st->ref_consumed) {
+    if (++st->drop_cycles >= DELTA_EST_DROP_CYCLES) {
+      int64_t next = (consumed * up_limit + 50) / 100;
+      if (next < 1) {
+        next = 1;
+      }
+      st->drop_cycles = 0;
+      st->ref_consumed = consumed;
+      if (bucket > next) {
+        *drain = 1;
+      }
+      return next < share ? next : share;
+    }
+  } else {
+    st->drop_cycles = 0;
   }
   if (st->last_ts != 0 && ((st->have_est && !st->zero_starved) || !demand)) {
     return share;

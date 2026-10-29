@@ -603,6 +603,21 @@ static void test_invariants(void) {
     ok &= r == 8000 * 30 / 60;
     int constrained = ok;
 
+    /* demand drop: after an estimate on 5000 a cycle, two unthrottled cycles
+     * at 1000 (< 5000/4) cut to consumption * target / 100 and drain; one
+     * cycle does not, and an idle cycle (0) is not a drop */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      r = sm_delta_est_control(&st, total, 25, 50, t < 6 ? 100 : 600, t * 100, 5000, 0, 0,
+                               5000, DIV, 64, &drain);
+    }
+    int64_t first = sm_delta_est_control(&st, total, 25, 50, 600, 700, 2500, 4000, 0, 1000, DIV, 64, &drain);
+    int64_t idle_r = sm_delta_est_control(&st, total, 25, 50, 600, 800, 2500, 4000, 0, 0, DIV, 64, &drain);
+    sm_delta_est_control(&st, total, 25, 50, 600, 900, 2500, 4000, 0, 1000, DIV, 64, &drain);
+    r = sm_delta_est_control(&st, total, 25, 50, 600, 1000, 2500, 4000, 0, 1000, DIV, 64, &drain);
+    ok &= first == 2500 && idle_r == 2500 && r == 1000 * 25 / 100 && drain == 1;
+    int dropped = ok;
+
     /* bucket bounds: two cycles of share above (at least a token), a hundred
      * below, saturating */
     ok &= sm_delta_est_bucket_ceiling(0) == 1 && sm_delta_est_bucket_ceiling(5000) == 10000
@@ -610,12 +625,12 @@ static void test_invariants(void) {
     ok &= sm_delta_debt_floor(5000, 10000) == -500000 && sm_delta_debt_floor(0, 1) == -1
        && sm_delta_debt_floor(INT64_MAX / 4, INT64_MAX) == -INT64_MAX;
     if (!ok) {
-      printf("  [FAIL] estimate: once %d window %d aligned %d lower %d idle %d cut %d constrained %d bounds %d\n",
-             once, window, aligned, lower, idle, cut, constrained, ok);
+      printf("  [FAIL] estimate: once %d window %d aligned %d lower %d idle %d cut %d constrained %d drop %d bounds %d\n",
+             once, window, aligned, lower, idle, cut, constrained, dropped, ok);
       failures++;
     } else {
       printf("  [ok] estimate: once per >=500 ms window, timestamp-aligned, starved-zero bound, idle holds, "
-             "surplus cut+drain, constrained by starved cycles; bucket 2 cycles up, 100 down\n");
+             "surplus cut+drain, constrained by starved cycles, demand-drop guard; bucket 2 cycles up, 100 down\n");
     }
   }
 
