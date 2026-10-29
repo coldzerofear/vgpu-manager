@@ -166,11 +166,14 @@ static inline uint64_t sm_delta_isqrt(uint64_t n) {
   return r;
 }
 
-static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_current,
-                                    int64_t share, int64_t bucket, int boot,
-                                    int inc_divisor, int ramp_divisor) {
+/* total: the pool, which every fine constant (seed, boot jump, ramp floor)
+ * is a fraction of. cap: the most share may become -- the pool in v15, up to
+ * DELTA_HEADROOM_POOLS pools in v16 (see sm_delta_control). */
+static inline int64_t sm_delta_step_cap(int64_t total, int64_t cap, int up_limit,
+                                        int user_current, int64_t share, int64_t bucket,
+                                        int boot, int inc_divisor, int ramp_divisor) {
   if (up_limit >= 100) {
-    return total;
+    return cap;
   }
   int raw_diff = abs(up_limit - user_current);
   int64_t up = up_limit > 0 ? up_limit : 1;
@@ -208,11 +211,13 @@ static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_curren
         increment = escape;
       }
     }
-    int64_t grow_cap = total / DELTA_GROW_CAP_DIVISOR;
+    /* A tenth of the pool, or of share once share is past it: a share many
+     * pools deep must still be able to grow by a proportional step. */
+    int64_t grow_cap = (share > total ? share : total) / DELTA_GROW_CAP_DIVISOR;
     if (increment > grow_cap) {
       increment = grow_cap;
     }
-    return (share + increment) > total ? total : (share + increment);
+    return (share + increment) > cap ? cap : (share + increment);
   }
 
   if (raw_diff > up_limit && raw_diff >= MIN_INCREMENT) {
@@ -227,8 +232,8 @@ static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_curren
         increment = ramp_floor;
       }
     }
-    if (unlikely(increment > total)) {
-      increment = total;
+    if (unlikely(increment > cap)) {
+      increment = cap;
     }
     return (share - increment) < 0 ? 0 : (share - increment);
   }
@@ -252,6 +257,54 @@ static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_curren
     increment = 1;
   }
   return (share - increment) < 0 ? 0 : (share - increment);
+}
+
+/* The step with share capped at the pool (v15 semantics). */
+static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_current,
+                                    int64_t share, int64_t bucket, int boot,
+                                    int inc_divisor, int ramp_divisor) {
+  return sm_delta_step_cap(total, total, up_limit, user_current, share, bucket, boot,
+                           inc_divisor, ramp_divisor);
+}
+
+/* ---- Headroom (v16) ----
+ *
+ * v15 capped share, and the bucket, at one pool. Under grid*block charging
+ * (v16) a block-heavy kernel on a fast part consumes tens to hundreds of
+ * pools per cycle at full speed (B200 elementwise: ~340 pools at FACTOR 256),
+ * and a one-pool cap pins it at a fraction of its limit -- the same
+ * over-throttling grid charging already showed at FACTOR 32 (B200 training
+ * capped at 26% under a 50% limit). Raising FACTOR instead would raise the
+ * bucket's backlog capacity for every workload and flood the light ones
+ * (docs/sm_delta_validation.md section 10).
+ *
+ * So share may exceed the pool, but only as far as measured demand
+ * justifies: the cap is twice the last cycle's consumption, floored at the
+ * pool and never below the share already held. Idle cycles (consumed 0) thus
+ * neither grow share past the pool -- the soft path has no bypass, and an
+ * uncapped share wound up to 1000s of pools while a workload idled -- nor
+ * push an established share down, which would make every burst after a
+ * pause re-climb from one pool. Climbing to a deep share doubles per cycle
+ * at most: ~9 cycles to 340 pools. */
+#define DELTA_HEADROOM_POOLS 65536
+
+static inline int64_t sm_delta_share_cap(int64_t total, int64_t share, int64_t consumed) {
+  int64_t lim = total > INT64_MAX / DELTA_HEADROOM_POOLS ? INT64_MAX
+                                                         : total * DELTA_HEADROOM_POOLS;
+  int64_t cap = consumed > total / 2 ? (consumed < lim / 2 ? 2 * consumed : lim) : total;
+  if (share > cap) {
+    cap = share < lim ? share : lim;
+  }
+  return cap;
+}
+
+/* The bucket may hold two cycles of share once share is past the pool, so a
+ * deep share can be delivered at all; below that, the pool as before. */
+static inline int64_t sm_delta_bucket_ceiling(int64_t total, int64_t share) {
+  if (share <= total) {
+    return total;
+  }
+  return share > INT64_MAX / 2 ? INT64_MAX : 2 * share;
 }
 
 /* ---- Consumption-observed cut (v15) ----
@@ -291,18 +344,40 @@ static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_curren
 #define DELTA_OBS_MIN_CONSUMED  100
 #define DELTA_OBS_MIN_OVERSHOOT (2 * MIN_INCREMENT)
 #define DELTA_OBS_BACKLOG_TICKS 8
+/* Past the pool the bucket holds at most two cycles of share
+ * (sm_delta_bucket_ceiling), so an 8-cycle backlog can never form there and
+ * a heavy workload that turns light would ride its deep share through the
+ * limit: with no gate, over-target time after a heavy -> light drop was 5x
+ * v15's. There the gate is 1.5 cycles of backlog -- a pause cannot reach
+ * it, a sustained surplus does within a few cycles -- and it puts that time
+ * at 0.31x v15's. The price is phase alternation: the light phase's cut
+ * makes the heavy phase re-climb (real-workload alternation MAE 17.6 at a
+ * 1.9 gate, 20.1 at 1.5; v15 25.0). Leaning to under rather than over the
+ * limit is the isolation-safe side. In tenths of a share. */
+#define DELTA_OBS_DEEP_BACKLOG_TENTHS 15
 
-static inline int64_t sm_delta_observe(int up_limit, int user_current, int64_t share,
-                                       int64_t next, int64_t bucket, int64_t consumed,
-                                       int *drain) {
+static inline int64_t sm_delta_observe(int64_t total, int up_limit, int user_current,
+                                       int64_t share, int64_t next, int64_t bucket,
+                                       int64_t consumed, int *drain) {
   *drain = 0;
+  int64_t backlog_gate = share > total ? share / 10 * DELTA_OBS_DEEP_BACKLOG_TENTHS
+                                       : DELTA_OBS_BACKLOG_TICKS * share;
+  /* Above a 90 target util cannot read 10 points over it; there a saturated
+   * reading (100) is the overshoot signal -- but not above 95, where v15 sits
+   * at most 4 points over and chasing those turned a steady +1..+4 into a
+   * sawtooth (p95 +4..+11). */
+  int need = DELTA_OBS_MIN_OVERSHOOT;
+  if (100 - up_limit < need) {
+    need = 100 - up_limit < MIN_INCREMENT ? MIN_INCREMENT : 100 - up_limit;
+  }
   if (up_limit >= 100 || up_limit < 1 || consumed < DELTA_OBS_MIN_CONSUMED ||
-      user_current - up_limit < DELTA_OBS_MIN_OVERSHOOT || consumed >= share ||
-      bucket <= DELTA_OBS_BACKLOG_TICKS * share) {
+      user_current - up_limit < need || consumed >= share ||
+      bucket <= backlog_gate) {
     return next;
   }
   /* user_current > up_limit >= 1 here, so the division is safe; consumed is
-   * bounded by the pool, so the product cannot overflow. */
+   * bounded by twice the share cap (DELTA_HEADROOM_POOLS pools), so the
+   * product stays far inside int64 for any pool below 2^40. */
   int64_t cap = consumed * up_limit / user_current;
   *drain = 1;
   return next < cap ? next : cap;
@@ -315,9 +390,47 @@ static inline int64_t sm_delta_control(int64_t total, int up_limit, int user_cur
                                        int64_t share, int64_t bucket, int boot,
                                        int64_t consumed, int inc_divisor, int ramp_divisor,
                                        int *drain) {
-  int64_t next = sm_delta_step(total, up_limit, user_current, share, bucket, boot,
-                               inc_divisor, ramp_divisor);
-  return sm_delta_observe(up_limit, user_current, share, next, bucket, consumed, drain);
+  int64_t next = sm_delta_step_cap(total, sm_delta_share_cap(total, share, consumed),
+                                   up_limit, user_current, share, bucket, boot,
+                                   inc_divisor, ramp_divisor);
+  return sm_delta_observe(total, up_limit, user_current, share, next, bucket, consumed, drain);
+}
+
+/* ---- Launch charge (v16) ----
+ *
+ * A launch costs its thread count, grid x block. v15 charged the grid alone,
+ * which makes the cost of the same GPU time differ by the block size (32 to
+ * 1024) and leaves few-block long kernels nearly free: a persistent kernel
+ * (grid = #SMs, as cuBLAS/CUTLASS use on Hopper/Blackwell) running longer
+ * than ~14 ms per launch, or an NCCL kernel (8-32 channels) longer than
+ * ~1-5 ms, fell below the share the controller can hold and ran through the
+ * limit (HAMi-core #360). Threads lift those 384-512x, at FACTOR 256 8x
+ * lighter than the pool would make them; block-heavy kernels land above the
+ * pool and are carried by the headroom above.
+ *
+ * Saturating: grid dims are up to 2^31-1 x 65535 x 65535 and the product
+ * with a 1024-thread block overflows 64 bits. Anything near the cap is a
+ * launch no refill could ever cover anyway; the cap keeps bucket - cost
+ * from wrapping. */
+#define SM_LAUNCH_TOKENS_MAX (INT64_MAX / 4)
+
+static inline int64_t sm_launch_tokens(uint64_t gx, uint64_t gy, uint64_t gz,
+                                       uint64_t bx, uint64_t by, uint64_t bz) {
+  unsigned __int128 t = (unsigned __int128)gx * gy;
+  t = t * gz;
+  if (t > SM_LAUNCH_TOKENS_MAX) {
+    return SM_LAUNCH_TOKENS_MAX;
+  }
+  t = t * bx;
+  if (t > SM_LAUNCH_TOKENS_MAX) {
+    return SM_LAUNCH_TOKENS_MAX;
+  }
+  t = t * by;
+  if (t > SM_LAUNCH_TOKENS_MAX) {
+    return SM_LAUNCH_TOKENS_MAX;
+  }
+  t = t * bz;
+  return t > SM_LAUNCH_TOKENS_MAX ? SM_LAUNCH_TOKENS_MAX : (int64_t)t;
 }
 
 #ifdef __cplusplus

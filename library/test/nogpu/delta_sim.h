@@ -20,18 +20,22 @@ limitations under the License.
  * Makefile only runs test_*.c.
  *
  *   - the card list (pool shapes)
- *   - the previous controller generation, frozen
+ *   - the previous controller generation (v15), frozen
  *   - plant_cycle(): one watcher cycle of the real loop, both start paths
  *
  * ONE TICK IS ONE CONTROLLER CYCLE, 100 ms. The watcher visits each device
  * once per 100 ms (wait = 100/dev_count ms over a batch of dev_count
  * devices); TIME_TICK's 10 ms is only rate_limiter's back-off sleep. A
- * kernel that fills the GPU for wave_us microseconds with tpb threads per
- * block consumes, at 100% utilization,
+ * kernel that fills the GPU for wave_us microseconds consumes, at 100%
+ * utilization and per cycle,
  *
- *     R / pool = (100000 / wave_us) * occupancy / (32 * tpb)
+ *     R / pool = (100000 / wave_us) * occupancy / FACTOR        (v16: threads)
+ *     R / pool = (100000 / wave_us) * occupancy / (32 * tpb)    (v15: grids)
  *
- * per cycle under grid charging: a 10 ms GEMM at tpb 1024 is pool/3277.
+ * so a 10 ms full-GPU kernel sits at pool/25.6 under v16 whatever its block
+ * size, and block-heavy short kernels land above the pool (the headroom).
+ * The campaigns sweep R/pool directly; the real-workload mapping per charge
+ * is test_delta_realload.c's job (kmix_model.h).
  */
 #ifndef VGPU_TEST_DELTA_SIM_H
 #define VGPU_TEST_DELTA_SIM_H
@@ -75,19 +79,21 @@ static const card_t CARDS[] = {
 };
 #define NCARD (int)(sizeof(CARDS) / sizeof(CARDS[0]))
 
-/* ---- The previous generation (v14: seed pool*5/1310720, escape, 1-token
- * trim), frozen verbatim from include/sm_delta.h at commit ec867e6 with
- * every constant it reads. Only names changed. A baseline that moved with
- * the code under test would not be a baseline. ---- */
-#define PREV_MIN_INCREMENT     5
-#define PREV_INC_DIVISOR       1310720
-#define PREV_GROW_CAP_DIVISOR  10
-#define PREV_REL_DAMPING       6
-#define PREV_STARVED_DAMPING   4
-#define PREV_BOOT_JUMP_DIVISOR 6400
-#define PREV_RAMP_DIVISOR      64
+/* ---- v15 (consumption-observed cut, grid charging, FACTOR 32), frozen
+ * verbatim from include/sm_delta.h at the commit that introduced v16, with
+ * every constant it reads. Only names changed. ---- */
+#define V15_MIN_INCREMENT      5
+#define V15_INC_DIVISOR        1310720
+#define V15_GROW_CAP_DIVISOR   10
+#define V15_REL_DAMPING        6
+#define V15_STARVED_DAMPING    4
+#define V15_BOOT_JUMP_DIVISOR  6400
+#define V15_OBS_MIN_CONSUMED   100
+#define V15_OBS_MIN_OVERSHOOT  (2 * V15_MIN_INCREMENT)
+#define V15_OBS_BACKLOG_TICKS  8
+#define V15_FACTOR             32
 
-static uint64_t prev_isqrt(uint64_t n) {
+static uint64_t v15_isqrt(uint64_t n) {
   uint64_t r = 0, bit = 1ULL << 62;
   while (bit > n) {
     bit >>= 2;
@@ -104,9 +110,9 @@ static uint64_t prev_isqrt(uint64_t n) {
   return r;
 }
 
-static int64_t prev_delta_step(int64_t total, int up_limit, int user_current,
-                               int64_t share, int64_t bucket, int boot) {
-  int inc_divisor = PREV_INC_DIVISOR, ramp_divisor = PREV_RAMP_DIVISOR;
+static int64_t v15_step(int64_t total, int up_limit, int user_current,
+                                    int64_t share, int64_t bucket, int boot,
+                                    int inc_divisor, int ramp_divisor) {
   if (up_limit >= 100) {
     return total;
   }
@@ -114,16 +120,16 @@ static int64_t prev_delta_step(int64_t total, int up_limit, int user_current,
   int64_t up = up_limit > 0 ? up_limit : 1;
 
   if (unlikely(inc_divisor <= 0)) {
-    inc_divisor = PREV_INC_DIVISOR;
+    inc_divisor = V15_INC_DIVISOR;
   }
-  int64_t seed = total * PREV_MIN_INCREMENT / inc_divisor;
+  int64_t seed = total * V15_MIN_INCREMENT / inc_divisor;
   if (unlikely(seed < 1)) {
     seed = 1;
   }
 
   if (user_current <= up_limit) {
     if (boot) {
-      int64_t jump = total * up / PREV_BOOT_JUMP_DIVISOR;
+      int64_t jump = total * up / V15_BOOT_JUMP_DIVISOR;
       if (jump > total / 64) {
         jump = total / 64;
       }
@@ -131,7 +137,7 @@ static int64_t prev_delta_step(int64_t total, int up_limit, int user_current,
         return jump;
       }
     }
-    int damp = bucket <= 0 ? PREV_STARVED_DAMPING : PREV_REL_DAMPING;
+    int damp = bucket <= 0 ? V15_STARVED_DAMPING : V15_REL_DAMPING;
     int64_t increment = share * (int64_t)raw_diff / (damp * up);
     if (increment < seed) {
       increment = seed;
@@ -141,21 +147,21 @@ static int64_t prev_delta_step(int64_t total, int up_limit, int user_current,
      * seed growing by one seed per tick would do) instead of crawling. */
     if (user_current == 0 && bucket <= 0) {
       __int128 q = (__int128)2 * seed * share;
-      int64_t escape = (int64_t)prev_isqrt(q > INT64_MAX ? INT64_MAX : (uint64_t)q);
+      int64_t escape = (int64_t)v15_isqrt(q > INT64_MAX ? INT64_MAX : (uint64_t)q);
       if (increment < escape) {
         increment = escape;
       }
     }
-    int64_t grow_cap = total / PREV_GROW_CAP_DIVISOR;
+    int64_t grow_cap = total / V15_GROW_CAP_DIVISOR;
     if (increment > grow_cap) {
       increment = grow_cap;
     }
     return (share + increment) > total ? total : (share + increment);
   }
 
-  if (raw_diff > up_limit && raw_diff >= PREV_MIN_INCREMENT) {
+  if (raw_diff > up_limit && raw_diff >= V15_MIN_INCREMENT) {
     /* Blowout: util beyond twice the target. */
-    int64_t increment = share * (int64_t)raw_diff / (PREV_REL_DAMPING * up);
+    int64_t increment = share * (int64_t)raw_diff / (V15_REL_DAMPING * up);
     if (increment < seed) {
       increment = seed;
     }
@@ -178,7 +184,7 @@ static int64_t prev_delta_step(int64_t total, int up_limit, int user_current,
    * signal. 128-bit product because prop*share overflows int64 for pools
    * beyond ~2^31 tokens (no current GPU, but the contract is any pool). */
   int64_t backlog = bucket > 0 ? bucket : 0;
-  int64_t prop = share * (int64_t)raw_diff / (PREV_REL_DAMPING * up);
+  int64_t prop = share * (int64_t)raw_diff / (V15_REL_DAMPING * up);
   int64_t by_cause = (int64_t)((__int128)prop * share / (share + backlog + 1));
   int64_t by_error = prop * (int64_t)raw_diff / 100;
   int64_t increment = by_cause > by_error ? by_cause : by_error;
@@ -192,6 +198,31 @@ static int64_t prev_delta_step(int64_t total, int up_limit, int user_current,
   return (share - increment) < 0 ? 0 : (share - increment);
 }
 
+static int64_t v15_observe(int up_limit, int user_current, int64_t share,
+                                       int64_t next, int64_t bucket, int64_t consumed,
+                                       int *drain) {
+  *drain = 0;
+  if (up_limit >= 100 || up_limit < 1 || consumed < V15_OBS_MIN_CONSUMED ||
+      user_current - up_limit < V15_OBS_MIN_OVERSHOOT || consumed >= share ||
+      bucket <= V15_OBS_BACKLOG_TICKS * share) {
+    return next;
+  }
+  /* user_current > up_limit >= 1 here, so the division is safe; consumed is
+   * bounded by the pool, so the product cannot overflow. */
+  int64_t cap = consumed * up_limit / user_current;
+  *drain = 1;
+  return next < cap ? next : cap;
+}
+
+static int64_t v15_control(int64_t total, int up_limit, int user_current,
+                                       int64_t share, int64_t bucket, int boot,
+                                       int64_t consumed, int inc_divisor, int ramp_divisor,
+                                       int *drain) {
+  int64_t next = v15_step(total, up_limit, user_current, share, bucket, boot,
+                               inc_divisor, ramp_divisor);
+  return v15_observe(up_limit, user_current, share, next, bucket, consumed, drain);
+}
+
 /* ---- The plant: one watcher cycle ----
  *
  * Consumption: the workload drains up to R tokens per cycle from the bucket
@@ -200,16 +231,20 @@ static int64_t prev_delta_step(int64_t total, int up_limit, int user_current,
  * does it:
  *
  *   soft start (Balance policy, or any non-exclusive device): always
- *     share = controller(...); bucket += share, clamped to the pool.
+ *     share = controller(...); bucket += share.
  *   hard start (Fixed policy, the default): while util < max(1, u/10) and
  *     nothing throttled since the last cycle, the bypass ASSIGNS the bucket
  *     to the controller's output and leaves share untouched; otherwise as
  *     soft. "Throttled" is a launch finding the bucket short -- here, the
  *     cycle's demand exceeding the bucket.
  *
- * The candidate is the shipped cycle: sm_delta_control with the refill mark
- * (mark - bucket = consumed) and the drain. The baseline is prev_delta_step
- * alone, as v14 shipped. */
+ * Both generations measure consumption through the refill mark (mark -
+ * bucket) and drain when the observed cut asks. The baseline is v15 as it
+ * shipped (share and bucket capped at the pool); the candidate is the
+ * shipped cycle -- sm_delta_control with its headroom, and the bucket
+ * clamped to sm_delta_bucket_ceiling() of the share the controller state
+ * holds, as refill_ceiling() in cuda_hook.c does it. R is in tokens of
+ * whichever charge the caller models; the plant does not care. */
 typedef struct {
   int64_t bucket, share, mark;
   int mark_valid, calls, throttled;
@@ -220,6 +255,9 @@ static int plant_cycle(plant_t *p, int64_t total, int64_t R, int u, int delay, i
                        int candidate, int hard, int inc_divisor) {
   int64_t before = p->bucket;
   int64_t c = R == 0 ? 0 : (p->bucket < R ? p->bucket : R);
+  if (c < 0) {
+    c = 0;
+  }
   p->bucket -= c;
   if (R > 0 && before < R) {
     p->throttled = 1;
@@ -230,17 +268,13 @@ static int plant_cycle(plant_t *p, int64_t total, int64_t R, int u, int delay, i
   int boot = p->calls < 2;
   p->calls++;
 
-  int64_t out;
-  if (candidate) {
-    int64_t consumed = p->mark_valid ? p->mark - p->bucket : -1;
-    int drain = 0;
-    out = sm_delta_control(total, u, m, p->share, p->bucket, boot, consumed, inc_divisor,
-                           PREV_RAMP_DIVISOR, &drain);
-    if (drain) {
-      p->bucket = 0;
-    }
-  } else {
-    out = prev_delta_step(total, u, m, p->share, p->bucket, boot);
+  int64_t consumed = p->mark_valid ? p->mark - p->bucket : -1;
+  int drain = 0;
+  int64_t out = candidate
+      ? sm_delta_control(total, u, m, p->share, p->bucket, boot, consumed, inc_divisor, 64, &drain)
+      : v15_control(total, u, m, p->share, p->bucket, boot, consumed, V15_INC_DIVISOR, 64, &drain);
+  if (drain) {
+    p->bucket = 0;
   }
   int lo = u / 10 < 1 ? 1 : u / 10;
   if (hard && m < lo && !p->throttled) {
@@ -249,8 +283,9 @@ static int plant_cycle(plant_t *p, int64_t total, int64_t R, int u, int delay, i
     p->share = out;
     p->bucket += out;
   }
-  if (p->bucket > total) {
-    p->bucket = total;
+  int64_t ceiling = candidate ? sm_delta_bucket_ceiling(total, p->share) : total;
+  if (p->bucket > ceiling) {
+    p->bucket = ceiling;
   }
   if (p->bucket < 0) {
     p->bucket = 0;

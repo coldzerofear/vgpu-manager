@@ -441,10 +441,10 @@ static void test_invariants(void) {
     /* Firing state: target 50, util 80, consumed 3000 < share 10000,
      * bucket 100000 > 8 * share. */
     int drain = 0;
-    int64_t fired = sm_delta_observe(50, 80, 10000, 9000, 100000, 3000, &drain);
+    int64_t fired = sm_delta_observe(1000000, 50, 80, 10000, 9000, 100000, 3000, &drain);
     int ok = fired == 3000 * 50 / 80 && drain == 1;
     /* never raises the step's own result */
-    ok &= sm_delta_observe(50, 80, 10000, 1000, 100000, 3000, &drain) == 1000 && drain == 1;
+    ok &= sm_delta_observe(1000000, 50, 80, 10000, 1000, 100000, 3000, &drain) == 1000 && drain == 1;
     struct { int up, util; int64_t share, bucket, consumed; } off[] = {
       {100, 100, 10000, 100000, 3000},   /* unlimited                         */
       {50, 59, 10000, 100000, 3000},     /* overshoot < 10 points             */
@@ -454,8 +454,8 @@ static void test_invariants(void) {
       {50, 80, 10000, 80000, 3000},      /* backlog not above 8 cycles: pause */
     };
     for (unsigned i = 0; i < sizeof(off) / sizeof(off[0]); i++) {
-      int64_t r = sm_delta_observe(off[i].up, off[i].util, off[i].share, 7777, off[i].bucket,
-                                   off[i].consumed, &drain);
+      int64_t r = sm_delta_observe(1000000, off[i].up, off[i].util, off[i].share, 7777,
+                                   off[i].bucket, off[i].consumed, &drain);
       ok &= r == 7777 && drain == 0;
     }
     if (!ok) {
@@ -463,6 +463,77 @@ static void test_invariants(void) {
       failures++;
     } else {
       printf("  [ok] observed cut caps at consumed*target/util + drain; each gate alone keeps it off\n");
+    }
+  }
+
+  /* v16 headroom: share may pass the pool only as far as twice the measured
+   * consumption, never above DELTA_HEADROOM_POOLS pools, and an idle cycle
+   * neither grows it past the pool nor pushes an established share down. */
+  {
+    int64_t total = 108LL * 2048 * 256;
+    int ok = sm_delta_share_cap(total, 0, -1) == total                    /* unknown       */
+          && sm_delta_share_cap(total, 0, 0) == total                     /* idle          */
+          && sm_delta_share_cap(total, 0, total / 2) == total             /* below a pool  */
+          && sm_delta_share_cap(total, 0, 3 * total) == 6 * total         /* demand x2     */
+          && sm_delta_share_cap(total, 50 * total, 0) == 50 * total       /* idle holds    */
+          && sm_delta_share_cap(total, 50 * total, 3 * total) == 50 * total
+          && sm_delta_share_cap(total, 0, INT64_MAX / 4) == total * DELTA_HEADROOM_POOLS
+          && sm_delta_share_cap(INT64_MAX / 2, 0, INT64_MAX / 2) == INT64_MAX;
+    /* the step follows the cap: unlimited targets return it, growth stops at it */
+    ok &= sm_delta_step_cap(total, 7 * total, 100, 0, 0, 0, 0, DIV, 64) == 7 * total;
+    ok &= sm_delta_step_cap(total, total, 50, 0, total, -1, 0, DIV, 64) == total;
+    ok &= sm_delta_step_cap(total, 4 * total, 50, 0, 3 * total, -1, 0, DIV, 64) > 3 * total;
+    ok &= sm_delta_step_cap(total, 4 * total, 50, 0, 3 * total, -1, 0, DIV, 64) <= 4 * total;
+    /* the bucket follows share only past the pool */
+    ok &= sm_delta_bucket_ceiling(total, 0) == total && sm_delta_bucket_ceiling(total, total) == total
+       && sm_delta_bucket_ceiling(total, total + 1) == 2 * (total + 1)
+       && sm_delta_bucket_ceiling(total, INT64_MAX - 1) == INT64_MAX;
+    if (!ok) {
+      printf("  [FAIL] headroom: share cap, unlimited target, or bucket ceiling\n");
+      failures++;
+    } else {
+      printf("  [ok] headroom: share past the pool only on measured demand (x2/cycle), idle holds, bucket 2*share\n");
+    }
+  }
+
+  /* v16 observe gates: a saturated reading is the overshoot above a 90..95
+   * target (none above 95), and past the pool the backlog gate is 1.9 cycles. */
+  {
+    int drain = 0, ok = 1;
+    int64_t total = 1000000;
+    /* target 93: util 100 is 7 over -- fires; util 99 does not */
+    ok &= sm_delta_observe(total, 93, 100, 10000, 9000, 100000, 3000, &drain) == 3000 * 93 / 100 && drain;
+    ok &= sm_delta_observe(total, 93, 99, 10000, 9000, 100000, 3000, &drain) == 9000 && !drain;
+    ok &= sm_delta_observe(total, 95, 100, 10000, 9000, 100000, 3000, &drain) == 3000 * 95 / 100 && drain;
+    ok &= sm_delta_observe(total, 96, 100, 10000, 9000, 100000, 3000, &drain) == 9000 && !drain;
+    ok &= sm_delta_observe(total, 90, 100, 10000, 9000, 100000, 3000, &drain) == 3000 * 90 / 100 && drain;
+    ok &= sm_delta_observe(total, 90, 99, 10000, 9000, 100000, 3000, &drain) == 9000 && !drain;
+    /* deep share (past the pool): 1.5-cycle backlog gate */
+    int64_t sh = 3 * total;
+    ok &= sm_delta_observe(total, 50, 80, sh, sh, sh / 10 * 15 + 1, total, &drain) == total * 50 / 80 && drain;
+    ok &= sm_delta_observe(total, 50, 80, sh, sh, sh / 10 * 15, total, &drain) == sh && !drain;
+    if (!ok) {
+      printf("  [FAIL] observe gates: high-target saturation trigger or deep backlog gate\n");
+      failures++;
+    } else {
+      printf("  [ok] observe: saturated reading triggers at targets 90-95 only; deep share gates at 1.5 cycles\n");
+    }
+  }
+
+  /* v16 charge: grid x block threads, saturating instead of wrapping. */
+  {
+    int ok = sm_launch_tokens(1, 1, 1, 1, 1, 1) == 1
+          && sm_launch_tokens(2048, 1, 1, 256, 1, 1) == 2048 * 256
+          && sm_launch_tokens(132, 1, 1, 384, 1, 1) == 132 * 384
+          && sm_launch_tokens(0, 1, 1, 1024, 1, 1) == 0
+          && sm_launch_tokens(4294967295ULL, 65535, 65535, 1024, 1, 1) == SM_LAUNCH_TOKENS_MAX
+          && sm_launch_tokens(2147483647ULL, 65535, 1, 1024, 1, 1) == (int64_t)2147483647 * 65535 * 1024
+          && sm_launch_tokens(65536, 65536, 1, 1024, 1, 1) == (int64_t)1 << 42;
+    if (!ok) {
+      printf("  [FAIL] sm_launch_tokens: wrong product or wrapped instead of saturating\n");
+      failures++;
+    } else {
+      printf("  [ok] launch charge = grid x block threads, saturating at INT64_MAX/4\n");
     }
   }
 }

@@ -205,7 +205,12 @@ void relax_shared_dir_mode(const char *dir_path);
 #define MILLISEC (1000UL * 1000UL)
 
 #define TIME_TICK (10)
-#define FACTOR (32)
+/* SM token pool = threads/SM x SMs x FACTOR. 256 since launches are charged
+ * their thread count (sm_launch_tokens, include/sm_delta.h); the controller's
+ * constants are fractions of the pool, so FACTOR only sets where real
+ * workloads land relative to it -- chosen against the kernel-mix model
+ * (docs/sm_delta_validation.md section 11). Was 32 under grid charging. */
+#define FACTOR (256)
 #define MAX_UTILIZATION (100)
 
 #define GET_VALID_VALUE(x) (((x) >= 0 && (x) <= 100) ? (x) : 0)

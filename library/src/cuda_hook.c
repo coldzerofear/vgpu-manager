@@ -443,9 +443,9 @@ static void init_device_cuda_cores(int *device_count);
 
 static void initialization();
 
-static void rate_limiter(int grids, int blocks, int host_index);
+static void rate_limiter(int64_t tokens, int host_index);
 
-static int64_t change_token(int64_t, int);
+static int64_t change_token(int64_t, int64_t, int);
 
 static int64_t delta(int up_limit, int user_current, int64_t share, int host_index);
 
@@ -655,7 +655,10 @@ dynamic_config_t g_dynamic_config = {
 /* Returns the change this call actually applied (after - before of the CAS
  * that landed, so clamping included). The watcher adds it to the refill mark
  * (see g_delta_mark). */
-static int64_t change_token(int64_t delta, int host_index) {
+/* ceiling: the most the bucket may hold after this change -- the pool, or the
+ * delta controller's headroom ceiling once its share is past the pool (see
+ * refill_ceiling). */
+static int64_t change_token(int64_t delta, int64_t ceiling, int host_index) {
   int64_t cuda_cores_before = 0, cuda_cores_after = 0;
   volatile int64_t *bucket = sm_bucket_of(host_index);
 
@@ -664,8 +667,8 @@ static int64_t change_token(int64_t delta, int host_index) {
     cuda_cores_before = *bucket;
     cuda_cores_after = cuda_cores_before + delta;
 
-    if (unlikely(cuda_cores_after > g_total_cuda_cores[host_index])) {
-      cuda_cores_after = g_total_cuda_cores[host_index];
+    if (unlikely(cuda_cores_after > ceiling)) {
+      cuda_cores_after = ceiling;
     } else if (unlikely(cuda_cores_after < 0)) {
       cuda_cores_after = 0;
     }
@@ -673,15 +676,15 @@ static int64_t change_token(int64_t delta, int host_index) {
   return cuda_cores_after - cuda_cores_before;
 }
 
-static void rate_limiter(int grids, int blocks, int host_index) {
-  (void)blocks;
+/* tokens: the launch's charge, sm_launch_tokens() (grid x block threads). */
+static void rate_limiter(int64_t tokens, int host_index) {
   if (host_index < 0) {
     return;
   }
   if (get_device_flag(host_index, core_limit)) {
     int64_t before_cuda_cores = 0;
     int64_t after_cuda_cores = 0;
-    int64_t kernel_size = (int64_t) grids;
+    int64_t kernel_size = tokens;
     /* Resolved once per launch, not per CAS retry. With the shared bucket on,
      * this is the ONLY change the consumer side needs: a CAS is a CPU
      * instruction and does not care whether the word is process-private or in
@@ -712,6 +715,12 @@ static void rate_limiter(int grids, int blocks, int host_index) {
  * a forked child joins an established share, and re-jumping it would be the
  * repeated-large-step flooding the jump exists to avoid. */
 static int g_delta_calls[MAX_DEVICE_COUNT] = {0};
+
+/* Set by delta() for the cycle it runs in, consumed by the refill that follows
+ * in the same election-winner block: the headroom ceiling belongs to the delta
+ * controller, so a cycle run by AIMD under auto routing keeps the pool.
+ * Per-process and per-cycle, so it needs no place in the shared region. */
+static int g_delta_ran[MAX_DEVICE_COUNT] = {0};
 
 /* Refill mark: the bucket as delta() read it, plus every change this cycle's
  * winner then applied (drain, refill). The next cycle's mark - bucket is
@@ -747,6 +756,7 @@ static void delta_mark_refill(int host_index, int64_t applied) {
  * advisory (starved? backlog?), and the CAS consumers keep it correct. */
 static int64_t delta(int up_limit, int user_current, int64_t share, int host_index) {
   int boot = 0;
+  g_delta_ran[host_index] = 1;
   if (g_delta_calls[host_index] < 2) {
     g_delta_calls[host_index]++;
     boot = 1;
@@ -765,7 +775,7 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
   if (drain) {
     /* Through change_token's CAS so concurrent deductions are not undone;
      * a stale `bucket` only makes the result clamp at 0, which is the aim. */
-    g_delta_mark[host_index] += change_token(-bucket, host_index);
+    g_delta_mark[host_index] += change_token(-bucket, g_total_cuda_cores[host_index], host_index);
   }
   return next;
 }
@@ -1202,6 +1212,17 @@ static int session_has_core_limit(void) {
 }
 
 static int64_t shares[MAX_DEVICE_COUNT]    = {0};
+
+/* The bucket ceiling for this cycle's refill: the pool, or two cycles of
+ * share once the delta controller's share is past it (sm_delta_bucket_ceiling)
+ * -- from the share the controller state now holds, fresh after a normal
+ * cycle, unchanged after a bypass. */
+static int64_t refill_ceiling(int host_index) {
+  int64_t total = g_total_cuda_cores[host_index];
+  int ran = g_delta_ran[host_index];
+  g_delta_ran[host_index] = 0;
+  return ran ? sm_delta_bucket_ceiling(total, shares[host_index]) : total;
+}
 static int sys_frees[MAX_DEVICE_COUNT]      = {0};
 static int avg_sys_frees[MAX_DEVICE_COUNT]  = {0};
 static int is[MAX_DEVICE_COUNT]             = {0};
@@ -1700,10 +1721,13 @@ static void *utilization_watcher(void *arg) {
              * bit the old behaviour. */
             volatile int64_t *bucket = sm_bucket_of(host_index);
             int64_t cur = __atomic_load_n(bucket, __ATOMIC_RELAXED);
-            delta_mark_refill(host_index, change_token(bypass_target - cur, host_index));
+            delta_mark_refill(host_index,
+                              change_token(bypass_target - cur, refill_ceiling(host_index), host_index));
           } else {
             /* Plain store, so no applied delta to add: the store itself is the
              * mark. Racing launches are lost here anyway (historical path). */
+            int64_t ceiling = refill_ceiling(host_index);
+            if (bypass_target > ceiling) bypass_target = ceiling;
             g_dev_hot[host_index].cur_cuda_cores = bypass_target;
             g_delta_mark[host_index] = bypass_target;
             g_delta_mark_valid[host_index] = g_delta_mark_fresh[host_index];
@@ -1817,7 +1841,8 @@ static void *utilization_watcher(void *arg) {
           shares[host_index] = g_sm_controller(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
         }
       }
-      delta_mark_refill(host_index, change_token(shares[host_index], host_index));
+      delta_mark_refill(host_index,
+                        change_token(shares[host_index], refill_ceiling(host_index), host_index));
       sm_ctl_publish(host_index);
       if ((g_share_log_tick[host_index]++ % WATCHER_UTIL_LOG_STRIDE) == 0) {
         g_share_log_tick[host_index] = 1;
@@ -4079,8 +4104,8 @@ CUresult cuLaunchKernel_ptsz(CUfunction f, unsigned int gridDimX,
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(gridDimX * gridDimY * gridDimZ,
-              blockDimX * blockDimY * blockDimZ, host_index);
+  rate_limiter(sm_launch_tokens(gridDimX, gridDimY, gridDimZ,
+                                blockDimX, blockDimY, blockDimZ), host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchKernel_ptsz, f, gridDimX,
                          gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
@@ -4102,8 +4127,8 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX,
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(gridDimX * gridDimY * gridDimZ,
-              blockDimX * blockDimY * blockDimZ, host_index);
+  rate_limiter(sm_launch_tokens(gridDimX, gridDimY, gridDimZ,
+                                blockDimX, blockDimY, blockDimZ), host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernel), f, gridDimX,
                          gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
@@ -4127,8 +4152,9 @@ CUresult cuLaunchKernelEx(CUlaunchConfig *config, CUfunction f,
     goto DONE;
   }
   host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(config->gridDimX * config->gridDimY * config->gridDimZ,
-               config->blockDimX * config->blockDimY * config->blockDimZ, host_index);
+  rate_limiter(sm_launch_tokens(config->gridDimX, config->gridDimY, config->gridDimZ,
+                                config->blockDimX, config->blockDimY, config->blockDimZ),
+               host_index);
   gap = gap_begin(host_index, config->hStream);
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernelEx),
@@ -4152,8 +4178,9 @@ CUresult cuLaunchKernelEx_ptsz(CUlaunchConfig *config, CUfunction f,
     goto DONE;
   }
   host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(config->gridDimX *config->gridDimY * config->gridDimZ,
-               config->blockDimX * config->blockDimY * config->blockDimZ, host_index);
+  rate_limiter(sm_launch_tokens(config->gridDimX, config->gridDimY, config->gridDimZ,
+                                config->blockDimX, config->blockDimY, config->blockDimZ),
+               host_index);
   gap = gap_begin(host_index, config->hStream);
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchKernelEx_ptsz,
@@ -4171,7 +4198,8 @@ CUresult cuLaunch(CUfunction f) {
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(1, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], host_index);
+  rate_limiter(sm_launch_tokens(1, 1, 1, g_block_x[host_index], g_block_y[host_index],
+                                g_block_z[host_index]), host_index);
   int gap = gap_begin(host_index, CU_STREAM_LEGACY);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunch, f);
   if (gap) gap_end(host_index, CU_STREAM_LEGACY, ret);
@@ -4191,8 +4219,8 @@ CUresult cuLaunchCooperativeKernel_ptsz(
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(gridDimX * gridDimY * gridDimZ,
-              blockDimX * blockDimY * blockDimZ, host_index);
+  rate_limiter(sm_launch_tokens(gridDimX, gridDimY, gridDimZ,
+                                blockDimX, blockDimY, blockDimZ), host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchCooperativeKernel_ptsz, f,
                          gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
@@ -4213,8 +4241,8 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
     goto DONE;
   }    
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(gridDimX * gridDimY * gridDimZ,
-              blockDimX * blockDimY * blockDimZ, host_index);
+  rate_limiter(sm_launch_tokens(gridDimX, gridDimY, gridDimZ,
+                                blockDimX, blockDimY, blockDimZ), host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchCooperativeKernel), f,
                          gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
@@ -4232,7 +4260,9 @@ CUresult cuLaunchGrid(CUfunction f, int grid_width, int grid_height) {
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(grid_width * grid_height, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], host_index);
+  rate_limiter(sm_launch_tokens(grid_width > 0 ? grid_width : 0, grid_height > 0 ? grid_height : 0, 1,
+                                g_block_x[host_index], g_block_y[host_index], g_block_z[host_index]),
+               host_index);
   int gap = gap_begin(host_index, CU_STREAM_LEGACY);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchGrid, f, grid_width,grid_height);
   if (gap) gap_end(host_index, CU_STREAM_LEGACY, ret);
@@ -4248,7 +4278,9 @@ CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height, CUstre
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(grid_width * grid_height, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], host_index);
+  rate_limiter(sm_launch_tokens(grid_width > 0 ? grid_width : 0, grid_height > 0 ? grid_height : 0, 1,
+                                g_block_x[host_index], g_block_y[host_index], g_block_z[host_index]),
+               host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchGridAsync, f, grid_width, grid_height, hStream);
   if (gap) gap_end(host_index, hStream, ret);
@@ -4301,8 +4333,8 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
          * cuCtxGetDevice call above, which CUDA_INTERNAL_CHECK hides from
          * cppcheck, and it is only read when that call returned SUCCESS. */
         int host_index = get_host_device_index_by_cuda_device(device);
-        rate_limiter(p->gridDimX * p->gridDimY * p->gridDimZ,
-                     p->blockDimX * p->blockDimY * p->blockDimZ, host_index);
+        rate_limiter(sm_launch_tokens(p->gridDimX, p->gridDimY, p->gridDimZ,
+                                      p->blockDimX, p->blockDimY, p->blockDimZ), host_index);
       }
       _cuCtxPopCurrent(&prev);
     }
@@ -4336,8 +4368,7 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
 #define GRAPH_COST_CACHE_SIZE 256
 typedef struct {
   CUgraphExec exec;       /* NULL = unused slot */
-  int total_grids;        /* sum of gridDimX*Y*Z over all kernel nodes */
-  int max_blocks;         /* max blockDim product across kernel nodes */
+  int64_t tokens;         /* sum of sm_launch_tokens() over all kernel nodes */
 } graph_cost_entry_t;
 static graph_cost_entry_t g_graph_cost_cache[GRAPH_COST_CACHE_SIZE];
 static pthread_mutex_t g_graph_cost_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -4354,7 +4385,7 @@ static void graph_cost_after_fork(void) {
 
 extern CUresult _cuGraphKernelNodeGetParams(CUgraphNode hNode, CUDA_KERNEL_NODE_PARAMS *nodeParams);
 
-static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks) {
+static void walk_graph_cost(CUgraph graph, int64_t *tokens) {
   if (unlikely(!graph)) return;
   /* Driver-availability guard: CUDA_INTERNAL_CHECK calls fn_ptr directly
    * without a NULL check, and cuGraphInstantiate succeeding doesn't
@@ -4386,9 +4417,9 @@ static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks
       if (type == CU_GRAPH_NODE_TYPE_KERNEL) {
         CUDA_KERNEL_NODE_PARAMS params = {0};
         if (_cuGraphKernelNodeGetParams(nodes[i], &params) != CUDA_SUCCESS) continue;
-        *total_grids += (int64_t)params.gridDimX * params.gridDimY * params.gridDimZ;
-        int b = params.blockDimX * params.blockDimY * params.blockDimZ;
-        if (b > *max_blocks) *max_blocks = b;
+        int64_t t = sm_launch_tokens(params.gridDimX, params.gridDimY, params.gridDimZ,
+                                     params.blockDimX, params.blockDimY, params.blockDimZ);
+        *tokens = *tokens > SM_LAUNCH_TOKENS_MAX - t ? SM_LAUNCH_TOKENS_MAX : *tokens + t;
       } else if (type == CU_GRAPH_NODE_TYPE_GRAPH) {
         if (unlikely(!CUDA_FIND_ENTRY(cuda_library_entry, cuGraphChildGraphNodeGetGraph))) {
           continue;
@@ -4396,7 +4427,7 @@ static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks
         CUgraph child = NULL;
         if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphChildGraphNodeGetGraph,
                                 nodes[i], &child) == CUDA_SUCCESS) {
-          walk_graph_cost(child, total_grids, max_blocks);
+          walk_graph_cost(child, tokens);
         }
       }
     }
@@ -4404,23 +4435,21 @@ static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks
   free(nodes);
 }
 
-static void graph_cost_remember(CUgraphExec exec, int grids, int blocks) {
-  if (unlikely(!exec) || grids <= 0) return;
+static void graph_cost_remember(CUgraphExec exec, int64_t tokens) {
+  if (unlikely(!exec) || tokens <= 0) return;
   pthread_mutex_lock(&g_graph_cost_lock);
   int free_slot = -1;
   for (int i = 0; i < GRAPH_COST_CACHE_SIZE; i++) {
     if (g_graph_cost_cache[i].exec == exec) {
-      g_graph_cost_cache[i].total_grids = grids;
-      g_graph_cost_cache[i].max_blocks  = blocks;
+      g_graph_cost_cache[i].tokens = tokens;
       pthread_mutex_unlock(&g_graph_cost_lock);
       return;
     }
     if (g_graph_cost_cache[i].exec == NULL && free_slot < 0) free_slot = i;
   }
   if (free_slot >= 0) {
-    g_graph_cost_cache[free_slot].exec        = exec;
-    g_graph_cost_cache[free_slot].total_grids = grids;
-    g_graph_cost_cache[free_slot].max_blocks  = blocks;
+    g_graph_cost_cache[free_slot].exec   = exec;
+    g_graph_cost_cache[free_slot].tokens = tokens;
   } else if (!g_graph_cost_full_warned) {
     g_graph_cost_full_warned = 1;
     LOGGER(WARNING, "graph cost cache full (%d entries); newly-instantiated "
@@ -4430,13 +4459,12 @@ static void graph_cost_remember(CUgraphExec exec, int grids, int blocks) {
   pthread_mutex_unlock(&g_graph_cost_lock);
 }
 
-static int graph_cost_lookup(CUgraphExec exec, int *grids, int *blocks) {
+static int graph_cost_lookup(CUgraphExec exec, int64_t *tokens) {
   if (unlikely(!exec)) return 0;
   pthread_mutex_lock(&g_graph_cost_lock);
   for (int i = 0; i < GRAPH_COST_CACHE_SIZE; i++) {
     if (g_graph_cost_cache[i].exec == exec) {
-      *grids  = g_graph_cost_cache[i].total_grids;
-      *blocks = g_graph_cost_cache[i].max_blocks;
+      *tokens = g_graph_cost_cache[i].tokens;
       pthread_mutex_unlock(&g_graph_cost_lock);
       return 1;
     }
@@ -4450,9 +4478,8 @@ static void graph_cost_forget(CUgraphExec exec) {
   pthread_mutex_lock(&g_graph_cost_lock);
   for (int i = 0; i < GRAPH_COST_CACHE_SIZE; i++) {
     if (g_graph_cost_cache[i].exec == exec) {
-      g_graph_cost_cache[i].exec        = NULL;
-      g_graph_cost_cache[i].total_grids = 0;
-      g_graph_cost_cache[i].max_blocks  = 0;
+      g_graph_cost_cache[i].exec   = NULL;
+      g_graph_cost_cache[i].tokens = 0;
       break;
     }
   }
@@ -4462,11 +4489,9 @@ static void graph_cost_forget(CUgraphExec exec) {
 static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph) {
   if (unlikely(!exec || !src_graph)) return;
   int64_t total = 0;
-  int max_blocks = 1;
-  walk_graph_cost(src_graph, &total, &max_blocks);
+  walk_graph_cost(src_graph, &total);
   if (total > 0) {
-    if (total > INT_MAX) total = INT_MAX;
-    graph_cost_remember(exec, (int)total, max_blocks);
+    graph_cost_remember(exec, total);
     return;
   }
   /* Walk found no kernel work in this graph. For cuGraphInstantiate this
@@ -4553,9 +4578,9 @@ CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
   int host_index = get_host_device_index_by_cuda_device(device);
-  int grids = 1, blocks = 1;
-  graph_cost_lookup(hGraphExec, &grids, &blocks);
-  rate_limiter(grids, blocks, host_index);
+  int64_t tokens = 1;
+  graph_cost_lookup(hGraphExec, &tokens);
+  rate_limiter(tokens, host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuGraphLaunch),
                          hGraphExec, hStream);
@@ -4570,9 +4595,9 @@ CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
   int host_index = get_host_device_index_by_cuda_device(device);
-  int grids = 1, blocks = 1;
-  graph_cost_lookup(hGraphExec, &grids, &blocks);
-  rate_limiter(grids, blocks, host_index);
+  int64_t tokens = 1;
+  graph_cost_lookup(hGraphExec, &tokens);
+  rate_limiter(tokens, host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphLaunch_ptsz,
                          hGraphExec, hStream);
@@ -4600,7 +4625,7 @@ CUresult cuGraphExecDestroy(CUgraphExec hGraphExec) {
  * Deliberately does NOT call graph_cost_forget() before the walk:
  * graph_cost_remember() overwrites in place, whereas dropping the entry
  * first would open a window where a concurrent cuGraphLaunch misses the
- * cache and degrades to grids=1 (effectively unthrottled). Since
+ * cache and degrades to tokens=1 (effectively unthrottled). Since
  * cuGraphExecUpdate only succeeds when the topology is unchanged, the OLD
  * cost is a close approximation to the NEW one for that window. */
 static void refresh_cost_on_update(CUresult ret, CUgraphExec hGraphExec, CUgraph hGraph) {

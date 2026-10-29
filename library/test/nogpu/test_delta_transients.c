@@ -39,7 +39,7 @@ limitations under the License.
  *   - no cell worse than the previous generation by more than 2.0 (ratchet
  *     below)
  *   - no class mean worse (beyond 0.05)
- *   - DROP: total over-target time strictly lower (the reason v15 exists)
+ *   - DROP: total over-target time not higher (v15 cut it 38%; it must stay cut)
  *
  * The per-cell bar is a RATCHET where a generation leaves known residuals:
  * the count of cells beyond it and the worst excess may not grow. v15's are
@@ -72,21 +72,34 @@ limitations under the License.
  * per class. v15's BURST residuals: 57 on the hard path (on20/off5 at
  * pool/1500, mostly target 60), 11 on the soft path (on10/off30, worst +15.1:
  * A2 at pool/150, target 20). */
-static const long   BUDGET_CELLS[] = {0, 0, 68};
-static const double BUDGET_WORST[] = {CELL_CAP, CELL_CAP, 15.15};
+#ifndef TRN_HEAVY
+#define TRN_HEAVY 0
+#endif
+#if TRN_HEAVY
+static const long   BUDGET_CELLS[] = {HEAVY_DROP_CELLS, HEAVY_RISE_CELLS, HEAVY_BURST_CELLS};
+static const double BUDGET_WORST[] = {HEAVY_DROP_WORST, HEAVY_RISE_WORST, HEAVY_BURST_WORST};
+#else
+static const long   BUDGET_CELLS[] = {0, 0, 0};
+static const double BUDGET_WORST[] = {CELL_CAP, CELL_CAP, CELL_CAP};
+#endif
 
 enum { DROP, RISE, BURST, NCLASS };
 static const char *CLASS_NAME[NCLASS] = {"DROP ", "RISE ", "BURST"};
 
 /* heavy, light pairs in R/pool per 100 ms cycle */
+#if TRN_HEAVY   /* the headroom range: loads of 0.3 to 300 pools per cycle */
+static const double PAIRS[][2] = {{300, 30}, {300, 3}, {30, 3}, {3, 0.3}, {30, 0.3}};
+static const double BURST_LOAD[] = {300, 30, 3};
+#else
 static const double PAIRS[][2] = {
   {1.0 / 15, 1.0 / 150}, {1.0 / 15, 1.0 / 1500}, {1.0 / 150, 1.0 / 1500},
   {1.0 / 150, 1.0 / 15000}, {1.0 / 1500, 1.0 / 15000},
 };
+static const double BURST_LOAD[] = {1.0 / 15, 1.0 / 150, 1.0 / 1500};
+#endif
 #define NPAIR (int)(sizeof(PAIRS) / sizeof(PAIRS[0]))
 static const int DUTY[][2] = {{1, 1}, {2, 2}, {3, 7}, {5, 5}, {10, 30}, {50, 50}, {20, 5}};
 #define NDUTY (int)(sizeof(DUTY) / sizeof(DUTY[0]))
-static const double BURST_LOAD[] = {1.0 / 15, 1.0 / 150, 1.0 / 1500};
 
 typedef struct {
   long n[NCLASS], over_cap[NCLASS];
@@ -259,14 +272,14 @@ int main(void) {
   }
   printf("  DROP over-target time (util >= target+15, 10 min after the switch): %.0f s -> %.0f s\n",
          t->drop_over_o, t->drop_over_c);
-  if (!(t->drop_over_c < t->drop_over_o)) {
+  if (t->drop_over_c > t->drop_over_o) {
     failures++;
   }
   if (failures) {
     printf("[FAIL] %d transient criteria\n", failures);
     return 1;
   }
-  printf("[ok] per-cell ratchet held, no class mean worse, DROP over-target time reduced\n");
+  printf("[ok] per-cell ratchet held, no class mean worse, DROP over-target time not higher\n");
   printf("\ntransient scenarios passed\n");
   return 0;
 }

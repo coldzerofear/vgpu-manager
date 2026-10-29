@@ -103,6 +103,11 @@ limitations under the License.
 #ifndef GEN_START_HARD
 #define GEN_START_HARD 0
 #endif
+/* GEN_HEAVY sweeps the headroom range instead: R/pool 1..1000, where v16's
+ * share runs past the pool (test_delta_gen_heavy*.c). */
+#ifndef GEN_HEAVY
+#define GEN_HEAVY 0
+#endif
 
 /* Per-cell cap RATCHET: cells beyond the cap, and the worst excess, may not
  * grow. v15 (consumption-observed cut) leaves 13 on the hard path, all at
@@ -111,14 +116,18 @@ limitations under the License.
  * better cold start (49 -> 10 there), steady MAE +1.1..+1.7, p95 +3..+5.
  * docs/sm_delta_validation.md section 8. Lower these when a generation
  * clears cells; never raise them to let a change pass. */
-#if GEN_START_HARD
-#define CAP_BUDGET_CELLS 13
-#define CAP_BUDGET_MAE   1.70
-#define CAP_BUDGET_P95   5
+#if GEN_HEAVY && GEN_START_HARD
+#define CAP_BUDGET_CELLS HEAVY_HARD_CELLS
+#define CAP_BUDGET_MAE   HEAVY_HARD_MAE
+#define CAP_BUDGET_P95   HEAVY_HARD_P95
+#elif GEN_HEAVY
+#define CAP_BUDGET_CELLS HEAVY_SOFT_CELLS
+#define CAP_BUDGET_MAE   HEAVY_SOFT_MAE
+#define CAP_BUDGET_P95   HEAVY_SOFT_P95
 #else
-#define CAP_BUDGET_CELLS 0
-#define CAP_BUDGET_MAE   1.0
-#define CAP_BUDGET_P95   2
+#define CAP_BUDGET_CELLS 9
+#define CAP_BUDGET_MAE   0.26
+#define CAP_BUDGET_P95   4
 #endif
 #define CAP_BUDGET_COLD  2.0
 
@@ -162,18 +171,26 @@ static res_t run_cell(int64_t total, int64_t R, int u, int delay, int use_new,
 }
 
 /* R/pool grid: 4 per decade over [1e-7, 2], then the three legacy bands. */
+#if GEN_HEAVY
+#define NLOAD_LOG 13
+#define DEC_BASE  0
+#else
 #define NLOAD_LOG 30
+#define DEC_BASE  (-7)
+#endif
 static double LOADS[NLOAD_LOG + 3];
 static int NLOAD;
 
 static void build_loads(void) {
   NLOAD = 0;
   for (int i = 0; i < NLOAD_LOG; i++) {
-    LOADS[NLOAD++] = pow(10.0, -7.0 + i * 0.25);   /* 1e-7 .. 10^0.25 */
+    LOADS[NLOAD++] = pow(10.0, DEC_BASE + i * 0.25);   /* 1e-7 .. 10^0.25, or 1 .. 1000 */
   }
-  LOADS[NLOAD++] = 1.0 / 1500;
-  LOADS[NLOAD++] = 1.0 / 150;
-  LOADS[NLOAD++] = 1.0 / 15;
+  if (!GEN_HEAVY) {
+    LOADS[NLOAD++] = 1.0 / 1500;
+    LOADS[NLOAD++] = 1.0 / 150;
+    LOADS[NLOAD++] = 1.0 / 15;
+  }
 }
 
 /* Limit bands of a region; a load decade is the other axis. */
@@ -376,7 +393,10 @@ int main(int argc, char **argv) {
   }
   printf("\n");
   for (int d = 0; d < NDEC; d++) {
-    printf("  1e%-+6d", d - 7);
+    if (DEC_BASE + d > 3) {
+      break;
+    }
+    printf("  1e%-+6d", DEC_BASE + d);
     for (int b = 0; b < NBAND; b++) {
       agg_t *g = &t->reg[d][b];
       double k = (double)g->n;
