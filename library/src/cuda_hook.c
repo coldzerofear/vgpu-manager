@@ -746,6 +746,9 @@ static int     g_delta_mark_fresh[MAX_DEVICE_COUNT] = {0};
  * the watcher before the controller runs. */
 static sm_delta_est_t g_delta_est[MAX_DEVICE_COUNT];
 static uint64_t g_delta_sample_ts[MAX_DEVICE_COUNT] = {0};
+/* Newest NVML process-sample timestamp (us) this process has read per device:
+ * the next local query's lastSeenTimeStamp (get_gpu_process_from_local_nvml_driver). */
+static uint64_t g_util_last_ts[MAX_DEVICE_COUNT] = {0};
 
 /* After the winner's refill (or bypass store): finish this cycle's mark. */
 static void delta_mark_refill(int host_index, int64_t applied) {
@@ -1597,6 +1600,7 @@ static void *utilization_watcher(void *arg) {
     g_delta_mark_fresh[host_index] = 0;
     memset(&g_delta_est[host_index], 0, sizeof(g_delta_est[host_index]));
     g_delta_sample_ts[host_index] = 0;
+    g_util_last_ts[host_index] = 0;
     g_delta_ran[host_index] = 0;
     sys_frees[host_index] = 0;
     avg_sys_frees[host_index] = 0;
@@ -2832,6 +2836,25 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(
   struct timeval temp = {1, 0};
   timersub(&cur, &temp, &prev);
   uint64_t microsec = (uint64_t)prev.tv_sec * 1000000ULL + prev.tv_usec;
+  /* NVML returns utilization since lastSeenTimeStamp ("set it to a timeStamp
+   * retrieved from a previous query to read utilization since the previous
+   * query", nvml.h), averaging every sample after it. A fixed now - 1 s made
+   * each reading a 1 s sliding mean where the driver samples faster (RTX
+   * 3090: 200 ms), against the estimate's premise that a sample describes the
+   * time since the one before it. So: the newest sample already seen, unless
+   * there is none, it is over 1 s old (an idle or stalled watcher), or it lies
+   * ahead of now (the wall clock stepped back) -- then now - 1 s, as before.
+   * The window stays within (0, 1 s]: never staler than the fixed second,
+   * one sample period where the part samples faster. The timestamp is the
+   * driver's own microseconds, compared strictly greater: truncating it to
+   * ms re-reads the same sample forever. */
+  uint64_t now_us = (uint64_t)cur.tv_sec * 1000000ULL + cur.tv_usec;
+  if (host_index >= 0 && host_index < MAX_DEVICE_COUNT) {
+    uint64_t seen = g_util_last_ts[host_index];
+    if (seen > microsec && seen <= now_us) {
+      microsec = seen;
+    }
+  }
   top_result->checktime = microsec;
 
   ret = get_process_utilization_samples(dev, processes_sample, processes_size, microsec);
@@ -2920,6 +2943,14 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
     if (processes_sample[k].timeStamp > top_result->sample_ts) {
       top_result->sample_ts = processes_sample[k].timeStamp;
     }
+  }
+  /* The newest across processes: each sample period lands on the process(es)
+   * that ran in it (one of two time-sliced processes per 200 ms on the RTX
+   * 3090), so every later period's sample is newer than this one -- none is
+   * skipped. Kept on the watcher path too, which falls back to this query. */
+  if (host_index >= 0 && host_index < MAX_DEVICE_COUNT &&
+      top_result->sample_ts > g_util_last_ts[host_index]) {
+    g_util_last_ts[host_index] = top_result->sample_ts;
   }
   top_result->user_current = 0;
   top_result->sys_current = 0;
