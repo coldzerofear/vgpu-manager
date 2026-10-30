@@ -189,6 +189,20 @@ static inline int32_t *sm_throttled_of(int host_index) {
                    : &g_throttled_since_watch[host_index];
 }
 
+/* No NVML sample has ever been valid for this device, yet launches wait on
+ * the bucket. The watcher used to skip the controller until a first sample
+ * arrived, but the first launch is let through on an empty bucket and can
+ * overdraw it, and if that launch never ran on the GPU -- a CUDA graph's
+ * kernels during stream capture -- the driver never produces a sample for
+ * the process: no sample, no refill, no kernel, for good (RTX 3090, a graph
+ * workload under a hard 95 hung 36 minutes). Run the controller on a zero
+ * reading instead: the estimate has no sample to act on and falls back to
+ * the cold-start ramp, and the kernels it lets through bring the samples. */
+static inline int sm_waiting_for_tokens(int host_index) {
+  return *sm_bucket_of(host_index) < 0 ||
+         __atomic_load_n(sm_throttled_of(host_index), __ATOMIC_RELAXED) != 0;
+}
+
 static int g_sm_num[MAX_DEVICE_COUNT]            = {0};
 static int g_max_thread_per_sm[MAX_DEVICE_COUNT] = {0};
 
@@ -746,6 +760,14 @@ static int     g_delta_mark_fresh[MAX_DEVICE_COUNT] = {0};
  * the watcher before the controller runs. */
 static sm_delta_est_t g_delta_est[MAX_DEVICE_COUNT];
 static uint64_t g_delta_sample_ts[MAX_DEVICE_COUNT] = {0};
+/* When this process last saw the device's sample timestamp change (monotonic
+ * ns) and the timestamp it saw. Tracked every cycle by every process, so a
+ * process that wins the refill knows how long the samples have been silent. */
+static uint64_t g_sample_seen_ts[MAX_DEVICE_COUNT] = {0};
+static int64_t  g_sample_seen_ns[MAX_DEVICE_COUNT] = {0};
+/* Silence that means the GPU idles because we throttle it (two periods of the
+ * slowest sampling part, 1 s on the RTX 2080 Ti). */
+#define SM_SAMPLE_SILENT_NS (2LL * 1000000000LL)
 
 /* After the winner's refill (or bypass store): finish this cycle's mark. */
 static void delta_mark_refill(int host_index, int64_t applied) {
@@ -1597,6 +1619,8 @@ static void *utilization_watcher(void *arg) {
     g_delta_mark_fresh[host_index] = 0;
     memset(&g_delta_est[host_index], 0, sizeof(g_delta_est[host_index]));
     g_delta_sample_ts[host_index] = 0;
+    g_sample_seen_ts[host_index] = 0;
+    g_sample_seen_ns[host_index] = 0;
     g_delta_ran[host_index] = 0;
     sys_frees[host_index] = 0;
     avg_sys_frees[host_index] = 0;
@@ -1680,15 +1704,18 @@ static void *utilization_watcher(void *arg) {
        * every ~100ms is exactly the call pattern the driver handles worst. */
       if (sm_sampling_claim(host_index)) {
         get_used_gpu_utilization((void *)&top_results[host_index], cuda_index, host_index, nvml_devices[host_index]);
-        if (unlikely(!top_results[host_index].valid)) continue;
-        sm_publish_sample(host_index);
+        if (unlikely(!top_results[host_index].valid)) {
+          if (!sm_waiting_for_tokens(host_index)) continue;
+        } else {
+          sm_publish_sample(host_index);
+        }
       } else if (!sm_load_published_sample(host_index)) {
         /* Owner holds the lock but has stopped publishing -- alive and stuck,
          * which the lock cannot express. Sample for ourselves so the bucket
          * keeps being replenished. Refill stays gated by the CAS below, so
          * this cannot double-supply even if several standbys do it at once. */
         get_used_gpu_utilization((void *)&top_results[host_index], cuda_index, host_index, nvml_devices[host_index]);
-        if (unlikely(!top_results[host_index].valid)) continue;
+        if (unlikely(!top_results[host_index].valid) && !sm_waiting_for_tokens(host_index)) continue;
       }
 
       /* Invalidate per-cycle exclusivity memo so the FIRST debounced
@@ -1697,6 +1724,13 @@ static void *utilization_watcher(void *arg) {
        * watcher cycle, regardless of how many code paths consult it). */
       g_excl_memo_valid[host_index] = 0;
 
+      int64_t mono = monotonic_ns();
+      if (top_results[host_index].sample_ts != g_sample_seen_ts[host_index] ||
+          g_sample_seen_ns[host_index] == 0) {
+        g_sample_seen_ts[host_index] = top_results[host_index].sample_ts;
+        g_sample_seen_ns[host_index] = mono;
+      }
+
       /* Sampling above happens in every process (metrics and logs want it);
        * from here down is the controller, and exactly one process per cycle
        * gets to run it. A no-op when the bucket is per-process. */
@@ -1704,6 +1738,23 @@ static void *utilization_watcher(void *arg) {
         continue;
       }
       sm_ctl_load(host_index);
+      /* A launch waits on the bucket (throttled -- a debt alone may just be a
+       * long kernel's overdraw before an idle stretch, and ramping then would
+       * bank share for the next burst), yet no new sample for two periods: the
+       * GPU idles because we hold it, and the driver stops sampling an idle
+       * process. The last reading then stays in place for good -- an estimate
+       * rounded to 0 at a 2% target held share at 0 against a stale 8 with the
+       * bucket at -1 (RTX 3090, persist kernels, hung 25 minutes). The reading
+       * is 0, and the estimate has nothing current to pair it with: start it
+       * over, so the cold-start ramp refills and the kernels it lets through
+       * bring samples back. */
+      if (top_results[host_index].valid &&
+          __atomic_load_n(sm_throttled_of(host_index), __ATOMIC_RELAXED) != 0 &&
+          mono - g_sample_seen_ns[host_index] > SM_SAMPLE_SILENT_NS) {
+        memset(&g_delta_est[host_index], 0, sizeof(g_delta_est[host_index]));
+        top_results[host_index].user_current = 0;
+        top_results[host_index].sys_current = 0;
+      }
       g_delta_sample_ts[host_index] = top_results[host_index].sample_ts;
 
       sys_frees[host_index] = MAX_UTILIZATION - top_results[host_index].sys_current;
