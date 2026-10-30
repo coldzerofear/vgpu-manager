@@ -484,15 +484,11 @@ static void test_invariants(void) {
     ok &= sm_delta_step_cap(total, total, 50, 0, total, -1, 0, DIV, 64) == total;
     ok &= sm_delta_step_cap(total, 4 * total, 50, 0, 3 * total, -1, 0, DIV, 64) > 3 * total;
     ok &= sm_delta_step_cap(total, 4 * total, 50, 0, 3 * total, -1, 0, DIV, 64) <= 4 * total;
-    /* the bucket follows share only past the pool */
-    ok &= sm_delta_bucket_ceiling(total, 0) == total && sm_delta_bucket_ceiling(total, total) == total
-       && sm_delta_bucket_ceiling(total, total + 1) == 2 * (total + 1)
-       && sm_delta_bucket_ceiling(total, INT64_MAX - 1) == INT64_MAX;
     if (!ok) {
-      printf("  [FAIL] headroom: share cap, unlimited target, or bucket ceiling\n");
+      printf("  [FAIL] headroom: share cap or unlimited target\n");
       failures++;
     } else {
-      printf("  [ok] headroom: share past the pool only on measured demand (x2/cycle), idle holds, bucket 2*share\n");
+      printf("  [ok] headroom: share past the pool only on measured demand (x2/cycle), idle holds\n");
     }
   }
 
@@ -618,6 +614,41 @@ static void test_invariants(void) {
     ok &= first == 2500 && idle_r == 2500 && r == 1000 * 25 / 100 && drain == 1;
     int dropped = ok;
 
+    /* a huge launch (2^61 tokens) in a drop cycle: 128-bit, no overflow */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      sm_delta_est_control(&st, total, 25, 50, t < 6 ? 100 : 600, t * 100, 5000, 0, 0,
+                           5000, DIV, 64, &drain);
+    }
+    st.ref_consumed = INT64_MAX;
+    sm_delta_est_control(&st, total, 99, 50, 600, 700, 2500, 4000, 0, (int64_t)1 << 61, DIV, 64, &drain);
+    r = sm_delta_est_control(&st, total, 99, 50, 600, 800, 2500, 4000, 0, (int64_t)1 << 61, DIV, 64, &drain);
+    ok &= r == 2500;
+    int huge = ok;
+
+    /* an unlimited target after an estimate rails share to its cap instead of
+     * holding the estimate (a soft limit of 100 once the device is exclusive) */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      r = sm_delta_est_control(&st, total, 50, 50, t < 6 ? 100 : 600, t * 100, 5000, 0, 0,
+                               5000, DIV, 64, &drain);
+    }
+    ok &= st.have_est && r == 5000;
+    r = sm_delta_est_control(&st, total, 100, 50, 600, 700, 5000, 0, 0, 5000, DIV, 64, &drain);
+    ok &= r == sm_delta_share_cap(total, 5000, 5000);
+    int unlimited = ok;
+
+    /* a sample after an hour without any: the period is bounded, the
+     * accumulators stay in range and the window estimates as usual */
+    memset(&st, 0, sizeof st);
+    sm_delta_est_control(&st, total, 25, 50, 100, 100, 5000, 0, 0, 5000, DIV, 64, &drain);
+    for (int t = 2; t <= 6; t++) {
+      r = sm_delta_est_control(&st, total, 25, 1000, t < 6 ? 100 : 3600100, t * 100, 5000, 0, 0,
+                               5000, DIV, 64, &drain);
+    }
+    ok &= st.win_ms == 0 && st.win_reading_ms == 0 && r == (5000 * 25 + 500) / 1000;
+    int gap = ok;
+
     /* bucket bounds: two cycles of share above (at least a token), a hundred
      * below, saturating */
     ok &= sm_delta_est_bucket_ceiling(0) == 1 && sm_delta_est_bucket_ceiling(5000) == 10000
@@ -625,12 +656,14 @@ static void test_invariants(void) {
     ok &= sm_delta_debt_floor(5000, 10000) == -500000 && sm_delta_debt_floor(0, 1) == -1
        && sm_delta_debt_floor(INT64_MAX / 4, INT64_MAX) == -INT64_MAX;
     if (!ok) {
-      printf("  [FAIL] estimate: once %d window %d aligned %d lower %d idle %d cut %d constrained %d drop %d bounds %d\n",
-             once, window, aligned, lower, idle, cut, constrained, dropped, ok);
+      printf("  [FAIL] estimate: once %d window %d aligned %d lower %d idle %d cut %d constrained %d drop %d "
+             "huge %d unlimited %d gap %d bounds %d\n",
+             once, window, aligned, lower, idle, cut, constrained, dropped, huge, unlimited, gap, ok);
       failures++;
     } else {
       printf("  [ok] estimate: once per >=500 ms window, timestamp-aligned, starved-zero bound, idle holds, "
-             "surplus cut+drain, constrained by starved cycles, demand-drop guard; bucket 2 cycles up, 100 down\n");
+             "surplus cut+drain, constrained by starved cycles, demand-drop guard, unlimited rails, long gaps bounded; "
+             "bucket 2 cycles up, 100 down\n");
     }
   }
 

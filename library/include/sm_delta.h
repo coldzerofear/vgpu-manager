@@ -298,15 +298,6 @@ static inline int64_t sm_delta_share_cap(int64_t total, int64_t share, int64_t c
   return cap;
 }
 
-/* The bucket may hold two cycles of share once share is past the pool, so a
- * deep share can be delivered at all; below that, the pool as before. */
-static inline int64_t sm_delta_bucket_ceiling(int64_t total, int64_t share) {
-  if (share <= total) {
-    return total;
-  }
-  return share > INT64_MAX / 2 ? INT64_MAX : 2 * share;
-}
-
 /* ---- Consumption-observed cut (v15) ----
  *
  * sm_delta_step sees utilization, a delayed and share-blind signal. When the
@@ -345,7 +336,7 @@ static inline int64_t sm_delta_bucket_ceiling(int64_t total, int64_t share) {
 #define DELTA_OBS_MIN_OVERSHOOT (2 * MIN_INCREMENT)
 #define DELTA_OBS_BACKLOG_TICKS 8
 /* Past the pool the bucket holds at most two cycles of share
- * (sm_delta_bucket_ceiling), so an 8-cycle backlog can never form there and
+ * (sm_delta_est_bucket_ceiling), so an 8-cycle backlog can never form there and
  * a heavy workload that turns light would ride its deep share through the
  * limit: with no gate, over-target time after a heavy -> light drop was 5x
  * v15's. There the gate is 1.5 cycles of backlog -- a pause cannot reach
@@ -446,15 +437,19 @@ static inline int64_t sm_delta_control(int64_t total, int up_limit, int user_cur
  * samples each cycle). Readings within the window are averaged by period.
  * Slow parts (1 s samples) act on every sample, as before. */
 #define DELTA_EST_MIN_WINDOW_MS 500
-/* Demand-drop guard (below): a cycle consuming under 1/FACTOR of the
- * consumption the estimate was made on, with tokens left in the bucket, for
- * CYCLES cycles in a row. On the RTX 2080 Ti it took GEMM / elementwise phases
- * alternating every 3 s from 21.5 / 31.2 to 13.0 / 26.1 points of mean error
- * at targets 20 / 50 (hard path; soft 28.0 / 36.8 -> 14.1 / 24.1), steady
- * state unchanged. Capping each upward estimate at 4x instead did nothing
- * for the alternation (23.0 / 31.5). */
+/* Demand-drop guard (below): a cycle consuming under 1/DELTA_EST_DROP_FACTOR
+ * of the consumption the estimate was made on, with tokens left in the
+ * bucket, for DELTA_EST_DROP_CYCLES cycles in a row. On the RTX 2080 Ti it
+ * took GEMM / elementwise phases alternating every 3 s from 21.5 / 31.2 to
+ * 13.0 / 26.1 points of mean error at targets 20 / 50 (hard path; soft
+ * 28.0 / 36.8 -> 14.1 / 24.1), steady state unchanged. Capping each upward
+ * estimate at 4x instead did nothing for the alternation (23.0 / 31.5). */
 #define DELTA_EST_DROP_FACTOR 4
 #define DELTA_EST_DROP_CYCLES 2
+/* A sample period longer than this (no samples while the GPU idled) counts
+ * as this long: the ring covers only the last 1.6 s anyway, and the bound
+ * keeps reading x period inside 32 bits. */
+#define DELTA_EST_MAX_PERIOD_MS 10000
 
 /* now_ms: wall-clock ms of this cycle's read (CLOCK_REALTIME, the clock NVML
  * stamps samples with). sample_ts_ms: the current sample's timestamp in ms,
@@ -484,6 +479,9 @@ static inline int64_t sm_delta_est_control(sm_delta_est_t *st, int64_t total, in
       st->win_ts = sample_ts_ms;   /* the first sample only opens the window */
     } else {
       int64_t period = (int32_t)((uint32_t)sample_ts_ms - (uint32_t)prev);
+      if (period > DELTA_EST_MAX_PERIOD_MS) {
+        period = DELTA_EST_MAX_PERIOD_MS;
+      }
       if (period > 0) {
         st->win_reading_ms += user_current * (int32_t)period;
         st->win_ms += (int32_t)period;
@@ -544,8 +542,8 @@ static inline int64_t sm_delta_est_control(sm_delta_est_t *st, int64_t total, in
       st->zero_starved = reading < DELTA_EST_MIN_READING && den > 0 && 2 * starved_den >= den;
       int m = reading >= DELTA_EST_MIN_READING ? reading : (st->zero_starved ? 1 : 0);
       if (m >= 1 && cbar > 0 && up_limit >= 1 && up_limit < 100) {
-        /* cbar is one cycle's consumption, under two cycles of a share capped
-         * at DELTA_HEADROOM_POOLS pools: the product fits 128 bits for any pool. */
+        /* cbar is one cycle's consumption: at most a bucket's worth plus one
+         * overdrawing launch (each under 2^62), so x 99 fits 128 bits. */
         int64_t lim = total > INT64_MAX / DELTA_HEADROOM_POOLS ? INT64_MAX
                                                                : total * DELTA_HEADROOM_POOLS;
         __int128 est = ((__int128)cbar * up_limit + m / 2) / m;
@@ -577,9 +575,9 @@ static inline int64_t sm_delta_est_control(sm_delta_est_t *st, int64_t total, in
    * a drop. */
   if (st->have_est && consumed > 0 && bucket > 0 &&
       up_limit >= 1 && up_limit < 100 &&
-      consumed * DELTA_EST_DROP_FACTOR < st->ref_consumed) {
+      (__int128)consumed * DELTA_EST_DROP_FACTOR < st->ref_consumed) {
     if (++st->drop_cycles >= DELTA_EST_DROP_CYCLES) {
-      int64_t next = (consumed * up_limit + 50) / 100;
+      int64_t next = (int64_t)(((__int128)consumed * up_limit + 50) / 100);
       if (next < 1) {
         next = 1;
       }
@@ -593,7 +591,10 @@ static inline int64_t sm_delta_est_control(sm_delta_est_t *st, int64_t total, in
   } else {
     st->drop_cycles = 0;
   }
-  if (st->last_ts != 0 && ((st->have_est && !st->zero_starved) || !demand)) {
+  /* An unlimited target (a soft limit of 100) has nothing to estimate: the
+   * step rails share to its cap. Holding instead kept the share an earlier,
+   * lower target had estimated. */
+  if (up_limit < 100 && st->last_ts != 0 && ((st->have_est && !st->zero_starved) || !demand)) {
     return share;
   }
   return sm_delta_control(total, up_limit, user_current, share, bucket, boot, consumed,

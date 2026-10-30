@@ -1597,6 +1597,7 @@ static void *utilization_watcher(void *arg) {
     g_delta_mark_fresh[host_index] = 0;
     memset(&g_delta_est[host_index], 0, sizeof(g_delta_est[host_index]));
     g_delta_sample_ts[host_index] = 0;
+    g_delta_ran[host_index] = 0;
     sys_frees[host_index] = 0;
     avg_sys_frees[host_index] = 0;
     pre_external_process_nums[host_index] = 0;
