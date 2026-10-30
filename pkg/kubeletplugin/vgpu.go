@@ -210,7 +210,7 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	switch {
 	case featuregates.Enabled(featuregates.DevicePluginClientMode):
 		compMode |= util.ClientRegMode
-	case cgroups.IsCgroup2UnifiedMode(), cgroups.IsCgroup2HybridMode():
+	case cgroups.IsCgroup2UnifiedMode():
 		compMode |= util.CGroupv2Mode
 	default:
 		compMode |= util.CGroupv1Mode

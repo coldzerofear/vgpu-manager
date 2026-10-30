@@ -55,22 +55,33 @@ func TestMutateCreateRemoteNodeSelector(t *testing.T) {
 	}
 	handle := &mutateHandle{options: &options.Options{}}
 
-	t.Run("a remote pod is pinned to the consumer nodes", func(t *testing.T) {
+	// The webhook must NOT pin a remote pod to the consumer nodes, and that is
+	// worth a test of its own because it used to.
+	//
+	// NodeRemoteConsumerLabel is published by the remote DEVICE PLUGIN only
+	// (pkg/deviceplugin/remote/server.go setupConsumerRole). The DRA path
+	// (pkg/kubeletplugin) never publishes it, so a nodeSelector on that label
+	// matches no node at all on a DRA cluster and the pod stays Pending. Each
+	// path already places its own pods without help from here: the
+	// device-plugin path through the scheduler filter
+	// (util.IsRemoteConsumerNode), the DRA path through the claim's pool.
+	t.Run("a remote pod is not pinned to the consumer nodes", func(t *testing.T) {
 		pod := vgpuPod(util.AccessModeRemote, nil)
 
 		require.NoError(t, handle.MutateCreate(context.Background(), pod, false))
 
-		assert.Equal(t, map[string]string{util.NodeRemoteConsumerLabel: "true"}, pod.Spec.NodeSelector)
+		assert.Empty(t, pod.Spec.NodeSelector,
+			"injecting %s here leaves DRA remote pods unschedulable: only the "+
+				"device-plugin path publishes that label", util.NodeRemoteConsumerLabel)
 	})
 
-	t.Run("selectors of its own are kept", func(t *testing.T) {
+	t.Run("a remote pod's own selectors are left exactly as they are", func(t *testing.T) {
 		pod := vgpuPod(util.AccessModeRemote, map[string]string{"zone": "a"})
 
 		require.NoError(t, handle.MutateCreate(context.Background(), pod, false))
 
-		assert.Equal(t, map[string]string{
-			"zone": "a", util.NodeRemoteConsumerLabel: "true",
-		}, pod.Spec.NodeSelector)
+		assert.Equal(t, map[string]string{"zone": "a"}, pod.Spec.NodeSelector,
+			"nothing may be added to a remote pod's nodeSelector")
 	})
 
 	t.Run("a local pod is left where it is", func(t *testing.T) {

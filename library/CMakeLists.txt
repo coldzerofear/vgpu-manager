@@ -46,6 +46,7 @@ add_library(vgpu-control SHARED
     include/hook.h
     include/array_size.h
     include/vmem_table.h
+    include/cgroup_match.h
     include/cuda-subset.h
     include/nvml-subset.h
     include/cuda-helper.h
@@ -288,6 +289,14 @@ if(BUILD_SM_NODE_TESTS)
     target_include_directories(test_session_paths PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+    # The cgroup ownership decision. Header-only, and the cases in it are the
+    # 100-case matrix (cgroup v1/v2 x cgroupns private/host x pid modes)
+    # captured from a real host -- including the nested-cgroup rows that an
+    # earlier boundary check got wrong.
+    add_executable(test_cgroup_match test/nogpu/test_cgroup_match.c)
+    target_include_directories(test_cgroup_match PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
     # Container PID identification: the cgroup-namespace regression that made
     # device_pid_in_same_container() reject every pid on kernels below 4.6,
     # plus the fd-based GPU-in-use test and its no-leak property. In util.c so
@@ -452,6 +461,7 @@ foreach(vgpu_nogpu_test
         test_vmem_region_concurrency
         test_session_paths
         test_session_pids_concurrency
+        test_cgroup_match
         test_container_pid
         test_cgroup_parse
         test_shared_file_mode
@@ -480,6 +490,22 @@ add_executable(vgpu-session-config tools/session_config.c ${VGPU_NODRIVER_SRCS})
 target_include_directories(vgpu-session-config PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(vgpu-session-config PRIVATE Threads::Threads)
+
+# Replays an array_size_probe CSV through the shipped include/array_size.h and
+# reports any descriptor we would charge MORE for than the driver reserves.
+# Header-only arithmetic, so it needs neither a GPU nor a CUDA toolkit and is
+# built everywhere -- which is the point: it makes "verified against a real
+# driver" re-runnable from a recorded CSV instead of a claim in a commit.
+add_executable(array_size_verify tools/array_size_verify.c)
+target_include_directories(array_size_verify PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# Measures BC bytes-per-block through OpenGL, which is the only way to get a
+# number for BC6H -- cuArray3DCreate refuses that format, so array_size_probe
+# cannot. Also outside the CUDA tool block: it opens libEGL/libGL at runtime
+# and needs no headers or toolkit to build (it does need a GPU to RUN).
+add_executable(bc_block_probe tools/bc_block_probe.c)
+target_link_libraries(bc_block_probe PRIVATE ${CMAKE_DL_LIBS})
 
 # find_package(CUDAToolkit REQUIRED)
 # The tools below link libcuda / libnvidia-ml and include <cuda.h>, so they

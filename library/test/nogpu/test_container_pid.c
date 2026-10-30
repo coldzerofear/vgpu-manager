@@ -45,6 +45,8 @@
 #include "include/hook.h"
 
 extern int device_pid_in_same_container(unsigned int pid);
+extern int read_cgroup(FILE *fp, const char *cgroup_key,
+                       char *cgroup_value, size_t value_size);
 extern int gpu_device_fd_in_process(unsigned int pid);
 
 static int failures = 0;
@@ -276,6 +278,218 @@ static void test_prefix_rule(void) {
   }
 }
 
+/* A pid we may not inspect must be REPORTED, not silently counted as "not
+ * ours". /proc/<pid>/ns entries need PTRACE_MODE_READ, so the verdict for a pid
+ * owned by another uid is indistinguishable from one that exited -- and the
+ * two mean opposite things (an under-count that lets a container exceed its
+ * quota, versus an ordinary race). The warning is the only thing that tells
+ * them apart, so this checks the warning actually comes out.
+ *
+ * Works whether or not the suite runs as root:
+ *   as root   -- fork a child, drop it to an unprivileged uid, and have it
+ *                inspect its still-root parent. That is a denial we create
+ *                rather than hope to find.
+ *   otherwise -- inspect pid 1, which is root and therefore off limits.
+ */
+static void test_inspect_denial_is_reported(void) {
+  char log_path[] = "/tmp/vgpu_cpid_denied_XXXXXX";
+  int log_fd = mkstemp(log_path);
+  if (log_fd < 0) {
+    printf("SKIP %s: could not create a temp log\n", __func__);
+    return;
+  }
+  close(log_fd);
+
+  int pipefd[2];
+  if (pipe(pipefd) != 0) {
+    printf("SKIP %s: pipe failed\n", __func__);
+    unlink(log_path);
+    return;
+  }
+
+  pid_t parent_pid = getpid();
+  pid_t child = fork();
+  if (child < 0) {
+    printf("SKIP %s: fork failed\n", __func__);
+    close(pipefd[0]);
+    close(pipefd[1]);
+    unlink(log_path);
+    return;
+  }
+  if (child == 0) {
+    close(pipefd[0]);
+    /* The warning goes to stderr; capture it for the parent to read. */
+    int fd = open(log_path, O_WRONLY | O_TRUNC);
+    if (fd >= 0) {
+      dup2(fd, STDERR_FILENO);
+      close(fd);
+    }
+    /* LOGGER needs WARNING enabled; that is the default, but be explicit
+     * since this child's verdict depends on it. */
+    setenv("LOGGER_LEVEL", "2", 1);
+
+    unsigned int target;
+    if (getuid() == 0) {
+      /* 65534 = nobody on Debian/Ubuntu, which this image is. setgid first:
+       * after setuid we would no longer be allowed to. */
+      if (setgid(65534) != 0 || setuid(65534) != 0 || getuid() == 0) {
+        _exit(77); /* could not drop privileges -> SKIP */
+      }
+      target = (unsigned int)parent_pid; /* still root, now off limits to us */
+    } else {
+      target = 1; /* pid 1 is root, we are not */
+    }
+
+    /* Report the raw verdict, not a boolean: the whole point is that a denial
+     * is its own third value rather than being folded into "not ours". */
+    char payload = (char)device_pid_in_same_container(target);
+    ssize_t written = write(pipefd[1], &payload, 1);
+    (void)written;
+    _exit(0);
+  }
+
+  close(pipefd[1]);
+  char verdict = 0;
+  ssize_t got = read(pipefd[0], &verdict, 1);
+  close(pipefd[0]);
+  int status = 0;
+  waitpid(child, &status, 0);
+
+  if (WIFEXITED(status) && WEXITSTATUS(status) == 77) {
+    printf("SKIP %s: could not drop privileges to create a denial\n", __func__);
+    unlink(log_path);
+    return;
+  }
+  /* UNKNOWN, specifically. NO would mean the denial was folded into "not
+   * ours", which under-counts a process that may well be ours -- the
+   * quota-escape direction this third value exists to prevent. */
+  CHECK(got == 1 && verdict == PID_IN_CONTAINER_UNKNOWN,
+        "a pid we may not inspect must come back UNKNOWN (%d), not NO (%d) or "
+        "YES (%d) (got=%zd verdict=%d)",
+        PID_IN_CONTAINER_UNKNOWN, PID_IN_CONTAINER_NO, PID_IN_CONTAINER_YES,
+        got, (int)verdict);
+
+  /* And it must have said why. */
+  FILE *fp = fopen(log_path, "re");
+  int saw_warning = 0;
+  if (fp != NULL) {
+    char line[2048];
+    while (fgets(line, sizeof(line), fp) != NULL) {
+      if (strstr(line, "not permitted to inspect pid") != NULL) {
+        saw_warning = 1;
+        break;
+      }
+    }
+    fclose(fp);
+  }
+  CHECK(saw_warning,
+        "a permission denial was not reported: an under-count from EPERM is "
+        "then indistinguishable from a pid that simply exited");
+  unlink(log_path);
+}
+
+/* The premises the restricted-permission fallback rests on.
+ *
+ * When device_pid_in_same_container() comes back UNKNOWN, the caller
+ * (check_device_pid_in_local_container_pid) decides ownership from
+ * /proc/<pid>/cgroup -- the CONTAINER'S OWN proc, not the mounted host one,
+ * because an open-kernel driver lists pids of our own namespace. It tries the
+ * cgroup v2 shape and then the v1 shape and counts the pid if either says yes.
+ *
+ * Those two checks live in cuda_hook.c, which cannot join the no-driver source
+ * set, so what is pinned here is what they depend on:
+ *
+ *   v2 shape -- a process of this container reads exactly "0::/", which only
+ *               holds under cgroupns=private.
+ *   v1 shape -- our own path is specific enough to identify us (not a bare
+ *               "/") AND another process of this container contains it, which
+ *               only holds under cgroupns=host.
+ *
+ * Exactly one of the two normally applies, so this asserts that AT LEAST ONE
+ * premise holds on whatever host the suite runs on. If both were to break, the
+ * fallback would quietly answer "not ours" for every pid it cannot inspect,
+ * and that under-counts -- the quota-escape direction the third value exists
+ * to prevent.
+ */
+static void test_local_cgroup_can_identify_this_container(void) {
+  char child_path[64];
+  char self_cg[CGROUP_LINE_MAX] = {0};
+  char child_cg[CGROUP_LINE_MAX] = {0};
+  const char *const keys[] = {"", "memory", NULL};
+  const char *matched_key = NULL;
+  int private_premise = 0;
+  int host_premise = 0;
+
+  pid_t child = spawn_holder(NULL);
+  if (child <= 0) {
+    printf("SKIP %s: could not spawn a child\n", __func__);
+    return;
+  }
+  snprintf(child_path, sizeof(child_path), "/proc/%d/cgroup", (int)child);
+
+  FILE *child_fp = fopen(child_path, "re");
+  FILE *self_fp = fopen(PID_SELF_CGROUP_PATH, "re");
+  if (child_fp == NULL || self_fp == NULL) {
+    printf("SKIP %s: could not open the cgroup files\n", __func__);
+    if (child_fp) fclose(child_fp);
+    if (self_fp) fclose(self_fp);
+    reap(child);
+    return;
+  }
+
+  /* Walk the same key list, in the same order, with the same reader the code
+   * uses, and stop at the first key that yields a path -- that is how
+   * check_device_pid_in_proc_cgroup_path() decides which cgroup version it is
+   * looking at. Reusing one open stream per file across both keys is also part
+   * of what is being checked: read_cgroup must rewind, or the second key would
+   * fail on position rather than contents. */
+  for (int i = 0; keys[i] != NULL; i++) {
+    if (read_cgroup(child_fp, keys[i], child_cg, sizeof(child_cg)) != 0) {
+      continue;
+    }
+    matched_key = keys[i];
+
+    /* cgroupns=private: the pid reads a bare "/". */
+    if (child_cg[0] == '/' && child_cg[1] == '\0') {
+      private_premise = 1;
+      break;
+    }
+
+    /* cgroupns=host: our own path is specific, and the pid's is it or below
+     * it. Prefix with a boundary check, exactly as the code does -- "/a/bc"
+     * must not count as being under "/a/b". */
+    if (read_cgroup(self_fp, keys[i], self_cg, sizeof(self_cg)) == 0) {
+      size_t self_len = strlen(self_cg);
+      if (self_len > 0 && strncmp(child_cg, self_cg, self_len) == 0 &&
+          (child_cg[self_len] == '\0' || child_cg[self_len] == '/')) {
+        host_premise = 1;
+      }
+    }
+    break;
+  }
+
+  /* Reported either way: which premise holds is a property of the host, so
+   * printing it is what makes a failure here actionable. */
+  printf("      (cgroup premises: key=\"%s\" private(pid==\"/\")=%d "
+         "host(prefix)=%d; pid=\"%s\" self=\"%s\")\n",
+         matched_key != NULL ? matched_key : "(none matched)",
+         private_premise, host_premise,
+         child_cg[0] != '\0' ? child_cg : "(none)",
+         self_cg[0] != '\0' ? self_cg : "(none)");
+
+  CHECK(matched_key != NULL,
+        "neither the v2 nor the v1 controller key yielded a cgroup path, so "
+        "the fallback cannot read this host's cgroups at all");
+  CHECK(private_premise || host_premise,
+        "a process of this container was not recognised by either cgroup "
+        "shape, so the UNKNOWN fallback would answer \"not ours\" for every "
+        "pid it cannot inspect and under-count its memory");
+
+  fclose(child_fp);
+  fclose(self_fp);
+  reap(child);
+}
+
 int main(void) {
   test_self_is_in_own_container();
   test_child_is_in_same_container();
@@ -285,6 +499,8 @@ int main(void) {
   test_unrelated_devices_are_not_gpu();
   test_no_descriptor_leak();
   test_prefix_rule();
+  test_inspect_denial_is_reported();
+  test_local_cgroup_can_identify_this_container();
 
   if (failures != 0) {
     printf("FAILED: %d check(s)\n", failures);
