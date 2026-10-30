@@ -166,15 +166,33 @@ func TestUtilQuerySince(t *testing.T) {
 }
 
 func TestNewestSampleTimeStamp(t *testing.T) {
+	now := time.UnixMicro(10_000)
 	samples := []nvml.ProcessUtilizationSample{{Pid: 1, TimeStamp: 500}, {Pid: 2, TimeStamp: 700}, {Pid: 3, TimeStamp: 600}}
-	if got := NewestSampleTimeStamp(samples, 100); got != 700 {
+	if got := NewestSampleTimeStamp(samples, 100, now); got != 700 {
 		t.Fatalf("got %d, want 700", got)
 	}
-	if got := NewestSampleTimeStamp(samples, 900); got != 900 {
+	if got := NewestSampleTimeStamp(samples, 900, now); got != 900 {
 		t.Fatalf("an older batch moved the cursor back: got %d, want 900", got)
 	}
-	if got := NewestSampleTimeStamp(nil, 900); got != 900 {
+	if got := NewestSampleTimeStamp(nil, 900, now); got != 900 {
 		t.Fatalf("an empty batch moved the cursor: got %d, want 900", got)
+	}
+}
+
+// The wall clock stepped back past the cursor: new samples are older than it, so
+// keeping the max would freeze the cursor until the clock caught up. It restarts
+// from the batch instead.
+func TestNewestSampleTimeStampClockStepBack(t *testing.T) {
+	now := time.UnixMicro(10_000)
+	samples := []nvml.ProcessUtilizationSample{{Pid: 1, TimeStamp: 9_800}}
+	if got := NewestSampleTimeStamp(samples, 50_000, now); got != 9_800 {
+		t.Fatalf("got %d, want 9800 (cursor ahead of now must restart)", got)
+	}
+	if got := NewestSampleTimeStamp(nil, 50_000, now); got != 0 {
+		t.Fatalf("got %d, want 0 (no samples: a cursor ahead of now is dropped)", got)
+	}
+	if got := UtilQuerySince(NewestSampleTimeStamp(nil, 50_000, now), now); got != uint64(now.Add(-time.Second).UnixMicro()) {
+		t.Fatalf("query after a step back = %d, want now-1s", got)
 	}
 }
 

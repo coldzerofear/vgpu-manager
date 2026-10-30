@@ -605,7 +605,7 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
 /* BUMP THIS whenever any field below changes type, order, or offset.
  * The guard compares it and rebuilds the region on mismatch; forgetting to
  * bump it means a new library silently reads an old layout's bytes. */
-#define SM_NODE_LAYOUT_VERSION 5U   /* v5: + sample timestamp, sample-driven estimate state; three cache lines */
+#define SM_NODE_LAYOUT_VERSION 6U   /* v6: + per-period reading (v5: + sample timestamp, estimate state; three cache lines) */
 
 /* Sample-driven estimate state (include/sm_delta.h, sm_delta_est_control).
  * Defined here so the shared region can hold it: the sample window spans
@@ -716,7 +716,10 @@ typedef struct {
    * exactly when the owner did (sm_delta_est_control acts once per sample). */
   uint64_t s_sample_ts;
   sm_delta_est_t est;
-  uint8_t _pad[3 * CACHELINE_SIZE - CACHELINE_SIZE - sizeof(sm_delta_est_t)];
+  /* The owner's per-period reading (utilization_t.user_fresh), which the
+   * estimate reads; s_user_current is the one-second view. */
+  int32_t s_user_fresh;
+  uint8_t _pad[3 * CACHELINE_SIZE - CACHELINE_SIZE - sizeof(sm_delta_est_t) - sizeof(int32_t)];
 } __attribute__((aligned(CACHELINE_SIZE))) sm_node_dev_t;
 
 typedef struct {
@@ -773,6 +776,13 @@ typedef struct {
    * moves only when the driver produces a new sample, which on some parts is
    * once a second while the watcher runs every 100 ms. */
   uint64_t sample_ts;
+  /* This container's utilization over the newest sample period alone, the
+   * estimate's reading (user_current is the one-second view the per-process
+   * logic wants; see util_window_view). Held until a new sample arrives. */
+  int user_fresh;
+  /* The local query fell back to now - 1 s this cycle: its samples are each
+   * process's one-second mean, not a single period. */
+  int window_fallback;
 } utilization_t;
 
 typedef enum VGPU_COMPATIBILITY_MODE_enum {

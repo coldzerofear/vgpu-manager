@@ -270,8 +270,13 @@ func UtilQuerySince(lastSeen uint64, now time.Time) uint64 {
 // NewestSampleTimeStamp advances a query cursor past samples. It takes the
 // newest across processes: each sample period lands on the process(es) that
 // ran in it (one of two time-sliced processes per 200ms on the RTX 3090), so
-// every later period's sample is newer and none is skipped.
-func NewestSampleTimeStamp(samples []nvml.ProcessUtilizationSample, lastSeen uint64) uint64 {
+// every later period's sample is newer and none is skipped. A cursor ahead of
+// now means the wall clock stepped back: later samples would all compare older
+// and the cursor would stay stuck until the clock caught up, so it restarts.
+func NewestSampleTimeStamp(samples []nvml.ProcessUtilizationSample, lastSeen uint64, now time.Time) uint64 {
+	if lastSeen > uint64(now.UnixMicro()) {
+		lastSeen = 0
+	}
 	for _, sample := range samples {
 		if sample.TimeStamp > lastSeen {
 			lastSeen = sample.TimeStamp

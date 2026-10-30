@@ -229,7 +229,7 @@ func smWatcherSingleDevice(
 
 	procUtilSamples, lastTs, rt := utilAdapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, watcher.MaxPids, *lastSeen)
 	if rt == nvml.SUCCESS {
-		*lastSeen = watcher.NewestSampleTimeStamp(procUtilSamples, *lastSeen)
+		*lastSeen = watcher.NewestSampleTimeStamp(procUtilSamples, *lastSeen, time.Now())
 	}
 	if rt != nvml.SUCCESS && rt != nvml.ERROR_NOT_FOUND {
 		// NOT_FOUND just means the driver holds no samples newer than lastTs. At
