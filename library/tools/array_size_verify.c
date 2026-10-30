@@ -61,15 +61,18 @@ int main(void) {
     char name[96], result[64], shape[48];
     unsigned int format = 0, channels = 0;
     size_t width = 0, height = 0, depth = 0;
+    /* alignment and delta are parsed but unused: only driver_size matters, and
+     * requiring the trailing columns is what makes a truncated row get skipped
+     * instead of half-read. */
     size_t driver_size = 0, alignment = 0, delta = 0;
-    int exact_in_library = 0;
     CUDA_ARRAY3D_DESCRIPTOR desc;
     size_t ours = 0;
 
-    if (sscanf(line,
-               "%95[^,],0x%x,%u,%47[^,],%zu,%zu,%zu,%63[^,],%zu,%zu,%zu,%d",
+    /* A row the probe emitted with extra trailing columns still parses: sscanf
+     * stops once the format is exhausted. */
+    if (sscanf(line, "%95[^,],0x%x,%u,%47[^,],%zu,%zu,%zu,%63[^,],%zu,%zu,%zu",
                name, &format, &channels, shape, &width, &height, &depth, result,
-               &driver_size, &alignment, &delta, &exact_in_library) != 12) {
+               &driver_size, &alignment, &delta) != 11) {
       continue; /* header or malformed line */
     }
     if (strcmp(result, "CUDA_SUCCESS") != 0) {
