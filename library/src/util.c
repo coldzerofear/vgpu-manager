@@ -57,8 +57,8 @@ limitations under the License.
 #define EXTERNAL_SM_WATCHER_ENABLED_ENV "EXTERNAL_SM_WATCHER_ENABLED"
 
 /* Exclusivity FSM debounce: consecutive watcher cycles of a changed
- * observation before the FSM flips (soft_core burst gate, hard_limit
- * jitter-init gate). The AUTO_ in the names is historical -- they date from
+ * observation before the FSM flips (it gates the soft_core burst; the
+ * hard_limit jitter-init bypass reads the raw observation). The AUTO_ in the names is historical -- they date from
  * the removed auto controller -- and kept so existing settings still apply. */
 #define CUDA_SM_AUTO_DEBOUNCE_CYCLES_ENV         "CUDA_SM_AUTO_DEBOUNCE_CYCLES"
 /* SM-utilization threshold (percent) above which a non-self-container

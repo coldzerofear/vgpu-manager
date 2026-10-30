@@ -129,7 +129,8 @@ limitations under the License.
  * 27575 / 5425 / 0; two-sided cold-start MAE 20935 / 11908 / 157, the 157
  * within 1.4 utilization-points, confined to targets >= 74 where the old
  * formula's flood-to-100 happens to approximate the target. In-model
- * numbers; hardware validation via test/ablation remains the gate.
+ * numbers; the RTX 3090 runs in docs/sm_delta_validation.md section 12 are
+ * the hardware check.
  */
 
 #ifndef _VGPU_SM_DELTA_H_

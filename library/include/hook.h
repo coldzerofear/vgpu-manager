@@ -460,13 +460,11 @@ extern resource_data_t *g_vgpu_config;
  * delta_increment_divisor: seed divisor -- delta's minimum step is
  *                     total*MIN_INCREMENT/R, its granularity. 1310720 default;
  *                     see include/sm_delta.h.
- * delta_ramp_floor_divisor: delta()'s grow/cut step is floored at
- *                     g_total*diff/(up_limit*N); N sets the bulk-ramp length in
- *                     watcher cycles (~N cycles, SM-independent). Smaller = faster
- *                     ramp / coarser near-limit tracking on tiny slices. Default
- *                     64. N <= 0 disables the floor (delta reverts to its raw
- *                     sm^2-scaled step); delta() guards the division on N > 0, so
- *                     a non-positive value is not loaded-clamped.
+ * delta_ramp_floor_divisor: emergency cut floor -- when util is over twice
+ *                     the target, the cut is floored at g_total*diff/(u*N);
+ *                     grow is never floored. Default 64. N <= 0 disables the
+ *                     floor; delta() guards the division on N > 0, so a
+ *                     non-positive value is not load-clamped.
  */
 typedef struct {
   /* Preserved: was already in this struct in earlier versions. */
@@ -651,7 +649,7 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
  * bump it means a new library silently reads an old layout's bytes. */
 #define SM_NODE_LAYOUT_VERSION 5U   /* v5: + sample timestamp, sample-driven estimate state on its own two lines; - AIMD md_cooldown, - total_cuda_cores */
 
-/* Sample-driven estimate state (include/sm_delta.h, sm_delta_est_control).
+/* Sample-driven estimate state (include/sm_delta.h, sm_delta_est_control_avg).
  * Defined here so the shared region can hold it: the sample window spans
  * cycles won by different processes, so it is controller state like the mark.
  * The ring keeps the last SM_DELTA_EST_RING cycles' consumption with the
@@ -753,7 +751,7 @@ typedef struct {
   int64_t delta_mark;
   int32_t delta_mark_valid;
   /* NVML timestamp of the published sample: a standby sees a fresh sample
-   * exactly when the owner did (sm_delta_est_control acts once per sample). */
+   * exactly when the owner did (sm_delta_est_control_avg acts once per sample). */
   uint64_t s_sample_ts;
   /* Its own two lines: the winner rewrites it whole every cycle. */
   sm_delta_est_t est __attribute__((aligned(CACHELINE_SIZE)));

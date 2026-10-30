@@ -58,7 +58,7 @@ Using [LUPINE](https://github.com/lupinemachines/lupine) to unlock remote GPU vi
   no-GPU campaigns (docs/sm_delta_validation.md). The former aimd/auto controllers and their
   CUDA_SM_CONTROLLER / CUDA_SM_AIMD_* variables were removed; those variables are now ignored.
 * CUDA_SM_AUTO_DEBOUNCE_CYCLES: watcher cycles an exclusivity change must persist before the soft-limit
-  burst gate and the hard-limit jitter-init gate act on it - default 10 (name kept from the removed auto mode)
+  burst gate acts on it - default 10 (name kept from the removed auto mode)
 * CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD: SM utilization (percent) of processes outside the container
   above which the device counts as shared - default 1 (name kept likewise)
 * CUDA_SM_DELTA_INCREMENT_DIVISOR: delta seed divisor R (min step = pool*5/R). Default 1310720; the

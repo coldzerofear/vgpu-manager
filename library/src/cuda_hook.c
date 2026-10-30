@@ -637,9 +637,9 @@ const int cuda_hook_nums =
  * 30 cycles ~ 3 s at the default ~100 ms cadence.  */
 #define SOFT_ADJUST_INTERVAL    30
 
-/* delta()'s ramp-floor divisor is env-tunable via g_dynamic_config
+/* delta()'s emergency cut-floor divisor is env-tunable via g_dynamic_config
  * .delta_ramp_floor_divisor (CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR, default 64);
- * see the block comment at the use site in delta() and the loader in
+ * see sm_delta_step_cap() in include/sm_delta.h and the loader in
  * sm_controller_init(). */
 
 /* Defaults match the prior file-static initialisers; each field is
@@ -820,7 +820,8 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
 
 /* ---- Shared exclusivity FSM ---- *
  * "Are we exclusively using this device" is needed in two places: the
- * soft_core burst gate and the hard_limit jitter-init gate. Both share one
+ * soft_core burst gate (debounced, below) and the hard_limit jitter-init
+ * bypass (raw, host_index_is_exclusive_raw()). The burst gate uses one
  * debounced state machine instead
  * of each reacting to the raw per-cycle observation (host_index_is_
  * exclusive_raw()) -- a single-cycle dip in external util would otherwise
@@ -1065,10 +1066,12 @@ static volatile int up_limits[MAX_DEVICE_COUNT] = {0};
  * or exclusivity lost) and restarts the ramp. The share scales by the same
  * ratio instead of collapsing to one SM's threads: the estimator holds the
  * share until its next sample (~1 s on a 200 ms-sample GPU), and a tiny share
- * would starve the container for that long instead of releasing the burst. */
-static void soft_reset_to_hard(int host_index, int hard_core) {
+ * would starve the container for that long instead of releasing the burst.
+ * scale = 0 leaves the share alone: a new process that has not cost us
+ * exclusivity (an idle monitor) puts the limit straight back at soft_core. */
+static void soft_reset_to_hard(int host_index, int hard_core, int scale) {
   int old = up_limits[host_index];
-  if (old > hard_core && shares[host_index] > 0) {
+  if (scale && old > hard_core && shares[host_index] > 0) {
     shares[host_index] = shares[host_index] * hard_core / old;
   }
   up_limits[host_index] = hard_core;
@@ -1533,7 +1536,11 @@ static void *utilization_watcher(void *arg) {
       if (top_results[host_index].valid &&
           __atomic_load_n(sm_throttled_of(host_index), __ATOMIC_RELAXED) != 0 &&
           mono - g_sample_seen_ns[host_index] > SM_SAMPLE_SILENT_NS) {
+        /* The sample period belongs to the GPU, not the workload: keep it,
+         * or the silence becomes the first period after samples return. */
+        int32_t period_ms = g_delta_est[host_index].period_ms;
         memset(&g_delta_est[host_index], 0, sizeof(g_delta_est[host_index]));
+        g_delta_est[host_index].period_ms = period_ms;
         top_results[host_index].user_current = 0;
         top_results[host_index].sys_current = 0;
       }
@@ -1615,7 +1622,8 @@ static void *utilization_watcher(void *arg) {
            * a single initial reset (which is harmless: we'd just been
            * at hard_core anyway). */
           if (pre_external_process_nums[host_index] < top_results[host_index].external_process_num) {
-            soft_reset_to_hard(host_index, dcfg.hard_core);
+            soft_reset_to_hard(host_index, dcfg.hard_core,
+                               !host_index_is_exclusive_debounced(host_index));
           }
           pre_external_process_nums[host_index] = top_results[host_index].external_process_num;
         }
@@ -1645,7 +1653,7 @@ static void *utilization_watcher(void *arg) {
            * grabbed by resetting up_limits to hard_core and re-starting
            * the elastic ramp. One-shot: consume the flag. */
           if (g_lost_exclusivity_pending[host_index]) {
-            soft_reset_to_hard(host_index, dcfg.hard_core);
+            soft_reset_to_hard(host_index, dcfg.hard_core, 1);
             g_lost_exclusivity_pending[host_index] = 0;
           }
           is[host_index]++;
@@ -4049,8 +4057,10 @@ CUresult cuLaunch(CUfunction f) {
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(sm_launch_tokens(1, 1, 1, g_block_x[host_index], g_block_y[host_index],
-                                g_block_z[host_index]), host_index);
+  if (host_index >= 0) {
+    rate_limiter(sm_launch_tokens(1, 1, 1, g_block_x[host_index], g_block_y[host_index],
+                                  g_block_z[host_index]), host_index);
+  }
   int gap = gap_begin(host_index, CU_STREAM_LEGACY);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunch, f);
   if (gap) gap_end(host_index, CU_STREAM_LEGACY, ret);
