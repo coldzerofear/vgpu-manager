@@ -413,6 +413,20 @@ typedef enum CUarray_format_enum {
     CU_AD_FORMAT_YUV444_8bit_SemiPlanar   = 0xb4, /**< 3 channel 8-bit YUV semi-planar format, with 4:4:4 sampling */
     CU_AD_FORMAT_YUV444_16bit_SemiPlanar  = 0xb5, /**< 3 channel 16-bit YUV semi-planar format, with 4:4:4 sampling */
     CU_AD_FORMAT_UNORM_INT_101010_2       = 0x50, /**< 4 channel unorm R10G10B10A2 RGB format */
+    CU_AD_FORMAT_UINT8_PACKED_422 = 0x51, /**< 4 channel unsigned 8-bit YUV packed format, with 4:2:2 sampling */
+    CU_AD_FORMAT_UINT8_PACKED_444 = 0x52, /**< 4 channel unsigned 8-bit YUV packed format, with 4:4:4 sampling */
+    CU_AD_FORMAT_UINT8_SEMIPLANAR_420 = 0x53, /**< 3 channel unsigned 8-bit YUV semi-planar format, with 4:2:0 sampling */
+    CU_AD_FORMAT_UINT16_SEMIPLANAR_420 = 0x54, /**< 3 channel unsigned 16-bit YUV semi-planar format, with 4:2:0 sampling */
+    CU_AD_FORMAT_UINT8_SEMIPLANAR_422 = 0x55, /**< 3 channel unsigned 8-bit YUV semi-planar format, with 4:2:2 sampling */
+    CU_AD_FORMAT_UINT16_SEMIPLANAR_422 = 0x56, /**< 3 channel unsigned 16-bit YUV semi-planar format, with 4:2:2 sampling */
+    CU_AD_FORMAT_UINT8_SEMIPLANAR_444 = 0x57, /**< 3 channel unsigned 8-bit YUV semi-planar format, with 4:4:4 sampling */
+    CU_AD_FORMAT_UINT16_SEMIPLANAR_444 = 0x58, /**< 3 channel unsigned 16-bit YUV semi-planar format, with 4:4:4 sampling */
+    CU_AD_FORMAT_UINT8_PLANAR_420 = 0x59, /**< 3 channel unsigned 8-bit YUV planar format, with 4:2:0 sampling */
+    CU_AD_FORMAT_UINT16_PLANAR_420 = 0x5a, /**< 3 channel unsigned 16-bit YUV planar format, with 4:2:0 sampling */
+    CU_AD_FORMAT_UINT8_PLANAR_422 = 0x5b, /**< 3 channel unsigned 8-bit YUV planar format, with 4:2:2 sampling */
+    CU_AD_FORMAT_UINT16_PLANAR_422 = 0x5c, /**< 3 channel unsigned 16-bit YUV planar format, with 4:2:2 sampling */
+    CU_AD_FORMAT_UINT8_PLANAR_444 = 0x5d, /**< 3 channel unsigned 8-bit YUV planar format, with 4:4:4 sampling */
+    CU_AD_FORMAT_UINT16_PLANAR_444 = 0x5e, /**< 3 channel unsigned 16-bit YUV planar format, with 4:4:4 sampling */
     CU_AD_FORMAT_MAX                      = 0x7FFFFFFF
 } CUarray_format;
 
