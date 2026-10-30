@@ -36,7 +36,7 @@ const (
 
 type DeviceUtilInterface interface {
 	DeviceGetEnhanceCompatibilityProcessUtilSamples(nvml.Device) ([]nvml.ProcessUtilizationSample, uint64, nvml.Return)
-	DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(nvml.Device, uint32, uint64) ([]nvml.ProcessUtilizationSample, uint64, nvml.Return)
+	DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(nvml.Device, uint32) ([]nvml.ProcessUtilizationSample, uint64, nvml.Return)
 	DeviceGetComputeRunningProcessesByCount(nvml.Device, uint32) ([]nvml.ProcessInfo, nvml.Return)
 	DeviceGetGraphicsRunningProcessesByCount(nvml.Device, uint32) ([]nvml.ProcessInfo, nvml.Return)
 	DeviceGetProcessUtilizationByCount(nvml.Device, uint64, uint32) ([]nvml.ProcessUtilizationSample, nvml.Return)
@@ -247,62 +247,20 @@ func (c *deviceUtilAdapter) DeviceGetEnhanceCompatibilityProcessUtilSamples(d nv
 	}
 }
 
-// UtilQuerySince returns the lastSeenTimeStamp for a process-utilization query.
-//
-// NVML returns utilization since lastSeenTimeStamp ("set lastSeenTimeStamp to a
-// timeStamp retrieved from a previous query to read utilization since the
-// previous query", nvml.h), averaging every sample after it. A fixed now-1s
-// made each reading a 1s sliding mean on parts that sample faster (RTX 3090:
-// 200ms), where the in-container limiter pairs a sample with the time since the
-// one before it. So: lastSeen, the newest sample timestamp already read, unless
-// there is none, it is over 1s old (an idle or restarted watcher), or it lies
-// ahead of now (the wall clock stepped back) -- then now-1s, as before. The
-// window stays within (0, 1s]. lastSeen must be the driver's own microseconds:
-// the filter is strictly greater, and a truncated value re-reads the same sample.
-func UtilQuerySince(lastSeen uint64, now time.Time) uint64 {
-	floor := uint64(now.Add(-time.Second).UnixMicro())
-	if lastSeen > floor && lastSeen <= uint64(now.UnixMicro()) {
-		return lastSeen
-	}
-	return floor
-}
-
-// NewestSampleTimeStamp advances a query cursor past samples. It takes the
-// newest across processes: each sample period lands on the process(es) that
-// ran in it (one of two time-sliced processes per 200ms on the RTX 3090), so
-// every later period's sample is newer and none is skipped. A cursor ahead of
-// now means the wall clock stepped back: later samples would all compare older
-// and the cursor would stay stuck until the clock caught up, so it restarts.
-func NewestSampleTimeStamp(samples []nvml.ProcessUtilizationSample, lastSeen uint64, now time.Time) uint64 {
-	if lastSeen > uint64(now.UnixMicro()) {
-		lastSeen = 0
-	}
-	for _, sample := range samples {
-		if sample.TimeStamp > lastSeen {
-			lastSeen = sample.TimeStamp
-		}
-	}
-	return lastSeen
-}
-
 // DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount Compared to DeviceGetEnhanceCompatibilityProcessUtilSamples,
-// When the actual result set returned by nvml exceeds sampleCount, it will be truncated to sampleCount instead of returning ERROR_INSUFFICIENT_SIZE.
-// lastSeen is the caller's cursor (0: none), queried through UtilQuerySince; the returned
-// timestamp is still now-1s, the cutoff readers filter cached samples against.
-func (c *deviceUtilAdapter) DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d nvml.Device, sampleCount uint32, lastSeen uint64) ([]nvml.ProcessUtilizationSample, uint64, nvml.Return) {
+// When the actual result set returned by nvml exceeds sampleCount, it will be truncated to sampleCount instead of returning ERROR_INSUFFICIENT_SIZE
+func (c *deviceUtilAdapter) DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d nvml.Device, sampleCount uint32) ([]nvml.ProcessUtilizationSample, uint64, nvml.Return) {
 	strategy := c.getStrategy(d)
-	now := time.Now()
-	lastTs := uint64(now.Add(-time.Second).UnixMicro())
-	since := UtilQuerySince(lastSeen, now)
+	lastTs := uint64(time.Now().Add(-time.Second).UnixMicro())
 	switch strategy {
 	case strategyUseLegacy:
-		samples, ret := c.DeviceGetProcessUtilizationByCount(d, since, sampleCount)
+		samples, ret := c.DeviceGetProcessUtilizationByCount(d, lastTs, sampleCount)
 		if ret != nvml.SUCCESS {
 			return nil, lastTs, ret
 		}
 		return samples, lastTs, ret
 	case strategyUseExtended:
-		utilSamples, rt := c.DeviceGetProcessesUtilizationByCount(d, since, sampleCount)
+		utilSamples, rt := c.DeviceGetProcessesUtilizationByCount(d, lastTs, sampleCount)
 		if rt != nvml.SUCCESS {
 			return nil, lastTs, rt
 		}

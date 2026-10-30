@@ -746,42 +746,6 @@ static int     g_delta_mark_fresh[MAX_DEVICE_COUNT] = {0};
  * the watcher before the controller runs. */
 static sm_delta_est_t g_delta_est[MAX_DEVICE_COUNT];
 static uint64_t g_delta_sample_ts[MAX_DEVICE_COUNT] = {0};
-/* Newest NVML process-sample timestamp (us) this process has read per device:
- * the next local query's lastSeenTimeStamp (get_gpu_process_from_local_nvml_driver). */
-static uint64_t g_util_last_ts[MAX_DEVICE_COUNT] = {0};
-/* The newest sample period's container reading (utilization_t.user_fresh),
- * handed to the estimate by the watcher like g_delta_sample_ts. */
-static int g_delta_reading[MAX_DEVICE_COUNT] = {0};
-
-/* One-second utilization view, rebuilt from per-period samples.
- *
- * The query reads only samples newer than the last one seen (the estimate
- * needs each sample period on its own), and under time slicing each period
- * lands on the process that ran in it: an RTX 3090 returned one of two
- * time-sliced processes per 200 ms sample, at 99. The per-process consumers --
- * the external-process count, the exclusivity FSM, the soft path's resets and
- * free-capacity average, the hard path's bypass -- were written against the
- * previous query, a 1 s window holding every process with its share of it, and
- * misread single periods (a soft limit judged a shared device exclusive and
- * burst to soft_core). So the samples are kept for the last second and
- * averaged per process over the periods in it, as the driver averages a 1 s
- * query: the sum of a process's readings over n = round(1 s / period) periods,
- * divided by n. Periods are counted from the sample clock, not from samples,
- * because a process absent from a period contributes 0 to it. Parts that
- * sample once a second get n = 1: the newest sample, as before. */
-#define UTIL_WIN_MS       1000
-#define UTIL_WIN_CAP      64      /* samples kept per device: 5 periods x 12 processes at 200 ms */
-#define UTIL_WIN_GAPS     8       /* the period is the median of this many gaps */
-#define UTIL_WIN_MIN_GAP  50000   /* us: closer timestamps are one period */
-typedef struct {
-  nvmlProcessUtilizationSample_t s[UTIL_WIN_CAP];
-  unsigned char weight[UTIL_WIN_CAP];   /* periods the entry stands for */
-  unsigned int head, count;
-  uint64_t newest_us;
-  uint64_t gaps[UTIL_WIN_GAPS];
-  unsigned int gap_head, gap_count;
-} util_window_t;
-static util_window_t g_util_win[MAX_DEVICE_COUNT];
 
 /* After the winner's refill (or bypass store): finish this cycle's mark. */
 static void delta_mark_refill(int host_index, int64_t applied) {
@@ -815,7 +779,7 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
   gettimeofday(&now, NULL);
   uint32_t now_ms = (uint32_t)((uint64_t)now.tv_sec * 1000ULL + (uint64_t)now.tv_usec / 1000ULL);
   int64_t next = sm_delta_est_control(&g_delta_est[host_index], g_total_cuda_cores[host_index],
-                                      up_limit, g_delta_reading[host_index], g_delta_sample_ts[host_index] / 1000ULL,
+                                      up_limit, user_current, g_delta_sample_ts[host_index] / 1000ULL,
                                       now_ms, share, bucket, boot, consumed,
                                       g_dynamic_config.delta_increment_divisor,
                                       g_dynamic_config.delta_ramp_floor_divisor, &drain);
@@ -1586,7 +1550,6 @@ static void sm_publish_sample(int host_index) {
   d->s_sys_process_num   = top_results[host_index].sys_process_num;
   d->s_external_proc_num = top_results[host_index].external_process_num;
   d->s_sample_ts         = top_results[host_index].sample_ts;
-  d->s_user_fresh        = top_results[host_index].user_fresh;
   __atomic_store_n(&d->sample_published_ns, now, __ATOMIC_RELEASE);
 }
 
@@ -1612,7 +1575,6 @@ static int sm_load_published_sample(int host_index) {
   top_results[host_index].sys_process_num      = d->s_sys_process_num;
   top_results[host_index].external_process_num = d->s_external_proc_num;
   top_results[host_index].sample_ts            = d->s_sample_ts;
-  top_results[host_index].user_fresh           = d->s_user_fresh;
   top_results[host_index].valid                = 1;
   return 1;
 }
@@ -1635,9 +1597,6 @@ static void *utilization_watcher(void *arg) {
     g_delta_mark_fresh[host_index] = 0;
     memset(&g_delta_est[host_index], 0, sizeof(g_delta_est[host_index]));
     g_delta_sample_ts[host_index] = 0;
-    g_util_last_ts[host_index] = 0;
-    g_delta_reading[host_index] = 0;
-    memset(&g_util_win[host_index], 0, sizeof(g_util_win[host_index]));
     g_delta_ran[host_index] = 0;
     sys_frees[host_index] = 0;
     avg_sys_frees[host_index] = 0;
@@ -1649,7 +1608,6 @@ static void *utilization_watcher(void *arg) {
     top_results[host_index].valid = 0;
     top_results[host_index].sys_process_num = 0;
     top_results[host_index].external_process_num = 0;
-    top_results[host_index].user_fresh = 0;
     top_results[host_index].sample_ts = 0;
   }
   int dev_count = batch->end_index - batch->start_index;
@@ -1747,7 +1705,6 @@ static void *utilization_watcher(void *arg) {
       }
       sm_ctl_load(host_index);
       g_delta_sample_ts[host_index] = top_results[host_index].sample_ts;
-      g_delta_reading[host_index] = top_results[host_index].user_fresh;
 
       sys_frees[host_index] = MAX_UTILIZATION - top_results[host_index].sys_current;
 
@@ -2875,27 +2832,6 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(
   struct timeval temp = {1, 0};
   timersub(&cur, &temp, &prev);
   uint64_t microsec = (uint64_t)prev.tv_sec * 1000000ULL + prev.tv_usec;
-  /* NVML returns utilization since lastSeenTimeStamp ("set it to a timeStamp
-   * retrieved from a previous query to read utilization since the previous
-   * query", nvml.h), averaging every sample after it. A fixed now - 1 s made
-   * each reading a 1 s sliding mean where the driver samples faster (RTX
-   * 3090: 200 ms), against the estimate's premise that a sample describes the
-   * time since the one before it. So: the newest sample already seen, unless
-   * there is none, it is over 1 s old (an idle or stalled watcher), or it lies
-   * ahead of now (the wall clock stepped back) -- then now - 1 s, as before.
-   * The window stays within (0, 1 s]: never staler than the fixed second,
-   * one sample period where the part samples faster. The timestamp is the
-   * driver's own microseconds, compared strictly greater: truncating it to
-   * ms re-reads the same sample forever. */
-  uint64_t now_us = (uint64_t)cur.tv_sec * 1000000ULL + cur.tv_usec;
-  top_result->window_fallback = 1;
-  if (host_index >= 0 && host_index < MAX_DEVICE_COUNT) {
-    uint64_t seen = g_util_last_ts[host_index];
-    if (seen > microsec && seen <= now_us) {
-      microsec = seen;
-      top_result->window_fallback = 0;
-    }
-  }
   top_result->checktime = microsec;
 
   ret = get_process_utilization_samples(dev, processes_sample, processes_size, microsec);
@@ -2966,12 +2902,25 @@ DONE:
   return NVML_SUCCESS;
 }
 
-/* Split process samples into this container's utilization (user_current) and
- * the device's (sys_current), with the external-process count, by the active
- * compatibility mode. Samples older than checktime are skipped. */
-static void attribute_util_samples(utilization_t *top_result,
-                                   const nvmlProcessUtilizationSample_t *processes_sample,
-                                   unsigned int processes_num, uint64_t checktime) {
+static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, nvmlDevice_t dev) {
+  utilization_t *top_result = (utilization_t *)arg;
+  nvmlProcessUtilizationSample_t processes_sample[MAX_PIDS];
+  unsigned int processes_num = MAX_PIDS;
+
+  nvmlReturn_t ret;
+  if (g_vgpu_config->sm_watcher && g_device_util != NULL) {
+    ret = get_gpu_process_from_external_watcher(top_result, processes_sample, &processes_num, cuda_index, host_index, dev);
+  } else {
+    ret = get_gpu_process_from_local_nvml_driver(top_result, processes_sample, &processes_num, cuda_index, dev);
+  }
+  if (unlikely(ret)) return;
+
+  top_result->sample_ts = 0;
+  for (unsigned int k = 0; k < processes_num; k++) {
+    if (processes_sample[k].timeStamp > top_result->sample_ts) {
+      top_result->sample_ts = processes_sample[k].timeStamp;
+    }
+  }
   top_result->user_current = 0;
   top_result->sys_current = 0;
   // In some versions of the driver, it is not possible to rely on nvmlDeviceGetComputeRunningProcesses
@@ -2997,7 +2946,7 @@ static void attribute_util_samples(utilization_t *top_result,
     int pids_on_container[MAX_PIDS];
     get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size, 0);
     for (i = 0; i < processes_num; i++) {
-      if (processes_sample[i].timeStamp < checktime) {
+      if (processes_sample[i].timeStamp < top_result->checktime) {
         continue;
       }
       top_result->valid = 1;
@@ -3019,7 +2968,7 @@ static void attribute_util_samples(utilization_t *top_result,
     if (likely(pids_size > 0)) {
       int matchClientMode = 0;
       for (i = 0; i < processes_num; i++) {
-        if (processes_sample[i].timeStamp >= checktime) {
+        if (processes_sample[i].timeStamp >= top_result->checktime) {
           top_result->valid = 1;
           sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
           codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
@@ -3040,7 +2989,7 @@ static void attribute_util_samples(utilization_t *top_result,
   } else if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
     int matchCGroupV2Mode = 0;
     for (i = 0; i < processes_num; i++) {
-      if (processes_sample[i].timeStamp >= checktime) {
+      if (processes_sample[i].timeStamp >= top_result->checktime) {
         top_result->valid = 1;
         sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
         codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
@@ -3060,7 +3009,7 @@ static void attribute_util_samples(utilization_t *top_result,
   } else if ((g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) == CGROUPV1_COMPATIBILITY_MODE) {
     int matchCGroupV1Mode = 0;
     for (i = 0; i < processes_num; i++) {
-      if (processes_sample[i].timeStamp >= checktime) {
+      if (processes_sample[i].timeStamp >= top_result->checktime) {
         top_result->valid = 1;
         sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
         codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
@@ -3079,7 +3028,7 @@ static void attribute_util_samples(utilization_t *top_result,
     }
   } else if (openKernelMode) {
     for (i = 0; i < processes_num; i++) {
-      if (processes_sample[i].timeStamp >= checktime) {
+      if (processes_sample[i].timeStamp >= top_result->checktime) {
         top_result->valid = 1;
         sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
         codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
@@ -3094,7 +3043,7 @@ static void attribute_util_samples(utilization_t *top_result,
     }
   } else if (g_vgpu_config->compatibility_mode == HOST_COMPATIBILITY_MODE) {
     for (i = 0; i < processes_num; i++) {
-      if (processes_sample[i].timeStamp >= checktime) {
+      if (processes_sample[i].timeStamp >= top_result->checktime) {
         top_result->valid = 1;
         sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
         codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
@@ -3109,157 +3058,6 @@ static void attribute_util_samples(utilization_t *top_result,
   }
 
   top_result->external_process_num = current_processes_num >= top_result->sys_process_num ? 0 : top_result->sys_process_num - current_processes_num;
-}
-
-
-static void util_window_add(util_window_t *w, const nvmlProcessUtilizationSample_t *sample,
-                            unsigned int weight) {
-  if (w->newest_us != 0 && sample->timeStamp >= w->newest_us + UTIL_WIN_MIN_GAP) {
-    w->gaps[w->gap_head] = sample->timeStamp - w->newest_us;
-    w->gap_head = (w->gap_head + 1) % UTIL_WIN_GAPS;
-    if (w->gap_count < UTIL_WIN_GAPS) w->gap_count++;
-  }
-  if (sample->timeStamp > w->newest_us) w->newest_us = sample->timeStamp;
-  w->s[w->head] = *sample;
-  w->weight[w->head] = (unsigned char)(weight > 255 ? 255 : (weight < 1 ? 1 : weight));
-  w->head = (w->head + 1) % UTIL_WIN_CAP;
-  if (w->count < UTIL_WIN_CAP) w->count++;
-}
-
-/* Median of the recorded gaps (0: none yet). A median, not the minimum: one
- * odd timestamp must not shrink the period for good. */
-static uint64_t util_window_period(const util_window_t *w) {
-  uint64_t g[UTIL_WIN_GAPS];
-  unsigned int n = w->gap_count;
-  for (unsigned int i = 0; i < n; i++) g[i] = w->gaps[i];
-  for (unsigned int i = 1; i < n; i++) {
-    uint64_t v = g[i];
-    unsigned int j = i;
-    while (j > 0 && g[j - 1] > v) { g[j] = g[j - 1]; j--; }
-    g[j] = v;
-  }
-  return n ? g[n / 2] : 0;
-}
-
-/* Sample periods in one second: round(1 s / period), at least 1 (1 while no
- * period is known yet). */
-static unsigned int util_window_periods(const util_window_t *w) {
-  uint64_t period = util_window_period(w);
-  if (period == 0) return 1;
-  unsigned int n = (unsigned int)(((uint64_t)UTIL_WIN_MS * 1000 + period / 2) / period);
-  return n < 1 ? 1 : n;
-}
-
-/* The view: one entry per process, its readings averaged over the window.
- * Empty when the newest sample is over a second old, which ages out a
- * stopped workload as the 1 s query's cutoff did. */
-static unsigned int util_window_view(const util_window_t *w, uint64_t now_us,
-                                     nvmlProcessUtilizationSample_t *out, unsigned int cap) {
-  if (w->count == 0 || w->newest_us + (uint64_t)UTIL_WIN_MS * 1000 < now_us) return 0;
-  uint64_t period = util_window_period(w);
-  unsigned int n = util_window_periods(w);
-  uint64_t from = w->newest_us;     /* no period known: the newest sample only */
-  if (period > 0) {
-    /* half a period of slack each way absorbs timestamp jitter */
-    from = w->newest_us + period / 2 > n * period ? w->newest_us + period / 2 - n * period : 0;
-  }
-  unsigned int m = 0;
-  unsigned int sum_sm[MAX_PIDS], sum_enc[MAX_PIDS], sum_dec[MAX_PIDS];
-  for (unsigned int k = 0; k < w->count; k++) {
-    const nvmlProcessUtilizationSample_t *x = &w->s[(w->head + UTIL_WIN_CAP - 1 - k) % UTIL_WIN_CAP];
-    if (x->timeStamp < from) continue;
-    unsigned int j = 0;
-    while (j < m && out[j].pid != x->pid) j++;
-    if (j == m) {
-      if (m == cap) continue;
-      out[m] = *x;
-      sum_sm[m] = sum_enc[m] = sum_dec[m] = 0;
-      m++;
-    }
-    unsigned int wt = w->weight[(w->head + UTIL_WIN_CAP - 1 - k) % UTIL_WIN_CAP];
-    sum_sm[j] += GET_VALID_VALUE(x->smUtil) * wt;
-    sum_enc[j] += GET_VALID_VALUE(x->encUtil) * wt;
-    sum_dec[j] += GET_VALID_VALUE(x->decUtil) * wt;
-    if (x->timeStamp > out[j].timeStamp) out[j].timeStamp = x->timeStamp;
-  }
-  for (unsigned int j = 0; j < m; j++) {
-    out[j].smUtil = (sum_sm[j] + n / 2) / n;
-    out[j].encUtil = (sum_enc[j] + n / 2) / n;
-    out[j].decUtil = (sum_dec[j] + n / 2) / n;
-  }
-  return m;
-}
-
-static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, nvmlDevice_t dev) {
-  utilization_t *top_result = (utilization_t *)arg;
-  nvmlProcessUtilizationSample_t processes_sample[MAX_PIDS];
-  unsigned int processes_num = MAX_PIDS;
-
-  nvmlReturn_t ret;
-  top_result->window_fallback = 0;   /* the local query sets it */
-  if (g_vgpu_config->sm_watcher && g_device_util != NULL) {
-    ret = get_gpu_process_from_external_watcher(top_result, processes_sample, &processes_num, cuda_index, host_index, dev);
-  } else {
-    ret = get_gpu_process_from_local_nvml_driver(top_result, processes_sample, &processes_num, cuda_index, dev);
-  }
-  if (unlikely(ret)) return;
-
-  top_result->sample_ts = 0;
-  for (unsigned int k = 0; k < processes_num; k++) {
-    if (processes_sample[k].timeStamp > top_result->sample_ts) {
-      top_result->sample_ts = processes_sample[k].timeStamp;
-    }
-  }
-  /* The newest across processes: each sample period lands on the process(es)
-   * that ran in it (one of two time-sliced processes per 200 ms on the RTX
-   * 3090), so every later period's sample is newer than this one -- none is
-   * skipped. Kept on the watcher path too, which falls back to this query. */
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  uint64_t now_us = (uint64_t)tv.tv_sec * 1000000ULL + tv.tv_usec;
-  uint64_t seen = 0;
-  if (host_index >= 0 && host_index < MAX_DEVICE_COUNT) {
-    /* A cursor or window ahead of now: the wall clock stepped back (NVML
-     * stamps samples with it). Every later sample would compare older than
-     * them -- never new, the cursor stuck and the view frozen until the clock
-     * caught up -- so start over from this batch. */
-    if (g_util_last_ts[host_index] > now_us || g_util_win[host_index].newest_us > now_us) {
-      g_util_last_ts[host_index] = 0;
-      memset(&g_util_win[host_index], 0, sizeof(g_util_win[host_index]));
-    }
-    seen = g_util_last_ts[host_index];
-    if (top_result->sample_ts > seen) {
-      g_util_last_ts[host_index] = top_result->sample_ts;
-    }
-  }
-  if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) {
-    attribute_util_samples(top_result, processes_sample, processes_num, top_result->checktime);
-    top_result->user_fresh = top_result->user_current;
-    return;
-  }
-  /* The estimate reads this cycle's new samples alone; everything else the
-   * one-second view (see util_window_view). On the watcher path the cached
-   * batch is re-read every cycle, so "new" is newer than the cursor was. */
-  nvmlProcessUtilizationSample_t fresh[MAX_PIDS];
-  unsigned int fresh_num = 0;
-  /* A query that fell back to now - 1 s (no cursor, a stale one, a clock
-   * step) returns each process's mean over that second, not one period: it
-   * stands for all of the second's periods. */
-  unsigned int weight = top_result->window_fallback ? util_window_periods(&g_util_win[host_index]) : 1;
-  for (unsigned int k = 0; k < processes_num; k++) {
-    if (processes_sample[k].timeStamp > seen) {
-      fresh[fresh_num++] = processes_sample[k];
-      util_window_add(&g_util_win[host_index], &processes_sample[k], weight);
-    }
-  }
-  if (fresh_num > 0) {
-    utilization_t f = *top_result;
-    attribute_util_samples(&f, fresh, fresh_num, 0);
-    top_result->user_fresh = f.user_current;
-  }
-  nvmlProcessUtilizationSample_t view[MAX_PIDS];
-  unsigned int view_num = util_window_view(&g_util_win[host_index], now_us, view, MAX_PIDS);
-  attribute_util_samples(top_result, view, view_num, 0);
   if ((g_util_log_tick[host_index]++ % WATCHER_UTIL_LOG_STRIDE) == 0) {
     g_util_log_tick[host_index] = 1;
     LOGGER(VERBOSE, "cuda device: %d, host device: %d, sys util: %d, user util: %d (1/%d sampled)",

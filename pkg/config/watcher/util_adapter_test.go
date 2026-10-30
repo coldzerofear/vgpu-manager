@@ -18,7 +18,6 @@ package watcher
 
 import (
 	"testing"
-	"time"
 	"unsafe"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -75,7 +74,7 @@ func TestExtendedPathTwoCall(t *testing.T) {
 		GetProcessesUtilizationByInfoFunc: byInfoTwoCall(t, total),
 	}
 	adapter := NewDeviceUtilAdapter(WithExtendedInterface(extendedMock(true)))
-	samples, _, rt := adapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, MaxPids, 0)
+	samples, _, rt := adapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, MaxPids)
 	if rt != nvml.SUCCESS {
 		t.Fatalf("ret = %v, want SUCCESS", rt)
 	}
@@ -103,7 +102,7 @@ func TestExtendedZeroCountNoPanic(t *testing.T) {
 		},
 	}
 	adapter := NewDeviceUtilAdapter(WithExtendedInterface(extendedMock(true)))
-	_, _, rt := adapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, MaxPids, 0)
+	_, _, rt := adapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, MaxPids)
 	if rt != nvml.ERROR_INSUFFICIENT_SIZE {
 		t.Fatalf("ret = %v, want ERROR_INSUFFICIENT_SIZE", rt)
 	}
@@ -118,7 +117,7 @@ func TestLegacyStrategySelected(t *testing.T) {
 		GetProcessUtilizationByCountFunc: func(uint64, uint32) ([]nvml.ProcessUtilizationSample, nvml.Return) { return want, nvml.SUCCESS },
 	}
 	adapter := NewDeviceUtilAdapter(WithExtendedInterface(extendedMock(true)))
-	got, _, rt := adapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, MaxPids, 0)
+	got, _, rt := adapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, MaxPids)
 	if rt != nvml.SUCCESS || len(got) != 1 || got[0].Pid != 7 {
 		t.Fatalf("ret=%v got=%+v, want SUCCESS pid 7", rt, got)
 	}
@@ -135,89 +134,7 @@ func TestUnsupportedWhenSymbolMissing(t *testing.T) {
 		},
 	}
 	adapter := NewDeviceUtilAdapter(WithExtendedInterface(extendedMock(false)))
-	if _, _, rt := adapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, MaxPids, 0); rt != nvml.ERROR_NOT_SUPPORTED {
+	if _, _, rt := adapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, MaxPids); rt != nvml.ERROR_NOT_SUPPORTED {
 		t.Fatalf("ret = %v, want ERROR_NOT_SUPPORTED", rt)
-	}
-}
-
-// The query cursor: the last sample read while it is within the last second and
-// not ahead of now; now-1s otherwise (none yet, stale, or a clock stepped back).
-func TestUtilQuerySince(t *testing.T) {
-	now := time.UnixMicro(1_000_000_000)
-	floor := uint64(now.Add(-time.Second).UnixMicro())
-	nowUs := uint64(now.UnixMicro())
-	cases := []struct {
-		name     string
-		lastSeen uint64
-		want     uint64
-	}{
-		{"no cursor", 0, floor},
-		{"stale cursor", floor - 1, floor},
-		{"cursor at the floor", floor, floor},
-		{"recent cursor", nowUs - 200_000, nowUs - 200_000},
-		{"cursor at now", nowUs, nowUs},
-		{"cursor ahead of now", nowUs + 1, floor},
-	}
-	for _, c := range cases {
-		if got := UtilQuerySince(c.lastSeen, now); got != c.want {
-			t.Errorf("%s: UtilQuerySince(%d) = %d, want %d", c.name, c.lastSeen, got, c.want)
-		}
-	}
-}
-
-func TestNewestSampleTimeStamp(t *testing.T) {
-	now := time.UnixMicro(10_000)
-	samples := []nvml.ProcessUtilizationSample{{Pid: 1, TimeStamp: 500}, {Pid: 2, TimeStamp: 700}, {Pid: 3, TimeStamp: 600}}
-	if got := NewestSampleTimeStamp(samples, 100, now); got != 700 {
-		t.Fatalf("got %d, want 700", got)
-	}
-	if got := NewestSampleTimeStamp(samples, 900, now); got != 900 {
-		t.Fatalf("an older batch moved the cursor back: got %d, want 900", got)
-	}
-	if got := NewestSampleTimeStamp(nil, 900, now); got != 900 {
-		t.Fatalf("an empty batch moved the cursor: got %d, want 900", got)
-	}
-}
-
-// The wall clock stepped back past the cursor: new samples are older than it, so
-// keeping the max would freeze the cursor until the clock caught up. It restarts
-// from the batch instead.
-func TestNewestSampleTimeStampClockStepBack(t *testing.T) {
-	now := time.UnixMicro(10_000)
-	samples := []nvml.ProcessUtilizationSample{{Pid: 1, TimeStamp: 9_800}}
-	if got := NewestSampleTimeStamp(samples, 50_000, now); got != 9_800 {
-		t.Fatalf("got %d, want 9800 (cursor ahead of now must restart)", got)
-	}
-	if got := NewestSampleTimeStamp(nil, 50_000, now); got != 0 {
-		t.Fatalf("got %d, want 0 (no samples: a cursor ahead of now is dropped)", got)
-	}
-	if got := UtilQuerySince(NewestSampleTimeStamp(nil, 50_000, now), now); got != uint64(now.Add(-time.Second).UnixMicro()) {
-		t.Fatalf("query after a step back = %d, want now-1s", got)
-	}
-}
-
-// The driver is queried from the cursor; the returned cutoff stays now-1s, which
-// readers use for liveness and to age out cached samples.
-func TestByCountQueriesFromCursor(t *testing.T) {
-	var queried uint64
-	d := &mock.Device{
-		GetIndexFunc:              func() (int, nvml.Return) { return 0, nvml.SUCCESS },
-		GetProcessUtilizationFunc: func(uint64) ([]nvml.ProcessUtilizationSample, nvml.Return) { return nil, nvml.SUCCESS },
-		GetProcessUtilizationByCountFunc: func(ts uint64, _ uint32) ([]nvml.ProcessUtilizationSample, nvml.Return) {
-			queried = ts
-			return nil, nvml.ERROR_NOT_FOUND
-		},
-	}
-	adapter := NewDeviceUtilAdapter(WithExtendedInterface(extendedMock(true)))
-	cursor := uint64(time.Now().Add(-200 * time.Millisecond).UnixMicro())
-	_, cutoff, rt := adapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, MaxPids, cursor)
-	if rt != nvml.ERROR_NOT_FOUND {
-		t.Fatalf("ret = %v, want ERROR_NOT_FOUND", rt)
-	}
-	if queried != cursor {
-		t.Fatalf("queried since %d, want the cursor %d", queried, cursor)
-	}
-	if cutoff >= cursor || time.Since(time.UnixMicro(int64(cutoff))) < 990*time.Millisecond {
-		t.Fatalf("cutoff %d is not now-1s (cursor %d)", cutoff, cursor)
 	}
 }

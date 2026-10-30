@@ -156,10 +156,6 @@ func smWatcherBatchWithContext(
 	// publishes util without a startup delay; the grid is anchored after it.
 	var next time.Time
 	firstCycle := true
-	// Per-device query cursor: the newest sample timestamp read (watcher.UtilQuerySince).
-	// Process-local on purpose: the shared file's LastSeenTimeStamp is the readers'
-	// liveness proof and cutoff, and an idle GPU would freeze a cursor there.
-	lastSeen := make([]uint64, len(devices))
 	for {
 		for i := batch.StartIndex; i <= batch.EndIndex; i++ {
 			select {
@@ -190,7 +186,7 @@ func smWatcherBatchWithContext(
 			gpuDevice := devices[i]
 			gpuHandle := handles[i]
 
-			if err := smWatcherSingleDevice(utilAdapter, mmapUtil, gpuDevice, gpuHandle, &lastSeen[i]); err != nil {
+			if err := smWatcherSingleDevice(utilAdapter, mmapUtil, gpuDevice, gpuHandle); err != nil {
 				klog.ErrorS(err, "sm watcher single device failed")
 				return err
 			}
@@ -204,7 +200,6 @@ func smWatcherBatchWithContext(
 
 func smWatcherSingleDevice(
 	utilAdapter watcher.DeviceUtilInterface, mmapUtil *watcher.MmapDeviceUtil, info *GPUDevice, d device.Device,
-	lastSeen *uint64,
 ) error {
 	if !info.Healthy {
 		return nil
@@ -227,10 +222,7 @@ func smWatcherSingleDevice(
 		return nil
 	}
 
-	procUtilSamples, lastTs, rt := utilAdapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, watcher.MaxPids, *lastSeen)
-	if rt == nvml.SUCCESS {
-		*lastSeen = watcher.NewestSampleTimeStamp(procUtilSamples, *lastSeen, time.Now())
-	}
+	procUtilSamples, lastTs, rt := utilAdapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, watcher.MaxPids)
 	if rt != nvml.SUCCESS && rt != nvml.ERROR_NOT_FOUND {
 		// NOT_FOUND just means the driver holds no samples newer than lastTs. At
 		// this poll rate that is the common answer even for a busy GPU, so it stays
