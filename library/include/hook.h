@@ -451,18 +451,12 @@ extern resource_data_t *g_vgpu_config;
  *
  * usage_threshold:    avg-free-headroom threshold for soft-mode up_limit
  *                     periodic adjust. >= 0; env CUDA_SM_USAGE_THRESHOLD.
- * sm_controller_kind: 0=delta (stock), 1=aimd, 2=auto.
- * aimd_md_divisor:    AIMD MD factor as a double so users can pick 1.5
- *                     for a softer cut than 2 or 3. Clamped >= 1.01 at
- *                     load time so we never accidentally /1 (no-op) or
- *                     /<=0 (UB).
- * aimd_eff_ratio:     parts-per-thousand, eff_limit = up * x / 1000.
- * aimd_ai_base_div:   AI step base divisor.
- * aimd_deadband_ratio: parts-per-thousand, deadband lower edge.
- * aimd_md_cooldown_cycles: post-MD watcher-cycle cooldown (0 disables).
- * auto_debounce_cycles: N consecutive observations to flip exclusivity FSM.
- * auto_external_util_threshold: external util percent above which the
- *                     device is considered "shared with other Pods".
+ * excl_debounce_cycles: N consecutive observations to flip the exclusivity
+ *                     FSM; env CUDA_SM_AUTO_DEBOUNCE_CYCLES (name kept from the
+ *                     removed auto controller, so existing settings still apply).
+ * excl_external_util_threshold: external util percent above which the
+ *                     device is considered "shared with other Pods"; env
+ *                     CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD (name kept likewise).
  * delta_increment_divisor: seed divisor -- delta's minimum step is
  *                     total*MIN_INCREMENT/R, its granularity. 1310720 default;
  *                     see include/sm_delta.h.
@@ -477,15 +471,8 @@ extern resource_data_t *g_vgpu_config;
 typedef struct {
   /* Preserved: was already in this struct in earlier versions. */
   int    usage_threshold;
-  /* Appended for V2.1/P1/P2: consolidates 8 prior file-static globals. */
-  int    sm_controller_kind;
-  double aimd_md_divisor;
-  int    aimd_eff_ratio;
-  int    aimd_ai_base_div;
-  int    aimd_deadband_ratio;
-  int    aimd_md_cooldown_cycles;
-  int    auto_debounce_cycles;
-  int    auto_external_util_threshold;
+  int    excl_debounce_cycles;
+  int    excl_external_util_threshold;
   int    delta_increment_divisor;
   int    delta_ramp_floor_divisor;
   /* APPENDED (see the field-ordering note above): container-wide shared token
@@ -662,7 +649,7 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
 /* BUMP THIS whenever any field below changes type, order, or offset.
  * The guard compares it and rebuilds the region on mismatch; forgetting to
  * bump it means a new library silently reads an old layout's bytes. */
-#define SM_NODE_LAYOUT_VERSION 5U   /* v5: + sample timestamp, sample-driven estimate state; three cache lines */
+#define SM_NODE_LAYOUT_VERSION 6U   /* v6: - AIMD md_cooldown (v5: + sample timestamp, estimate state; three cache lines) */
 
 /* Sample-driven estimate state (include/sm_delta.h, sm_delta_est_control).
  * Defined here so the shared region can hold it: the sample window spans
@@ -716,11 +703,6 @@ typedef struct {
   int32_t is_cnt;               /* was is[]                                 */
   int32_t avg_sys_free;         /* was avg_sys_frees[]                      */
   int32_t pre_external_proc;    /* was pre_external_process_nums[]          */
-  int32_t md_cooldown;          /* was g_aimd_md_cooldown[] -- without this
-                                 * AIMD re-fires MD every cycle and cuts
-                                 * share by md_divisor^N ("MD avalanche"),
-                                 * which is the exact thing the cooldown was
-                                 * introduced to prevent.                   */
   int32_t excl_debounced;       /* was g_is_exclusive_debounced[]      ┐    */
   int32_t excl_streak;          /* was g_exclusive_pending_streak[]    │FSM */
   int32_t lost_excl_pending;    /* was g_lost_exclusivity_pending[]    ┘    */

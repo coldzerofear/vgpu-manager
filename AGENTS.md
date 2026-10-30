@@ -20,7 +20,7 @@
   - 内存硬隔离：`cuMemAlloc` 前预算校验，超限返回 `CUDA_ERROR_OUT_OF_MEMORY`；
     `cuMemGetInfo`/`cuDeviceTotalMem`/`nvmlDeviceGetMemoryInfo` 改写为"限额视图"。
   - 核心硬隔离：`cuLaunchKernel` 前令牌桶限速（`gridDim*blockDim` 扣减），利用率 watcher 线程本地轮询 NVML
-    驱动令牌补给（delta/AIMD/auto 控制器）。多进程容器共用一个**容器级令牌桶**（默认开启）。
+    驱动令牌补给（delta 控制器，唯一算法）。多进程容器共用一个**容器级令牌桶**（默认开启）。
   - 可选内存超卖（UVA/managed memory + vmem ledger）。
 - Go 侧：调度器、插件、webhook、monitor、metrics、配置下发（`vgpu.config`，seqlock 版本化）。
 
@@ -89,7 +89,9 @@
   - 设备隔离：CUDA 侧靠 provider setenv `CUDA_VISIBLE_DEVICES`（驱动自己裁剪重排），NVML 侧靠 hook 枚举族。
   - nvml 路径经 `nvml_symbol<>()` dlsym 句柄查询（`nvml_server.cpp:46-56`）→ **库必须保留 dlsym 拦截器**。
   - per-session 配置 fork 安全依赖 `loader_child_after_fork`（`loader.c:2994`）重置 once-guard，**不能裁剪**。
-- **AIMD/auto 控制器已恢复，且 delta 已重构**（2026-08-14）：旧 delta 增量按 sm² 缩放，大 SM 卡限不住核心
+- **delta 是唯一的核心限流算法**：AIMD/auto 控制器（2026-08-14 曾为规避旧 delta 的 sm² 缺陷恢复）已于 2026-10-31
+  彻底移除——delta 重构后在全部卡型/负载上优于它们，且真机全面领先上游 HAMi-core（docs/sm_delta_validation.md 12.14）；
+  `CUDA_SM_CONTROLLER`、`CUDA_SM_AIMD_*` 不再读取。旧 delta 增量按 sm² 缩放，大 SM 卡限不住核心
   （HAMi-core #274 同源）。新 delta = 粒度种子（pool·5/1310720，2026-10 由 81920 细化，见 docs/sm_delta_validation.md 代际战役）+ share 比例项（误差/6 阻尼）+ 涨侧 pool/10 封顶
   + 爆冲门控应急 floor（`include/sm_delta.h`，纯函数可测）。**v16（2026-10）**：launch 按 grid×block 线程数计费、FACTOR 256、
   share 可按实测需求超过一个池（桶随之 2×share）、限额 91～95 饱和即可下调（docs/sm_delta_validation.md 第 11 节）。闭环仿真 60 格全胜旧公式（MAE 0.3-12 vs 钉死），
@@ -97,7 +99,7 @@
   控制器改为「新样本到来时按 窗口令牌消耗×目标/读数 一步估计 share、样本之间保持」（`sm_delta_est_control`，按样本时间戳
   对齐消耗环形记录、≥500 ms 窗口）、透支结转（长 kernel 不再有 ~17% 下限）、桶上限 2×share；估计状态在 sm_node 共享区
   （布局 v5）。另有降载保护（消耗骤降到估计依据的 1/4 以下连续 2 拍即按消耗×目标/100 下调，治几秒级阶段交替冲限额）。真机硬路径 L≤80 吞吐误差 5.5→1.8、1 s 波动 13→0.7、≥90 可限住（docs/sm_delta_validation.md 第 12 节）。
-  默认 `delta`；AIMD/auto 保留为备选（计划移除）。
+  另修：没有有效 NVML 样本或样本静默 2 s 而 launch 在等令牌时照跑控制器（死锁，12.13）。
 - **共享令牌桶默认开启**（`CUDA_SM_SHARED_BUCKET=0` 可关；会话模式下拒绝关闭）：一个远程容器 = 每条连接一个子进程，进程内桶会让每个子进程各自按完整
   `hard_core` 限速 → 容器拿到 N× 配额；且 N 个 watcher 各自轮询 NVML。共享桶（`<session>/.sm_node`）的 CAS 补给
   选举 + 采样所有权同时解决两者（standby 完全跳过 NVML）。显式 `CUDA_SM_SHARED_BUCKET=0` 在会话模式下被拒绝；

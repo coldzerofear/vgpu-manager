@@ -3,6 +3,7 @@
 > 作用范围：`library/`（LD_PRELOAD 运行时库）。
 > 目标：修复"大 kernel 绕过令牌桶导致算力切分失效"的问题，并与现有 `soft_core` 弹性模式协同工作。
 > 状态：设计稿（默认关闭，环境变量灰度开启）。
+> **2026-10-31：AIMD / auto 控制器已彻底移除，delta 是唯一的核心限流算法**（`CUDA_SM_CONTROLLER`、`CUDA_SM_AIMD_*` 不再读取；共享区 `md_cooldown` 删除，布局 v6）。下文涉及 AIMD/auto 的内容为历史记录。
 
 ---
 
@@ -459,7 +460,7 @@ GAP 路径在跨进程之间**没有共享可变状态**(events、`g_gap_dc`、`
 
 ## 11. 后续路线
 
-- **✅ 已落地 — AIMD watcher 控制器**(详见 [sm_controller_aimd.md](sm_controller_aimd.md)):与 GAP 路径**正交、互补**。曾因单 Pod 锯齿问题移除,后因 delta 的 sm² 增量缺陷在大 SM 卡上限不住核心而恢复(HAMi-core #274 同源,见该文档沿革节)。`CUDA_SM_CONTROLLER=aimd` 启用,默认 `delta`(stock)。
+- **✅ 已落地 — AIMD watcher 控制器**(已于 2026-10-31 移除，设计与沿革见 git 历史中的 docs/sm_controller_aimd.md):与 GAP 路径**正交、互补**。曾因单 Pod 锯齿问题移除,后因 delta 的 sm² 增量缺陷在大 SM 卡上限不住核心而恢复(HAMi-core #274 同源,见该文档沿革节)。`CUDA_SM_CONTROLLER=aimd` 启用,默认 `delta`(stock)。
 - **P1 — BATCH 路径**：对密集小 kernel 按批次摊销 event 计时，替代纯令牌桶，提升小 kernel 场景的占比精度。
 - **P2 — 多进程协同**：复用已有的 `device_util_t` mmap 共享内存 + `F_SETLKW` 字节范围锁（参见 §8.5），各进程发布 `(目标占比, 最近忙时)` 到共享账本，据聚合需求各算 sleep，使同卡合计 duty cycle 收敛到目标。注意：这是**账本协同**而非整卡互斥（§8.3）。
 - **P3 — 反馈融合**：将 GAP 实测的真实 GPU 用时回灌给 watcher，减少其对 NVML 采样的依赖与抖动。

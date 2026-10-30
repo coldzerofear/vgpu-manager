@@ -1,5 +1,6 @@
 # 容器内多进程算力隔离：共享令牌桶设计
 
+> **2026-10-31：AIMD / auto 控制器已彻底移除，delta 是唯一的核心限流算法**（`CUDA_SM_CONTROLLER`、`CUDA_SM_AIMD_*` 不再读取；共享区 `md_cooldown` 删除，布局 v6）。下文涉及 AIMD/auto 的内容为历史记录。
 > 作用范围：
 > - `library/` —— 新增 `sm_node` 共享区；`vmem_node` 加冻结区头 + 重建语义（§10）。
 > - `pkg/deviceplugin/vgpu`、`pkg/kubeletplugin` —— `/tmp/.sm_node` 按容器挂载 + 启动前清理（§4.5）。
@@ -9,7 +10,7 @@
 >
 > 状态：**设计定稿**（已拍板，见 §12；未实现；默认关闭，环境变量灰度开启）。
 > 基线：已对齐 `main` @ `2f234ef`（2026-07-24 同步，见 §0）。所有行号引用均按该基线校准。
-> 关联：[GAP 路径节流](./sm_core_limit_gap_throttle_design.md)、[AIMD 控制器](./sm_controller_aimd.md)。
+> 关联：[GAP 路径节流](./sm_core_limit_gap_throttle_design.md)。
 >
 > **实现状态更新**：本设计已落地，且**默认开启**(`CUDA_SM_SHARED_BUCKET=0` 可关闭；远程会话下拒绝关闭，
 > 因为一个容器由多个 lupine-server 子进程服务，进程内桶会让每个连接各拿满配额)。
