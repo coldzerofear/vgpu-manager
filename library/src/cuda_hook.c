@@ -303,6 +303,14 @@ void child_after_fork(void) {
      * intact, and initialization() skips re-mapping since g_sm_node is
      * still set. */
     g_dev_hot[i].last_launch_ns = 0;
+    /* A per-process bucket (shared bucket off) is the parent's copy, and the
+     * delta controller carries overdrafts: drop any debt rather than make the
+     * child pay it. Defensive -- a parent in debt has launched, so CUDA is
+     * initialised and its forked child cannot launch -- but the store is
+     * free and async-signal-safe. */
+    if (g_sm_node == NULL && g_dev_hot[i].cur_cuda_cores < 0) {
+      g_dev_hot[i].cur_cuda_cores = 0;
+    }
     /* Re-init in case a parent thread held the lock at the moment of fork.
      * POSIX leaves the inherited mutex state undefined; glibc re-init on a
      * never-destroyed mutex is safe (no resource leak for a non-robust
