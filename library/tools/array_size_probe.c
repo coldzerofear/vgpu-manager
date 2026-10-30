@@ -20,21 +20,24 @@ limitations under the License.
  * WHY THIS EXISTS
  *
  * include/array_size.h charges the budget for cuArrayCreate / cuArray3DCreate /
- * cuMipmappedArrayCreate. It is exact for the eight classic formats, because
- * NVIDIA's cuda.h pins those with two worked descriptor examples. For every
- * format added after CUDA 3.x -- BC1..BC7, the UNORM/SNORM INTnXm family, and
- * the planar/semi-planar/packed YUV range -- NVIDIA documents a one-line
- * description and NOTHING about sizing: not bytes per element, not whether
- * Width/Height count texels or 4x4 blocks, not which NumChannels values are
- * even legal. Those formats therefore fall back to a conservative upper bound
- * (VGPU_ARRAY_UNKNOWN_FORMAT_BYTES), which never under-charges but over-charges
- * the compressed ones.
+ * cuMipmappedArrayCreate. cuda.h pins the eight classic formats with two
+ * worked descriptor examples. For every format added after CUDA 3.x --
+ * BC1..BC7, the UNORM/SNORM INTnXm family, and the planar/semi-planar/packed
+ * YUV range -- NVIDIA documents a one-line description and NOTHING about
+ * sizing: not bytes per element, not whether Width/Height count texels or 4x4
+ * blocks, not which NumChannels values are even legal.
  *
- * Narrowing the fallback needs real numbers, and the only authority that has
- * them is the driver. Guessing from format names is exactly what this tool
- * exists to avoid: the open question that blocks a table is whether
- * UNORM_INT8X4 ("4 channel unsigned 8-bit") wants NumChannels 1 or 4, and those
- * two readings differ by 4x in a component that enforces a memory limit.
+ * Those numbers can only come from the driver. Guessing from format names is
+ * exactly what this tool exists to avoid: the open question that blocked the
+ * table was whether UNORM_INT8X4 ("4 channel unsigned 8-bit") wants
+ * NumChannels 1 or 4, and those two readings differ by 4x in a component that
+ * enforces a memory limit.
+ *
+ * The table in array_size.h is now built from a run of this tool, so the tool's
+ * standing job is the other direction: re-run it on new hardware, a new driver
+ * or a new OS and replay the CSV through array_size_verify to confirm nothing
+ * we ship has become an over-charge. Whatever stays outside the table falls
+ * back to VGPU_ARRAY_UNKNOWN_FORMAT_BYTES.
  *
  * WHAT IT DOES
  *
@@ -76,7 +79,7 @@ limitations under the License.
  *
  * Then:
  *
- *   ./array_size_probe [device_index] [--csv]
+ *   ./array_size_probe [device_index] [--csv] [--geom W[,H[,D]] | --extra]
  *
  * Run it on a bare GPU, NOT inside a vGPU container: with
  * libvgpu-control.so preloaded, cuMemGetInfo reports the container's quota and
@@ -99,13 +102,23 @@ limitations under the License.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 /* Resolved at runtime; see the header comment. */
 typedef CUresult (*array_mem_reqs_fn)(CUDA_ARRAY_MEMORY_REQUIREMENTS *, CUarray, CUdevice);
 static array_mem_reqs_fn array_mem_reqs;
 
 static int csv_mode;
+
+/* --geom: one exact geometry instead of the shape sweep, for pinning a single
+ * rule (see --help). */
+static struct {
+  int set;
+  size_t width, height, depth;
+} custom;
+
+/* --extra: the handful of rules the format sweep cannot express, because they
+ * are about Flags, Depth or mip levels rather than about a format. */
+static int extra_mode;
 
 /* Base probe geometry. Big enough that the free-memory delta clears the
  * driver's allocation granularity, small enough that the whole sweep fits on
@@ -119,9 +132,6 @@ static int csv_mode;
 struct format_entry {
   const char *name;
   int value;
-  /* 1 when include/array_size.h sizes this format exactly today, so the run
-   * doubles as a check of the values we already ship. */
-  int exact_today;
 };
 
 /* Every CUarray_format cuda.h 13.4 defines, as literal values rather than the
@@ -141,71 +151,71 @@ struct format_entry {
  * in NVIDIA's cuda.h, not transcribed by hand. CU_AD_FORMAT_MAX is excluded:
  * it is a sentinel, not a format. */
 static const struct format_entry formats[] = {
-    {"UNSIGNED_INT8", 0x01, 1},
-    {"UNSIGNED_INT16", 0x02, 1},
-    {"UNSIGNED_INT32", 0x03, 1},
-    {"SIGNED_INT8", 0x08, 1},
-    {"SIGNED_INT16", 0x09, 1},
-    {"SIGNED_INT32", 0x0a, 1},
-    {"HALF", 0x10, 1},
-    {"FLOAT", 0x20, 1},
-    {"NV12", 0xb0, 0},
-    {"UNORM_INT8X1", 0xc0, 0},
-    {"UNORM_INT8X2", 0xc1, 0},
-    {"UNORM_INT8X4", 0xc2, 0},
-    {"UNORM_INT16X1", 0xc3, 0},
-    {"UNORM_INT16X2", 0xc4, 0},
-    {"UNORM_INT16X4", 0xc5, 0},
-    {"SNORM_INT8X1", 0xc6, 0},
-    {"SNORM_INT8X2", 0xc7, 0},
-    {"SNORM_INT8X4", 0xc8, 0},
-    {"SNORM_INT16X1", 0xc9, 0},
-    {"SNORM_INT16X2", 0xca, 0},
-    {"SNORM_INT16X4", 0xcb, 0},
-    {"BC1_UNORM", 0x91, 0},
-    {"BC1_UNORM_SRGB", 0x92, 0},
-    {"BC2_UNORM", 0x93, 0},
-    {"BC2_UNORM_SRGB", 0x94, 0},
-    {"BC3_UNORM", 0x95, 0},
-    {"BC3_UNORM_SRGB", 0x96, 0},
-    {"BC4_UNORM", 0x97, 0},
-    {"BC4_SNORM", 0x98, 0},
-    {"BC5_UNORM", 0x99, 0},
-    {"BC5_SNORM", 0x9a, 0},
-    {"BC6H_UF16", 0x9b, 0},
-    {"BC6H_SF16", 0x9c, 0},
-    {"BC7_UNORM", 0x9d, 0},
-    {"BC7_UNORM_SRGB", 0x9e, 0},
-    {"P010", 0x9f, 0},
-    {"P016", 0xa1, 0},
-    {"NV16", 0xa2, 0},
-    {"P210", 0xa3, 0},
-    {"P216", 0xa4, 0},
-    {"YUY2", 0xa5, 0},
-    {"Y210", 0xa6, 0},
-    {"Y216", 0xa7, 0},
-    {"AYUV", 0xa8, 0},
-    {"Y410", 0xa9, 0},
-    {"Y416", 0xb1, 0},
-    {"Y444_PLANAR8", 0xb2, 0},
-    {"Y444_PLANAR10", 0xb3, 0},
-    {"YUV444_8bit_SemiPlanar", 0xb4, 0},
-    {"YUV444_16bit_SemiPlanar", 0xb5, 0},
-    {"UNORM_INT_101010_2", 0x50, 0},
-    {"UINT8_PACKED_422", 0x51, 0},
-    {"UINT8_PACKED_444", 0x52, 0},
-    {"UINT8_SEMIPLANAR_420", 0x53, 0},
-    {"UINT16_SEMIPLANAR_420", 0x54, 0},
-    {"UINT8_SEMIPLANAR_422", 0x55, 0},
-    {"UINT16_SEMIPLANAR_422", 0x56, 0},
-    {"UINT8_SEMIPLANAR_444", 0x57, 0},
-    {"UINT16_SEMIPLANAR_444", 0x58, 0},
-    {"UINT8_PLANAR_420", 0x59, 0},
-    {"UINT16_PLANAR_420", 0x5a, 0},
-    {"UINT8_PLANAR_422", 0x5b, 0},
-    {"UINT16_PLANAR_422", 0x5c, 0},
-    {"UINT8_PLANAR_444", 0x5d, 0},
-    {"UINT16_PLANAR_444", 0x5e, 0},
+    {"UNSIGNED_INT8", 0x01},
+    {"UNSIGNED_INT16", 0x02},
+    {"UNSIGNED_INT32", 0x03},
+    {"SIGNED_INT8", 0x08},
+    {"SIGNED_INT16", 0x09},
+    {"SIGNED_INT32", 0x0a},
+    {"HALF", 0x10},
+    {"FLOAT", 0x20},
+    {"NV12", 0xb0},
+    {"UNORM_INT8X1", 0xc0},
+    {"UNORM_INT8X2", 0xc1},
+    {"UNORM_INT8X4", 0xc2},
+    {"UNORM_INT16X1", 0xc3},
+    {"UNORM_INT16X2", 0xc4},
+    {"UNORM_INT16X4", 0xc5},
+    {"SNORM_INT8X1", 0xc6},
+    {"SNORM_INT8X2", 0xc7},
+    {"SNORM_INT8X4", 0xc8},
+    {"SNORM_INT16X1", 0xc9},
+    {"SNORM_INT16X2", 0xca},
+    {"SNORM_INT16X4", 0xcb},
+    {"BC1_UNORM", 0x91},
+    {"BC1_UNORM_SRGB", 0x92},
+    {"BC2_UNORM", 0x93},
+    {"BC2_UNORM_SRGB", 0x94},
+    {"BC3_UNORM", 0x95},
+    {"BC3_UNORM_SRGB", 0x96},
+    {"BC4_UNORM", 0x97},
+    {"BC4_SNORM", 0x98},
+    {"BC5_UNORM", 0x99},
+    {"BC5_SNORM", 0x9a},
+    {"BC6H_UF16", 0x9b},
+    {"BC6H_SF16", 0x9c},
+    {"BC7_UNORM", 0x9d},
+    {"BC7_UNORM_SRGB", 0x9e},
+    {"P010", 0x9f},
+    {"P016", 0xa1},
+    {"NV16", 0xa2},
+    {"P210", 0xa3},
+    {"P216", 0xa4},
+    {"YUY2", 0xa5},
+    {"Y210", 0xa6},
+    {"Y216", 0xa7},
+    {"AYUV", 0xa8},
+    {"Y410", 0xa9},
+    {"Y416", 0xb1},
+    {"Y444_PLANAR8", 0xb2},
+    {"Y444_PLANAR10", 0xb3},
+    {"YUV444_8bit_SemiPlanar", 0xb4},
+    {"YUV444_16bit_SemiPlanar", 0xb5},
+    {"UNORM_INT_101010_2", 0x50},
+    {"UINT8_PACKED_422", 0x51},
+    {"UINT8_PACKED_444", 0x52},
+    {"UINT8_SEMIPLANAR_420", 0x53},
+    {"UINT16_SEMIPLANAR_420", 0x54},
+    {"UINT8_SEMIPLANAR_422", 0x55},
+    {"UINT16_SEMIPLANAR_422", 0x56},
+    {"UINT8_SEMIPLANAR_444", 0x57},
+    {"UINT16_SEMIPLANAR_444", 0x58},
+    {"UINT8_PLANAR_420", 0x59},
+    {"UINT16_PLANAR_420", 0x5a},
+    {"UINT8_PLANAR_422", 0x5b},
+    {"UINT16_PLANAR_422", 0x5c},
+    {"UINT8_PLANAR_444", 0x5d},
+    {"UINT16_PLANAR_444", 0x5e},
 };
 
 /* The four descriptor shapes that matter, named the way cuda.h names them:
@@ -215,15 +225,16 @@ struct shape {
   const char *name;
   size_t height; /* 0 leaves the extent at zero, i.e. the dimension is absent */
   size_t depth;
+  unsigned flags;
 };
 
 static const struct shape shapes[] = {
-    {"1D", 0, 0},
-    {"2D", PROBE_HEIGHT, 0},
-    {"3D", PROBE_HEIGHT3, PROBE_DEPTH},
-    /* Same extents as 3D; the LAYERED flag is added in probe() by name, so the
-     * pair isolates what the flag changes from what the extents change. */
-    {"2Dlayered", PROBE_HEIGHT3, PROBE_DEPTH},
+    {"1D", 0, 0, 0},
+    {"2D", PROBE_HEIGHT, 0, 0},
+    {"3D", PROBE_HEIGHT3, PROBE_DEPTH, 0},
+    /* Same extents as 3D, so the pair isolates what the LAYERED flag changes
+     * from what the extents change. */
+    {"2Dlayered", PROBE_HEIGHT3, PROBE_DEPTH, CUDA_ARRAY3D_LAYERED},
 };
 
 static const char *result_name(CUresult res) {
@@ -242,7 +253,7 @@ static int probe(CUdevice dev, const struct format_entry *fmt, unsigned channels
   CUresult create_res, reqs_res = CUDA_ERROR_NOT_SUPPORTED;
   size_t exact = 0, align = 0;
   size_t free_before = 0, free_after = 0, total = 0, delta = 0;
-  unsigned flags = (strcmp(shape->name, "2Dlayered") == 0) ? CUDA_ARRAY3D_LAYERED : 0;
+  unsigned flags = shape->flags;
 
   memset(&desc, 0, sizeof(desc));
   desc.Width = width;
@@ -281,9 +292,9 @@ static int probe(CUdevice dev, const struct format_entry *fmt, unsigned channels
   }
 
   if (csv_mode) {
-    printf("%s,0x%x,%u,%s,%zu,%zu,%zu,%s,%zu,%zu,%zu,%d\n", fmt->name, fmt->value,
+    printf("%s,0x%x,%u,%s,%zu,%zu,%zu,%s,%zu,%zu,%zu\n", fmt->name, fmt->value,
            channels, shape->name, desc.Width, desc.Height, desc.Depth,
-           result_name(create_res), exact, align, delta, fmt->exact_today);
+           result_name(create_res), exact, align, delta);
     return create_res == CUDA_SUCCESS;
   }
 
@@ -306,6 +317,119 @@ static int probe(CUdevice dev, const struct format_entry *fmt, unsigned channels
   return 1;
 }
 
+/* Rules that are not about a format and so have no place in the sweep: what
+ * CUDA_ARRAY3D_CUBEMAP / _LAYERED do to the size, how the driver pads a 3D
+ * Depth and a 1D array's layers, and how a mip chain grows. array_size.h makes
+ * a claim about each one; these are the measurements behind them.
+ *
+ * Geometries are small and fixed so the numbers can be compared against the
+ * ones quoted in array_size.h and test/nogpu/test_array_size.c verbatim.
+ */
+struct extra_case {
+  struct format_entry fmt;
+  unsigned channels;
+  size_t width;
+  struct shape shape;
+};
+
+static const struct extra_case extras[] = {
+    /* A cubemap is six faces and a layered cubemap twelve, so Depth carries
+     * the count and Flags needs no special case in the arithmetic. The plain
+     * 2D face is here to divide by. */
+    {{"FLOAT", 0x20}, 4, 64, {"2D", 64, 0, 0}},
+    {{"FLOAT", 0x20}, 4, 64, {"cubemap", 64, 6, CUDA_ARRAY3D_CUBEMAP}},
+    {{"FLOAT", 0x20}, 4, 64,
+     {"cubeLayer", 64, 12, CUDA_ARRAY3D_CUBEMAP | CUDA_ARRAY3D_LAYERED}},
+    /* 3D Depth is rounded up to the next power of two (6 costs 8 slices) while
+     * a 2D layered Depth is not (6 costs 6). Same extents, so the difference
+     * is the flag. We model neither: both round UP, which keeps us a lower
+     * bound. */
+    {{"UNSIGNED_INT8", 0x01}, 4, 512, {"2D", 512, 0, 0}},
+    {{"UNSIGNED_INT8", 0x01}, 4, 512, {"3D", 512, 6, 0}},
+    {{"UNSIGNED_INT8", 0x01}, 4, 512,
+     {"2Dlayered", 512, 6, CUDA_ARRAY3D_LAYERED}},
+    /* 1D layers: the per-layer stride is inflated (here 8x), which is NOT the
+     * layer count being rounded up. The two rows below tell those apart --
+     * rounding the layer count to 64 would predict 2048x64 and 16384x64, and
+     * only the first of those matches. */
+    {{"UNSIGNED_INT8", 0x01}, 1, 2048, {"1Dlayered", 0, 8, CUDA_ARRAY3D_LAYERED}},
+    {{"UNSIGNED_INT8", 0x01}, 1, 16384, {"1Dlayered", 0, 4, CUDA_ARRAY3D_LAYERED}},
+};
+
+/* How much a mip chain adds over the base level. array_size.h charges the base
+ * level only, so this is the size of the under-estimate it accepts; the point
+ * of measuring it is that the ratio turns out to SATURATE, i.e. the
+ * under-estimate is bounded no matter what numMipmapLevels asks for. */
+typedef CUresult (*mip_mem_reqs_fn)(CUDA_ARRAY_MEMORY_REQUIREMENTS *,
+                                    CUmipmappedArray, CUdevice);
+
+static void probe_mipmap(CUdevice dev, FILE *out, mip_mem_reqs_fn mip_reqs) {
+  static const unsigned levels[] = {1, 2, 4, 8, 12, 20};
+  static const struct {
+    const char *name;
+    int format;
+    unsigned channels;
+  } cases[] = {
+      {"UNSIGNED_INT8", 0x01, 1},
+      {"UNSIGNED_INT8", 0x01, 4},
+      {"FLOAT", 0x20, 1},
+      {"BC1_UNORM", 0x91, 4},
+  };
+
+  if (mip_reqs == NULL) {
+    fprintf(out, "\ncuMipmappedArrayGetMemoryRequirements unavailable; "
+                 "skipping the mip chain\n");
+    return;
+  }
+  fprintf(out, "\nmip chain over the base level, 2D 1024x1024:\n");
+  for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+    size_t base = 0;
+    fprintf(out, "  %-16s ch=%u", cases[c].name, cases[c].channels);
+    for (size_t l = 0; l < sizeof(levels) / sizeof(levels[0]); l++) {
+      CUDA_ARRAY3D_DESCRIPTOR desc;
+      CUmipmappedArray mip = NULL;
+      CUDA_ARRAY_MEMORY_REQUIREMENTS reqs;
+
+      memset(&desc, 0, sizeof(desc));
+      desc.Width = 1024;
+      desc.Height = 1024;
+      desc.Format = (CUarray_format)cases[c].format;
+      desc.NumChannels = cases[c].channels;
+      desc.Flags = CUDA_ARRAY3D_DEFERRED_MAPPING;
+      if (cuMipmappedArrayCreate(&mip, &desc, levels[l]) != CUDA_SUCCESS) {
+        fprintf(out, "  L%u=rejected", levels[l]);
+        continue;
+      }
+      memset(&reqs, 0, sizeof(reqs));
+      if (mip_reqs(&reqs, mip, dev) == CUDA_SUCCESS) {
+        if (levels[l] == 1) {
+          base = reqs.size;
+        }
+        fprintf(out, "  L%u=%zu", levels[l], reqs.size);
+        if (base != 0) {
+          fprintf(out, "(%.3fx)", (double)reqs.size / (double)base);
+        }
+      }
+      cuMipmappedArrayDestroy(mip);
+    }
+    fprintf(out, "\n");
+  }
+}
+
+static void probe_extra(CUdevice dev, mip_mem_reqs_fn mip_reqs) {
+  /* The array rows go through probe(), so --csv feeds them to
+   * array_size_verify like any other row. The mip table cannot: array_size.h
+   * does not model the chain, so it is printed for reading and kept off the
+   * CSV stream. */
+  FILE *out = csv_mode ? stderr : stdout;
+
+  for (size_t i = 0; i < sizeof(extras) / sizeof(extras[0]); i++) {
+    probe(dev, &extras[i].fmt, extras[i].channels, &extras[i].shape,
+          extras[i].width);
+  }
+  probe_mipmap(dev, out, mip_reqs);
+}
+
 int main(int argc, char **argv) {
   int device_index = 0;
   CUdevice dev;
@@ -314,16 +438,44 @@ int main(int argc, char **argv) {
   int driver_version = 0;
   size_t free_mem = 0, total_mem = 0;
   void *libcuda;
+  mip_mem_reqs_fn mip_mem_reqs = NULL;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--csv") == 0) {
       csv_mode = 1;
+    } else if (strcmp(argv[i], "--geom") == 0 && i + 1 < argc) {
+      /* Width 0 is rejected rather than passed through: every descriptor would
+       * come back REJECTED and the run would look like a driver finding. */
+      if (sscanf(argv[++i], "%zu,%zu,%zu", &custom.width, &custom.height,
+                 &custom.depth) < 1 ||
+          custom.width == 0) {
+        fprintf(stderr, "--geom wants W[,H[,D]] with a non-zero W\n");
+        return 1;
+      }
+      custom.set = 1;
+    } else if (strcmp(argv[i], "--extra") == 0) {
+      extra_mode = 1;
     } else if (strcmp(argv[i], "--help") == 0) {
-      printf("usage: %s [device_index] [--csv]\n", argv[0]);
+      printf("usage: %s [device_index] [--csv] [--geom W[,H[,D]] | --extra]\n",
+             argv[0]);
+      printf("  --geom  replaces the shape sweep with one exact geometry and\n");
+      printf("          does not double the width, for pinning a specific rule\n");
+      printf("          (block rounding at a width not divisible by 4, row\n");
+      printf("          padding at an awkward width, the allocation floor).\n");
+      printf("  --extra replaces the sweep with the rules that are about Flags,\n");
+      printf("          Depth or mip levels rather than about a format: cubemap\n");
+      printf("          and layered sizing, 3D depth padding, 1D layer padding,\n");
+      printf("          and how much a mip chain adds. The mip table goes to\n");
+      printf("          stderr under --csv so it stays out of the CSV stream.\n");
       return 0;
     } else {
       device_index = atoi(argv[i]);
     }
+  }
+
+  if (extra_mode && custom.set) {
+    fprintf(stderr, "--extra and --geom pick different probe sets; use one\n");
+    return 1;
   }
 
   /* A run with our own library preloaded measures our accounting, not the
@@ -379,6 +531,8 @@ int main(int argc, char **argv) {
   libcuda = dlopen("libcuda.so.1", RTLD_LAZY | RTLD_NOLOAD);
   if (libcuda != NULL) {
     array_mem_reqs = (array_mem_reqs_fn)dlsym(libcuda, "cuArrayGetMemoryRequirements");
+    mip_mem_reqs =
+        (mip_mem_reqs_fn)dlsym(libcuda, "cuMipmappedArrayGetMemoryRequirements");
   }
 
   cuDriverGetVersion(&driver_version);
@@ -391,29 +545,50 @@ int main(int argc, char **argv) {
     printf("memory: %zu free / %zu total\n", free_mem, total_mem);
     printf("cuArrayGetMemoryRequirements: %s\n",
            array_mem_reqs ? "available" : "NOT available (delta only)");
-    printf("probe geometry: width %d and %d, height %d, depth %d\n\n", PROBE_WIDTH,
-           PROBE_WIDTH * 2, PROBE_HEIGHT, PROBE_DEPTH);
+    if (extra_mode) {
+      printf("probe geometry: --extra (Flags / Depth / mip rules, no sweep)\n\n");
+    } else if (custom.set) {
+      printf("probe geometry: --geom %zu,%zu,%zu (single, no sweep)\n\n",
+             custom.width, custom.height, custom.depth);
+    } else {
+      printf("probe geometry: width %d and %d, height %d (2D) / %d (3D), depth %d\n\n",
+             PROBE_WIDTH, PROBE_WIDTH * 2, PROBE_HEIGHT, PROBE_HEIGHT3, PROBE_DEPTH);
+    }
     printf("exact      = cuArrayGetMemoryRequirements size (authoritative)\n");
     printf("free_delta = cuMemGetInfo drop across the allocation (upper bound,\n");
     printf("             quantised by the driver's suballocator)\n");
     printf("B/texel    = exact / (Width * Height * Depth), zero extents as 1\n\n");
   } else {
     printf("format,value,channels,shape,width,height,depth,create_result,"
-           "exact_size,alignment,free_delta,exact_in_library_today\n");
+           "exact_size,alignment,free_delta\n");
+  }
+
+  if (extra_mode) {
+    probe_extra(dev, mip_mem_reqs);
+    cuDevicePrimaryCtxRelease(dev);
+    return 0;
   }
 
   for (size_t f = 0; f < sizeof(formats) / sizeof(formats[0]); f++) {
     int any = 0;
     if (!csv_mode) {
-      printf("%s (0x%x)%s\n", formats[f].name, formats[f].value,
-             formats[f].exact_today ? "  [sized exactly by the library today]" : "");
+      printf("%s (0x%x)\n", formats[f].name, formats[f].value);
     }
-    for (size_t s = 0; s < sizeof(shapes) / sizeof(shapes[0]); s++) {
+    if (custom.set) {
+      /* One exact geometry, no doubling: the caller is pinning a single rule
+       * and wants the one number, not a sweep. */
+      struct shape one = {"custom", custom.height, custom.depth, 0};
       for (unsigned ch = 1; ch <= 4; ch *= 2) {
-        /* Both widths, so the caller can tell linear-in-Width apart from row
-         * padding or 4x4 block rounding. */
-        any |= probe(dev, &formats[f], ch, &shapes[s], PROBE_WIDTH);
-        any |= probe(dev, &formats[f], ch, &shapes[s], PROBE_WIDTH * 2);
+        any |= probe(dev, &formats[f], ch, &one, custom.width);
+      }
+    } else {
+      for (size_t s = 0; s < sizeof(shapes) / sizeof(shapes[0]); s++) {
+        for (unsigned ch = 1; ch <= 4; ch *= 2) {
+          /* Both widths, so the caller can tell linear-in-Width apart from row
+           * padding or 4x4 block rounding. */
+          any |= probe(dev, &formats[f], ch, &shapes[s], PROBE_WIDTH);
+          any |= probe(dev, &formats[f], ch, &shapes[s], PROBE_WIDTH * 2);
+        }
       }
     }
     if (!csv_mode && !any) {

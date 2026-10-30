@@ -461,6 +461,22 @@ target_include_directories(vgpu-session-config PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(vgpu-session-config PRIVATE Threads::Threads)
 
+# Replays an array_size_probe CSV through the shipped include/array_size.h and
+# reports any descriptor we would charge MORE for than the driver reserves.
+# Header-only arithmetic, so it needs neither a GPU nor a CUDA toolkit and is
+# built everywhere -- which is the point: it makes "verified against a real
+# driver" re-runnable from a recorded CSV instead of a claim in a commit.
+add_executable(array_size_verify tools/array_size_verify.c)
+target_include_directories(array_size_verify PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# Measures BC bytes-per-block through OpenGL, which is the only way to get a
+# number for BC6H -- cuArray3DCreate refuses that format, so array_size_probe
+# cannot. Also outside the CUDA tool block: it opens libEGL/libGL at runtime
+# and needs no headers or toolkit to build (it does need a GPU to RUN).
+add_executable(bc_block_probe tools/bc_block_probe.c)
+target_link_libraries(bc_block_probe PRIVATE ${CMAKE_DL_LIBS})
+
 # find_package(CUDAToolkit REQUIRED)
 # The tools below link libcuda / libnvidia-ml and include <cuda.h>, so they
 # need a CUDA toolkit on the build host. Turn them off to build and run the
