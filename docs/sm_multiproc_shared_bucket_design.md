@@ -1,6 +1,6 @@
 # 容器内多进程算力隔离：共享令牌桶设计
 
-> **2026-10-31：AIMD / auto 控制器已彻底移除，delta 是唯一的核心限流算法**（`CUDA_SM_CONTROLLER`、`CUDA_SM_AIMD_*` 不再读取；共享区 `md_cooldown` 删除，布局 v6）。下文涉及 AIMD/auto 的内容为历史记录。
+> **2026-10-31：AIMD / auto 控制器已彻底移除，delta 是唯一的核心限流算法**（`CUDA_SM_CONTROLLER`、`CUDA_SM_AIMD_*` 不再读取；共享区 `md_cooldown` 删除；sm_node 最终布局 v5 = main 的 v4 + 1）。下文涉及 AIMD/auto 的内容为历史记录。
 > 作用范围：
 > - `library/` —— 新增 `sm_node` 共享区；`vmem_node` 加冻结区头 + 重建语义（§10）。
 > - `pkg/deviceplugin/vgpu`、`pkg/kubeletplugin` —— `/tmp/.sm_node` 按容器挂载 + 启动前清理（§4.5）。
@@ -71,7 +71,7 @@ typedef struct {
 static dev_hot_t g_dev_hot[MAX_DEVICE_COUNT];   // ← static：每个进程一份
 ```
 
-`rate_limiter` 用 CAS 扣减（[cuda_hook.c#L606](../library/src/cuda_hook.c#L606)），watcher 每 ~80ms/设备用 NVML 采样、经 `delta()`/`aimd()` 反馈后用 `change_token()` 补充。控制器积分态同样是进程私有的 static：[`shares[]`](../library/src/cuda_hook.c#L1118)、[`up_limits[]`](../library/src/cuda_hook.c#L1140)、`is[]`、`avg_sys_frees[]`。
+`rate_limiter` 用 CAS 扣减（[cuda_hook.c#L606](../library/src/cuda_hook.c#L606)），watcher 每 ~100ms/设备用 NVML 采样、经 `delta()`/`aimd()` 反馈后用 `change_token()` 补充。控制器积分态同样是进程私有的 static：[`shares[]`](../library/src/cuda_hook.c#L1118)、[`up_limits[]`](../library/src/cuda_hook.c#L1140)、`is[]`、`avg_sys_frees[]`。
 
 ### 1.2 核心问题：N 个私有桶瞬时叠加突破限额
 
@@ -254,7 +254,7 @@ if (now - last >= REFILL_PERIOD_NS &&
 
 - **无 leader、无失效检测、自愈**：谁先到谁补；补充者本周期后崩溃，下周期 `now - last` 再次超阈值，别的进程自然抢到。
 - **积分态只有赢家读写** → 天然被选举串行化，无需额外锁；仅需 acquire/release 内存序（`__atomic_load_n`/`__atomic_store_n` with `__ATOMIC_ACQUIRE`/`RELEASE`）。
-- `REFILL_PERIOD_NS` ≈ 现有 watcher 单设备周期（~80–100ms）。多个 watcher 采样节奏可能错开，抢权只保证"每 period 至多补一次"，采样值用赢家自己的（聚合 util 与采样进程无关，见 §4.9）。
+- `REFILL_PERIOD_NS` ≈ 现有 watcher 单设备周期（~100ms）。多个 watcher 采样节奏可能错开，抢权只保证"每 period 至多补一次"，采样值用赢家自己的（聚合 util 与采样进程无关，见 §4.9）。
 
 ### 4.3.1 修正：采样权与补充权分离（实施期重大调整）
 
@@ -727,7 +727,7 @@ g_dev_hot[host_index].cur_cuda_cores = g_sm_controller(...);   // SET，非累�
 | 布局守卫（`header_valid`） | **每进程一次**（`pthread_once` 之下） | 4 次整数比较 |
 | 文件锁（`ofd_fcntl` 加/解，**阻塞**§4.4.2a） | **每进程一次** | 2 次 syscall；稳态无争用→不睡；争用时睡等一次建区（微秒级，**不占 CPU**） |
 | `open`/`ftruncate`/`fstat`/`mmap` | **每进程一次** | 4 次 syscall |
-| 补充选举（`CAS(last_refill_ns)`） | 每 watcher 周期（~80ms）/设备 | 1 条 CAS |
+| 补充选举（`CAS(last_refill_ns)`） | 每 watcher 周期（~100ms）/设备 | 1 条 CAS |
 | **`rate_limiter` 扣令牌** | **每次发射** | **1 条 CAS（= 现状，未增加）** |
 
 > **阻塞锁不是 CPU 开销**：等待者在内核里睡，不空转（这正是选阻塞锁的原因，§4.4.2a）。且稳态下（容器已跑起来、没有并发新建进程）初始化锁**无争用**，`F_OFD_SETLKW` 首次尝试即成功、不睡。
@@ -908,7 +908,7 @@ static inline int64_t *bucket_of(int host_index) {
 ### 6.3 崩溃语义
 
 - 消费者崩溃：无临界区、无持有物，桶计数器不受影响。
-- 补充选举赢家崩溃：本周期没补上 → 下周期 `now-last` 超阈值 → 别人接手。最坏损失一个周期的补充（~80ms 少补一次），自愈。
+- 补充选举赢家崩溃：本周期没补上 → 下周期 `now-last` 超阈值 → 别人接手。最坏损失一个周期的补充（~100ms 少补一次），自愈。
 - **初始化持锁者崩溃**：内核释放文件锁；若它死在 `rebuild_region_locked` 中途，`magic` 尚未发布（RELEASE 序最后写）→ 下一个进程判定不符 → 再次重建。**重建幂等可中断，无半初始化稳态**（§4.5.4）。
 - 无 robust-futex / 一致性恢复负担（热路径根本没有锁；初始化锁由内核回收）。
 
@@ -988,7 +988,7 @@ static inline int64_t *bucket_of(int host_index) {
 - **[低] 冻结区被误改**（§4.1）：`magic`/`layout_version`/`region_size`/`device_count` 这 16 字节是永久 ABI，改动 = 守卫失效。已用 `_Static_assert` 钉死偏移，但语义靠 review。
 - **[高，新增] `getVmemoryLockOffset` 漏改会静默失效**（§10.3）：这是全设计**唯一一处"错了不报错"**的改动。C 侧 `offsetof` 自动含头、无需改；**Go 侧必须手工加 `unsafe.Offsetof(DeviceVMemoryT{}.Devices)`**。漏改 → Go 与 C 锁在不重叠字节范围 → 互斥失效 → 撕裂读 → **错的 metrics，无任何报错**。缓解：C+Go 同 PR（§8 阶段 2）+ §7.2 第 6 条验收 + 建议加一个断言 `offsetof` 一致性的单测。
 - **[中] `vmem_node` 布局变更的升级期表现**（§10.5）：manager 与容器内 `.so` 版本 skew 期间，该容器 **metrics 暂缺**直至重启。**非新增问题**（今天尺寸一变即如此），但升级公告应提及。
-- **[中] 补充周期与多 watcher 采样错峰**：`REFILL_PERIOD_NS` 已定为现 watcher 单设备周期（~80–100ms，§12 第 8 项），仍需真机确认不会"抢权成功但采样过旧"。
+- **[中] 补充周期与多 watcher 采样错峰**：`REFILL_PERIOD_NS` 已定为现 watcher 单设备周期（~100ms，§12 第 8 项），仍需真机确认不会"抢权成功但采样过旧"。
 - **[低] DRA 非 NRI 路径无清理钩子**（§4.5.3）：残留是良性的（自校正），故不补钩子；仅依赖库内守卫。若将来该路径出现非自校正的共享字段，此结论需重审。
 - **[低] 收益依赖真多进程**：单进程容器零收益（但默认关闭 → 零代价）。首要目标场景是 notebook（§1.3）。
 - **[高，`main` 同步新增] `vmem_node` 的 `FATAL` 是两层，只改一层等于没改**（§10.6）：`mmap_file_to_vmem_node` 内的 `return 1` 之外，`load_controller_configuration` 里还有一个 `LOGGER(FATAL, "mmap vmem nodes file failed")`。阶段 2 必须同时把外层降级为 WARNING + 关闭本进程记账，否则 `open`/`mmap` 硬失败仍会杀死容器。
@@ -1254,7 +1254,7 @@ util.VirtualMemoryTracking feature gate (device-plugin/device-monitor 默认 fal
 | 5 | 目录 `sm_node` / 文件 `sm_node.config` | §4.5.1 |
 | 6 | `SM_NODE_FILE_SIZE = 8192` | §4.1；`vmem_node` 取 `320KiB`（见第 12 项） |
 | 7 | env `CUDA_SM_SHARED_BUCKET`，默认 `0` | §5 |
-| 8 | `REFILL_PERIOD_NS` = 现 watcher 单设备周期（~80–100ms） | §4.3 |
+| 8 | `REFILL_PERIOD_NS` = 现 watcher 单设备周期（~100ms） | §4.3 |
 | 9 | Go 侧**暂不**读 `sm_node` | `sm_node` 不是跨语言 ABI，冻结约束仅对库内生效。**注意**：第 3 项使 `vmem_node` **是**跨语言 ABI（§10.3） |
 | 10 | **开关走 `g_dynamic_config` + env，不改 `resource_data_t`**（`main` 同步后新增拍板） | §5.1。改 `resource_data_t` 会触发 `CheckResourceDataSize` 重调度；且范式 A 不排斥将来由控制面注入同一个 env |
 | 11 | **不为 `sm_node` 引入任何 PID 回收 / 退出钩子**（`main` 同步后新增拍板） | §4.5.5。判据是"桶不是账本"；该结论绑定在"`sm_node` 无按 PID 归属字段"这一前提上 |

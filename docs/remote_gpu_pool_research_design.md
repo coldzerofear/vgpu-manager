@@ -1,7 +1,7 @@
 # 跨节点远程 GPU 资源池 —— 内存/核心隔离方案研究与设计（v0.5）
 
 > 状态：**Phase 1 + Phase 2 已实现，待真机验收**
-> **2026-10-31：AIMD / auto 控制器已彻底移除，delta 是唯一的核心限流算法**（`CUDA_SM_CONTROLLER`、`CUDA_SM_AIMD_*` 不再读取；共享区 `md_cooldown` 删除，布局 v6）。下文涉及 AIMD/auto 的内容为历史记录。
+> **2026-10-31：AIMD / auto 控制器已彻底移除，delta 是唯一的核心限流算法**（`CUDA_SM_CONTROLLER`、`CUDA_SM_AIMD_*` 不再读取；共享区 `md_cooldown` 删除；sm_node 最终布局 v5 = main 的 v4 + 1）。下文涉及 AIMD/auto 的内容为历史记录。
 > 关联代码：本仓库 `library/`（vGPU 硬隔离库，本地与远程共用）、`D:\WorkSpace\GoCode\src\lupine`（开源远程 GPU 转发）
 > 配套阅读：仓库根目录 `AGENTS.md`（面向后续 AI 的任务与复查指南）
 

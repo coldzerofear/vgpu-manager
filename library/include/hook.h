@@ -649,7 +649,7 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
 /* BUMP THIS whenever any field below changes type, order, or offset.
  * The guard compares it and rebuilds the region on mismatch; forgetting to
  * bump it means a new library silently reads an old layout's bytes. */
-#define SM_NODE_LAYOUT_VERSION 7U   /* v7: + estimate sample period (v6: - AIMD md_cooldown; v5: + sample timestamp, estimate state; three cache lines) */
+#define SM_NODE_LAYOUT_VERSION 5U   /* v5: + sample timestamp, sample-driven estimate state on its own two lines; - AIMD md_cooldown, - total_cuda_cores */
 
 /* Sample-driven estimate state (include/sm_delta.h, sm_delta_est_control).
  * Defined here so the shared region can hold it: the sample window spans
@@ -668,6 +668,7 @@ typedef struct {
   int32_t  zero_starved;                 /* last fresh sample read 0 while starved   */
   int32_t  drop_cycles;                  /* consecutive cycles of a demand drop      */
   int32_t  period_ms;                    /* smoothed sample period (0: not yet)      */
+  int32_t  long_gaps;                    /* consecutive gaps over twice period_ms    */
 
   uint32_t head;                         /* records written (ring index = head % N)  */
   uint32_t starved_mask;                 /* bit k: record k's bucket ran (about) dry */
@@ -685,12 +686,11 @@ typedef struct {
 typedef struct {
   /* Hot: CAS'd by every launching thread in every process. */
   int64_t cur_cuda_cores;       /* the token bucket itself                  */
-  int64_t total_cuda_cores;     /* thread*sm*FACTOR; bucket ceiling         */
   int64_t last_refill_ns;       /* refill election stamp, CAS'd per cycle   */
   int64_t share;                /* was shares[]                             */
   /* Monotonic stamp of the last published utilization sample, written LAST
    * (release) by the sampling owner so a reader that acquire-loads it knows
-   * the four s_* fields below are complete. Also the staleness signal: if this
+   * the s_* fields below are complete. Also the staleness signal: if this
    * falls too far behind, the owner is alive but not sampling (hung in NVML,
    * say) and a standby resamples for itself rather than trusting it. */
   int64_t sample_published_ns;
@@ -755,8 +755,8 @@ typedef struct {
   /* NVML timestamp of the published sample: a standby sees a fresh sample
    * exactly when the owner did (sm_delta_est_control acts once per sample). */
   uint64_t s_sample_ts;
-  sm_delta_est_t est;
-  uint8_t _pad[3 * CACHELINE_SIZE - CACHELINE_SIZE - sizeof(sm_delta_est_t)];
+  /* Its own two lines: the winner rewrites it whole every cycle. */
+  sm_delta_est_t est __attribute__((aligned(CACHELINE_SIZE)));
 } __attribute__((aligned(CACHELINE_SIZE))) sm_node_dev_t;
 
 typedef struct {

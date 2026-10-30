@@ -455,6 +455,8 @@ static inline int64_t sm_delta_control(int64_t total, int up_limit, int user_cur
  * mean (x 2 / 3: 1.5 periods), paired as such below. */
 #define DELTA_EST_SLIDING_NUM 3
 #define DELTA_EST_SLIDING_DEN 2
+/* Consecutive over-long gaps after which they are taken as the period. */
+#define DELTA_EST_PERIOD_READOPT 3
 
 /* now_ms: wall-clock ms of this cycle's read (CLOCK_REALTIME, the clock NVML
  * stamps samples with). sample_ts_ms: the current sample's timestamp in ms,
@@ -508,11 +510,17 @@ static inline int64_t sm_delta_est_control_avg(sm_delta_est_t *st, int64_t total
         st->win_ms += (int32_t)period;
         /* Smoothed sample period, 3:1. A gap over twice the period is a
          * silence (an idle stretch, a stalled watcher), not the part's
-         * period: counting it flipped the sliding test for a few samples. */
+         * period: counting it flipped the sliding test for a few samples.
+         * DELTA_EST_PERIOD_READOPT of them in a row are the period itself
+         * (a first pair that came close together), so it is taken over. */
         if (st->period_ms == 0) {
           st->period_ms = (int32_t)period;
         } else if (period <= 2 * (int64_t)st->period_ms) {
           st->period_ms = (3 * st->period_ms + (int32_t)period + 2) / 4;
+          st->long_gaps = 0;
+        } else if (++st->long_gaps >= DELTA_EST_PERIOD_READOPT) {
+          st->period_ms = (int32_t)period;
+          st->long_gaps = 0;
         }
       }
     }

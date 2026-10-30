@@ -721,13 +721,23 @@ static void test_invariants(void) {
     int silence = st.period_ms == 200;
     ok &= silence;
 
+    /* ...but DELTA_EST_PERIOD_READOPT long gaps in a row are the period */
+    int long_seen = 0;
+    for (int k = 1; k <= DELTA_EST_PERIOD_READOPT; k++) {
+      long_seen |= st.period_ms != 200 && k < DELTA_EST_PERIOD_READOPT;
+      sm_delta_est_control_avg(&st, total, 50, 25, 25, 4000 + (uint64_t)k * 600, 1000,
+                               4000 + k * 600, 5000, 0, 0, 5000, DIV, 64, &drain);
+    }
+    int readopt = !long_seen && st.period_ms == 600;
+    ok &= readopt;
+
     if (!ok) {
-      printf("  [FAIL] sliding estimate: steady %d (est %lld) zero-acts %d/%d silence %d (period %d) zero %d\n",
-             steady, (long long)est, acted[0], acted[1], silence, st.period_ms, zero);
+      printf("  [FAIL] sliding estimate: steady %d (est %lld) zero-acts %d/%d silence %d readopt %d (period %d) zero %d\n",
+             steady, (long long)est, acted[0], acted[1], silence, readopt, st.period_ms, zero);
       failures++;
     } else {
       printf("  [ok] sliding estimate: span-paired C*u/m, zero acts only on an idle device, "
-             "silences do not stretch the period\n");
+             "silences do not stretch the period, repeated long gaps re-set it\n");
     }
   }
 

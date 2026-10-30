@@ -67,8 +67,7 @@ extern void self_cgroup_init(self_cgroup_t *self, int cgroup_v1);
 extern void self_cgroup_ensure(self_cgroup_t *self);
 extern int self_cgroup_ns_is_private(self_cgroup_t *self, unsigned slot);
 
-/* SM throttle controller selection (see util.c). Defaults preserve stock
- * behaviour when env is unset. */
+/* SM limiter tunables (see util.c); each keeps its default when the env is unset. */
 extern int get_sm_excl_debounce_cycles(int *out);
 extern int get_sm_excl_external_util_threshold(int *out);
 extern int get_usage_threshold(int *out);
@@ -236,7 +235,7 @@ static int              g_gap_evt_ready[MAX_DEVICE_COUNT]  = {0};
 static int              g_gap_dc[MAX_DEVICE_COUNT]         = {0};
 
 /* Per-device decimation tick for the periodic watcher utilization log. The
- * SM watcher samples ~every 80ms, which floods VERBOSE logs, so emit only 1
+ * SM watcher samples every ~100 ms, which floods VERBOSE logs, so emit only 1
  * in WATCHER_UTIL_LOG_STRIDE samples. Fixed-stride (not power-of-two) keeps
  * a steady cadence instead of going silent over a long run. Single-writer
  * per index, so a plain int needs no atomics. */
@@ -628,14 +627,14 @@ entry_t cuda_hooks_entry[] = {
 const int cuda_hook_nums =
     sizeof(cuda_hooks_entry) / sizeof(cuda_hooks_entry[0]);
 
-/* SOFT_ADJUST_INTERVAL: how many watcher cycles (~80ms each) elapse
+/* SOFT_ADJUST_INTERVAL: how many watcher cycles (~100 ms each) elapse
  * between successive periodic up_limit re-evaluations in soft mode.
  * Previously dynamic_config_t.change_limit_interval; promoted to a
  * compile-time constant because (1) no consumer ever wanted to tune
  * it, (2) it appears in the avg_sys_frees denominator and the every-
  * other-cycle reset condition (i % (INTERVAL/2)), so user-facing
  * tuning would need to expose two coupled knobs to be safe.
- * 30 cycles ~ 2.4s at the default ~80ms cadence.  */
+ * 30 cycles ~ 3 s at the default ~100 ms cadence.  */
 #define SOFT_ADJUST_INTERVAL    30
 
 /* delta()'s ramp-floor divisor is env-tunable via g_dynamic_config
@@ -658,14 +657,10 @@ dynamic_config_t g_dynamic_config = {
   .sm_shared_bucket             = 0,     /* per-process bucket (historical) */
 };
 
-/* The ceiling stays the per-process g_total_cuda_cores[]: it is derived from
- * device properties, so every process computes the same number, and reading it
- * locally removes any ordering dependency on the shared region being populated
- * (a transiently-zero shared ceiling would clamp the bucket to 0 and throttle
- * the whole container). The region's total_cuda_cores is observability only. */
-/* Returns the change this call actually applied (after - before of the CAS
- * that landed, so clamping included). The watcher adds it to the refill mark
- * (see g_delta_mark). */
+/* Adds delta to the bucket, clamped to [floor, ceiling] (the watcher's refill
+ * bounds, refill_ceiling()). Returns the change this call actually applied
+ * (after - before of the CAS that landed, so clamping included). The watcher
+ * adds it to the refill mark (see g_delta_mark). */
 /* ceiling: the most the bucket may hold after this change -- the pool, or the
  * delta controller's ceiling (see refill_ceiling). floor: the least -- 0
  * forgives any overdraft, a negative floor carries it (refill_ceiling's
@@ -687,6 +682,22 @@ static int64_t change_token(int64_t delta, int64_t ceiling, int64_t floor, int h
     }
   } while (!CAS(bucket, cuda_cores_before, cuda_cores_after));
   return cuda_cores_after - cuda_cores_before;
+}
+
+/* Empties a backlog (a positive bucket) and leaves a debt alone. The test
+ * and the store are one CAS: a launch that overdraws between the watcher's
+ * read and the drain keeps its debt, where adding -read through
+ * change_token's floor of 0 would have forgiven it. Returns the change applied. */
+static int64_t drain_backlog(int host_index) {
+  volatile int64_t *bucket = sm_bucket_of(host_index);
+  int64_t before;
+  do {
+    before = *bucket;
+    if (before <= 0) {
+      return 0;
+    }
+  } while (!CAS(bucket, before, 0));
+  return -before;
 }
 
 /* tokens: the launch's charge, sm_launch_tokens() (grid x block threads). */
@@ -800,11 +811,9 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
                                       g_dynamic_config.delta_increment_divisor,
                                       g_dynamic_config.delta_ramp_floor_divisor, &drain);
   g_delta_mark[host_index] = bucket;
-  /* A drain empties a backlog; it must never repay a debt (-bucket > 0). */
-  if (drain && bucket > 0) {
-    /* Through change_token's CAS so concurrent deductions are not undone;
-     * a stale `bucket` only makes the result clamp at 0, which is the aim. */
-    g_delta_mark[host_index] += change_token(-bucket, g_total_cuda_cores[host_index], 0, host_index);
+  /* A drain empties a backlog; it never repays or forgives a debt. */
+  if (drain) {
+    g_delta_mark[host_index] += drain_backlog(host_index);
   }
   return next;
 }
@@ -820,7 +829,7 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
  * Updated at most once per watcher cycle via a memo, so calling the
  * predicate twice in one iteration doesn't double-advance the streak.
  * Starts as "not exclusive": at startup we wait excl_debounce_cycles
- * (~400ms) of observed exclusivity before allowing a burst -- costs a
+ * (~1 s at the default 10) of observed exclusivity before allowing a burst -- costs a
  * slower ramp-up, avoids squeezing a Pod that was briefly idle.
  *
  * Threading: written/read only by the watcher thread owning that
@@ -1046,12 +1055,26 @@ static int is[MAX_DEVICE_COUNT]             = {0};
  * the first cycle's value becomes the reference; later cycles only change
  * when a genuinely new external process arrives. */
 static int pre_external_process_nums[MAX_DEVICE_COUNT] = {0};
-static int pre_sys_process_nums[MAX_DEVICE_COUNT] = {0};
 static utilization_t top_results[MAX_DEVICE_COUNT] = {};
 /* volatile: written by the watcher thread, read cross-thread by the GAP path
  * (gap_effective_dc). Matches g_dev_hot[].cur_cuda_cores' convention -- forces a real
  * load (no register caching) of this single aligned int. */
 static volatile int up_limits[MAX_DEVICE_COUNT] = {0};
+
+/* Soft mode: drops the elastic limit back to hard_core (a new external Pod,
+ * or exclusivity lost) and restarts the ramp. The share scales by the same
+ * ratio instead of collapsing to one SM's threads: the estimator holds the
+ * share until its next sample (~1 s on a 200 ms-sample GPU), and a tiny share
+ * would starve the container for that long instead of releasing the burst. */
+static void soft_reset_to_hard(int host_index, int hard_core) {
+  int old = up_limits[host_index];
+  if (old > hard_core && shares[host_index] > 0) {
+    shares[host_index] = shares[host_index] * hard_core / old;
+  }
+  up_limits[host_index] = hard_core;
+  is[host_index] = 0;
+  avg_sys_frees[host_index] = 0;
+}
 static nvmlDevice_t nvml_devices[MAX_DEVICE_COUNT] = {};
 
 /* ---- Refill election + shared controller state ---- *
@@ -1238,7 +1261,6 @@ static void sm_ctl_load(int host_index) {
   is[host_index]                         = d->is_cnt;
   avg_sys_frees[host_index]              = d->avg_sys_free;
   pre_external_process_nums[host_index]  = d->pre_external_proc;
-  pre_sys_process_nums[host_index]       = d->s_sys_process_num;
   /* Without these three the exclusivity FSM would advance once per N cycles in
    * each process and fracture; lost_excl_pending especially, being a one-shot
    * flag, would hang set in every non-winner and fire a stale reset cycles late. */
@@ -1258,7 +1280,6 @@ static void sm_ctl_publish(int host_index) {
   d->up_limit          = up_limits[host_index];
   d->is_cnt            = is[host_index];
   d->avg_sys_free      = avg_sys_frees[host_index];
-  d->s_sys_process_num = pre_sys_process_nums[host_index];
   d->pre_external_proc = pre_external_process_nums[host_index];
   d->excl_debounced    = g_is_exclusive_debounced[host_index];
   d->excl_streak       = g_exclusive_pending_streak[host_index];
@@ -1387,7 +1408,6 @@ static void *utilization_watcher(void *arg) {
     sys_frees[host_index] = 0;
     avg_sys_frees[host_index] = 0;
     pre_external_process_nums[host_index] = 0;
-    pre_sys_process_nums[host_index] = 0;
     up_limits[host_index] = get_device_flag(host_index, hard_core);
     top_results[host_index].user_current = 0;
     top_results[host_index].sys_current = 0;
@@ -1583,17 +1603,6 @@ static void *utilization_watcher(void *arg) {
         }
         shares[host_index] = delta(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
       } else {
-//        // When the process inside the container changes, it should also quickly roll back to the hard core to give up resources
-//        if (pre_sys_process_nums[host_index] != top_results[host_index].sys_process_num) {
-//          if (pre_sys_process_nums[host_index] < top_results[host_index].sys_process_num) {
-//            shares[host_index] = (int64_t) g_max_thread_per_sm[host_index];
-//            up_limits[host_index] = dcfg.hard_core;
-//            is[host_index] = 0;
-//            avg_sys_frees[host_index] = 0;
-//          }
-//          pre_external_process_nums[host_index] = top_results[host_index].external_process_num;
-//          pre_sys_process_nums[host_index] = top_results[host_index].sys_process_num;
-//        }
         if (pre_external_process_nums[host_index] != top_results[host_index].external_process_num) {
           /* A NEW external process arrived (count grew) -> reset to
            * hard_core so all competitors negotiate from the same floor.
@@ -1606,14 +1615,10 @@ static void *utilization_watcher(void *arg) {
            * a single initial reset (which is harmless: we'd just been
            * at hard_core anyway). */
           if (pre_external_process_nums[host_index] < top_results[host_index].external_process_num) {
-            shares[host_index] = (int64_t) g_max_thread_per_sm[host_index];
-            up_limits[host_index] = dcfg.hard_core;
-            is[host_index] = 0;
-            avg_sys_frees[host_index] = 0;
+            soft_reset_to_hard(host_index, dcfg.hard_core);
           }
           pre_external_process_nums[host_index] = top_results[host_index].external_process_num;
         }
-        pre_sys_process_nums[host_index] = top_results[host_index].sys_process_num;
 
         /* 1. Device is exclusively used by us (no external Pod competing).
          *    Allocate cuda cores up to soft_core for burst headroom.
@@ -1640,10 +1645,7 @@ static void *utilization_watcher(void *arg) {
            * grabbed by resetting up_limits to hard_core and re-starting
            * the elastic ramp. One-shot: consume the flag. */
           if (g_lost_exclusivity_pending[host_index]) {
-            shares[host_index] = (int64_t) g_max_thread_per_sm[host_index];
-            up_limits[host_index] = dcfg.hard_core;
-            is[host_index] = 0;
-            avg_sys_frees[host_index] = 0;
+            soft_reset_to_hard(host_index, dcfg.hard_core);
             g_lost_exclusivity_pending[host_index] = 0;
           }
           is[host_index]++;
@@ -2043,7 +2045,7 @@ static void initialization() {
   sm_controller_init();
 
   /* Attach the container-wide bucket, if enabled. Deliberately placed after
-   * g_total_cuda_cores and the controller switch are known, but before
+   * g_total_cuda_cores and the controller tunables are known, but before
    * balance_batches spawns any watcher, so g_sm_node is final before
    * anything can observe it and needs no synchronisation.
    *
@@ -2067,11 +2069,6 @@ static void initialization() {
       }
       LOGGER(WARNING, "sm_node unavailable, falling back to per-process token bucket");
     } else {
-      for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
-        /* Observability only -- change_token clamps against the local copy. */
-        __atomic_store_n(&g_sm_node->devices[i].total_cuda_cores,
-                         g_total_cuda_cores[i], __ATOMIC_RELAXED);
-      }
       /* Remember which file we mapped, so shared_regions_check_identity() can notice it
        * being replaced under us. */
       struct stat sb;
