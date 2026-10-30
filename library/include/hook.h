@@ -649,7 +649,7 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
 /* BUMP THIS whenever any field below changes type, order, or offset.
  * The guard compares it and rebuilds the region on mismatch; forgetting to
  * bump it means a new library silently reads an old layout's bytes. */
-#define SM_NODE_LAYOUT_VERSION 6U   /* v6: - AIMD md_cooldown (v5: + sample timestamp, estimate state; three cache lines) */
+#define SM_NODE_LAYOUT_VERSION 7U   /* v7: + estimate sample period (v6: - AIMD md_cooldown; v5: + sample timestamp, estimate state; three cache lines) */
 
 /* Sample-driven estimate state (include/sm_delta.h, sm_delta_est_control).
  * Defined here so the shared region can hold it: the sample window spans
@@ -667,6 +667,7 @@ typedef struct {
   int32_t  have_est;                     /* an estimate has been taken               */
   int32_t  zero_starved;                 /* last fresh sample read 0 while starved   */
   int32_t  drop_cycles;                  /* consecutive cycles of a demand drop      */
+  int32_t  period_ms;                    /* smoothed sample period (0: not yet)      */
 
   uint32_t head;                         /* records written (ring index = head % N)  */
   uint32_t starved_mask;                 /* bit k: record k's bucket ran (about) dry */

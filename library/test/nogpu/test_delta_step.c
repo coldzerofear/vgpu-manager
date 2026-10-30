@@ -667,6 +667,70 @@ static void test_invariants(void) {
     }
   }
 
+  /* Sliding readings (sm_delta_est_control_avg): a 200 ms sample period,
+   * each reading the mean of the last second, as NVML returns for a 1 s
+   * lookback on an RTX 3090. Cycles every 100 ms, as in the tests above. */
+  {
+    int ok = 1, drain = 0;
+    const int64_t total = 1000000;
+    sm_delta_est_t st;
+    int64_t r = 0;
+
+    /* steady, starved: each window pairs the mean reading with the mean
+     * consumption over the spans its samples cover -- the same C * u / m */
+    memset(&st, 0, sizeof st);
+    int64_t est = 0;
+    for (int t = 1; t <= 30; t++) {
+      uint64_t ts = (uint64_t)(t / 2) * 200;
+      int32_t open = st.win_ms;
+      r = sm_delta_est_control_avg(&st, total, 50, 25, 25, ts, 1000, t * 100, 5000, 0, 0,
+                                   5000, DIV, 64, &drain);
+      if (open > 0 && st.win_ms == 0) {
+        est = r;   /* the cycle that closed a window */
+      }
+    }
+    int steady = st.have_est && st.period_ms == 200 && est == 5000 * 50 / 25;
+    ok &= steady;
+
+    /* a 0 with the bucket dry acts on the sample if the device read 0 too
+     * (idle because we hold it); not if another container had the GPU */
+    int acted[2];
+    for (int dev = 0; dev < 2; dev++) {
+      memset(&st, 0, sizeof st);
+      for (int t = 1; t <= 16; t++) {
+        uint64_t ts = (uint64_t)(t / 2) * 200;
+        sm_delta_est_control_avg(&st, total, 50, 25, 25, ts, 1000, t * 100, 5000, 0, 0,
+                                 5000, DIV, 64, &drain);
+      }
+      int32_t before = st.win_ms;
+      sm_delta_est_control_avg(&st, total, 50, 0, dev ? 40 : 0, 1800, 1000, 1700, 5000, 0, 0,
+                               1, DIV, 64, &drain);
+      acted[dev] = before < DELTA_EST_MIN_WINDOW_MS && st.win_ms == 0;
+    }
+    int zero = acted[0] && !acted[1];
+    ok &= zero;
+
+    /* a silence (a 3 s gap) does not stretch the period */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 10; t++) {
+      sm_delta_est_control_avg(&st, total, 50, 25, 25, (uint64_t)(t / 2) * 200, 1000, t * 100,
+                               5000, 0, 0, 5000, DIV, 64, &drain);
+    }
+    sm_delta_est_control_avg(&st, total, 50, 25, 25, 4000, 1000, 4000, 5000, 0, 0, 5000, DIV, 64,
+                             &drain);
+    int silence = st.period_ms == 200;
+    ok &= silence;
+
+    if (!ok) {
+      printf("  [FAIL] sliding estimate: steady %d (est %lld) zero-acts %d/%d silence %d (period %d) zero %d\n",
+             steady, (long long)est, acted[0], acted[1], silence, st.period_ms, zero);
+      failures++;
+    } else {
+      printf("  [ok] sliding estimate: span-paired C*u/m, zero acts only on an idle device, "
+             "silences do not stretch the period\n");
+    }
+  }
+
   /* v16 charge: grid x block threads, saturating instead of wrapping. */
   {
     int ok = sm_launch_tokens(1, 1, 1, 1, 1, 1) == 1

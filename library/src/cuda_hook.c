@@ -747,6 +747,15 @@ static int     g_delta_mark_valid[MAX_DEVICE_COUNT] = {0};
  * mark. g_delta_sample_ts is this cycle's NVML sample timestamp (us), set by
  * the watcher before the controller runs. */
 static sm_delta_est_t g_delta_est[MAX_DEVICE_COUNT];
+/* How far back the utilization query looks (lastSeenTimeStamp = now minus
+ * this). NVML averages every sample after it, so on parts sampling faster than
+ * this each reading is a sliding mean over it, which the estimate must know
+ * (sm_delta_est_control_avg). pkg/config/watcher/util_adapter.go queries the
+ * same second for the shared watcher path; change both together. */
+#define SM_UTIL_QUERY_WINDOW_MS 1000
+/* The device-wide reading (every container's) of the cycle's sample, handed
+ * to the estimate like g_delta_sample_ts. */
+static int g_delta_device_reading[MAX_DEVICE_COUNT] = {0};
 static uint64_t g_delta_sample_ts[MAX_DEVICE_COUNT] = {0};
 /* When this process last saw the device's sample timestamp change (monotonic
  * ns) and the timestamp it saw. Tracked every cycle by every process, so a
@@ -782,8 +791,11 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
   struct timeval now;
   gettimeofday(&now, NULL);
   uint32_t now_ms = (uint32_t)((uint64_t)now.tv_sec * 1000ULL + (uint64_t)now.tv_usec / 1000ULL);
-  int64_t next = sm_delta_est_control(&g_delta_est[host_index], g_total_cuda_cores[host_index],
-                                      up_limit, user_current, g_delta_sample_ts[host_index] / 1000ULL,
+  /* Every reading averages over the second the query looks back
+   * (SM_UTIL_QUERY_WINDOW_MS; the device plugin's watcher queries the same). */
+  int64_t next = sm_delta_est_control_avg(&g_delta_est[host_index], g_total_cuda_cores[host_index],
+                                      up_limit, user_current, g_delta_device_reading[host_index],
+                                      g_delta_sample_ts[host_index] / 1000ULL, SM_UTIL_QUERY_WINDOW_MS,
                                       now_ms, share, bucket, boot, consumed,
                                       g_dynamic_config.delta_increment_divisor,
                                       g_dynamic_config.delta_ramp_floor_divisor, &drain);
@@ -1506,6 +1518,7 @@ static void *utilization_watcher(void *arg) {
         top_results[host_index].sys_current = 0;
       }
       g_delta_sample_ts[host_index] = top_results[host_index].sample_ts;
+      g_delta_device_reading[host_index] = top_results[host_index].sys_current;
 
       sys_frees[host_index] = MAX_UTILIZATION - top_results[host_index].sys_current;
 
@@ -2647,7 +2660,7 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(
   }
 
   gettimeofday(&cur, NULL);
-  struct timeval temp = {1, 0};
+  struct timeval temp = {SM_UTIL_QUERY_WINDOW_MS / 1000, (SM_UTIL_QUERY_WINDOW_MS % 1000) * 1000};
   timersub(&cur, &temp, &prev);
   uint64_t microsec = (uint64_t)prev.tv_sec * 1000000ULL + prev.tv_usec;
   top_result->checktime = microsec;

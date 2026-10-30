@@ -451,14 +451,35 @@ static inline int64_t sm_delta_control(int64_t total, int up_limit, int user_cur
  * keeps reading x period inside 32 bits. */
 #define DELTA_EST_MAX_PERIOD_MS 10000
 
+/* A reading averaged over more than this many sample periods is a sliding
+ * mean (x 2 / 3: 1.5 periods), paired as such below. */
+#define DELTA_EST_SLIDING_NUM 3
+#define DELTA_EST_SLIDING_DEN 2
+
 /* now_ms: wall-clock ms of this cycle's read (CLOCK_REALTIME, the clock NVML
  * stamps samples with). sample_ts_ms: the current sample's timestamp in ms,
- * 0 when there is none. Times are compared as wrapping 32-bit differences. */
-static inline int64_t sm_delta_est_control(sm_delta_est_t *st, int64_t total, int up_limit,
-                                           int user_current, uint64_t sample_ts_ms,
-                                           uint32_t now_ms, int64_t share, int64_t bucket,
-                                           int boot, int64_t consumed, int inc_divisor,
-                                           int ramp_divisor, int *drain) {
+ * 0 when there is none. Times are compared as wrapping 32-bit differences.
+ *
+ * reading_avg_ms: the time each reading averages over, 0 when it is one sample
+ * period. NVML returns utilization since the caller's lastSeenTimeStamp,
+ * averaging every sample after it (nvml.h), and the library and its watcher
+ * query a fixed second back: a part that samples once a second reads one
+ * period, but an RTX 3090 (200 ms samples) reads a 1 s sliding mean. Paired
+ * with only the time since the previous sample, as for discrete readings, a
+ * reading still carrying the previous second's load set the share for it:
+ * 1 s throughput sd 2.4-3.2, 5 s on/off loads 35-56% in the first second of
+ * a 20% target. A sliding reading is paired with the consumption over the
+ * span it averages (see below); a discrete one takes the path it always had.
+ *
+ * device_current: the whole device's reading over the same span (this
+ * container's plus every other's), to tell "idle because we hold it" from
+ * "another container had the GPU" -- see zero_now. */
+static inline int64_t sm_delta_est_control_avg(sm_delta_est_t *st, int64_t total, int up_limit,
+                                               int user_current, int device_current,
+                                               uint64_t sample_ts_ms, int reading_avg_ms,
+                                               uint32_t now_ms, int64_t share, int64_t bucket,
+                                               int boot, int64_t consumed, int inc_divisor,
+                                               int ramp_divisor, int *drain) {
   *drain = 0;
   int demand = bucket <= 0 || (consumed >= 0 && consumed >= share - share / 8);
   if (consumed >= 0) {
@@ -485,19 +506,60 @@ static inline int64_t sm_delta_est_control(sm_delta_est_t *st, int64_t total, in
       if (period > 0) {
         st->win_reading_ms += user_current * (int32_t)period;
         st->win_ms += (int32_t)period;
+        /* Smoothed sample period, 3:1. A gap over twice the period is a
+         * silence (an idle stretch, a stalled watcher), not the part's
+         * period: counting it flipped the sliding test for a few samples. */
+        if (st->period_ms == 0) {
+          st->period_ms = (int32_t)period;
+        } else if (period <= 2 * (int64_t)st->period_ms) {
+          st->period_ms = (3 * st->period_ms + (int32_t)period + 2) / 4;
+        }
       }
     }
-    if (prev != 0 && st->win_ms >= DELTA_EST_MIN_WINDOW_MS) {
+    int32_t avg_ms = reading_avg_ms > st->period_ms ? reading_avg_ms : st->period_ms;
+    int sliding = st->period_ms > 0 &&
+                  (int64_t)avg_ms * DELTA_EST_SLIDING_DEN > (int64_t)st->period_ms * DELTA_EST_SLIDING_NUM;
+    /* A sliding reading at 0 with the bucket dry and the device idle too: the
+     * GPU idled the whole averaging span under our throttle -- no lag to wait
+     * out, so act on this sample rather than at the window's end (sim, RTX
+     * 3090 model: GEMM/elementwise 3 s alternation 22.5 -> 18.5). Not when
+     * only this container reads 0: under time slicing another container may
+     * have held the GPU, and acting then let this one grab it for a second
+     * (RTX 3090: a soft limit then judged the device exclusive). A discrete 0
+     * already acts once per window, as it always did. */
+    int zero_now = sliding && prev != 0 && st->win_ms > 0 && user_current < DELTA_EST_MIN_READING &&
+                   device_current < DELTA_EST_MIN_READING &&
+                   st->head > 0 && ((st->starved_mask >> ((st->head - 1) % SM_DELTA_EST_RING)) & 1u);
+    if (prev != 0 && (zero_now || st->win_ms >= DELTA_EST_MIN_WINDOW_MS)) {
       uint64_t from = st->win_ts;
       int reading = st->win_reading_ms / st->win_ms;
+      int32_t win = st->win_ms;
       st->win_ts = sample_ts_ms;
       st->win_reading_ms = 0;
       st->win_ms = 0;
       /* Weighted mean of the records over (from, sample]; weights in
-       * thousandths of a cycle. */
+       * thousandths of a cycle. A sliding reading instead covers, sample by
+       * sample, (t_j - avg_ms, t_j] for the window's samples t_j = sample -
+       * j periods: the window's mean reading is paired with the mean of the
+       * consumption over each of those spans. Measured on the RTX 3090 model
+       * (sim, 1 s sliding over 200 ms samples): 1 s sd 1.5 -> 0.2, GEMM 1 s
+       * on/off 26.1 -> 7.1, GEMM/elementwise 3 s alternation 23.5 -> 18.2;
+       * the 1 s-sample model unchanged. */
       __int128 num = 0, starved_num = 0;
       int64_t den = 0, starved_den = 0, active_den = 0;
+      int32_t spans = 1;
+      if (sliding) {
+        spans = (win + st->period_ms / 2) / st->period_ms;
+        if (spans < 1) {
+          spans = 1;
+        }
+      }
+      for (int32_t j = 0; j < spans; j++) {
       int32_t end = (int32_t)((uint32_t)sample_ts_ms - (uint32_t)from);
+      if (sliding) {
+        from = sample_ts_ms - (uint64_t)j * (uint64_t)st->period_ms - (uint64_t)avg_ms;
+        end = avg_ms;
+      }
       for (uint32_t i = 0; i + 1 < SM_DELTA_EST_RING && i + 1 < st->head; i++) {
         uint32_t k = (st->head - 1 - i) % SM_DELTA_EST_RING;
         uint32_t kp = (st->head - 2 - i) % SM_DELTA_EST_RING;
@@ -523,6 +585,7 @@ static inline int64_t sm_delta_est_control(sm_delta_est_t *st, int64_t total, in
           starved_num += (__int128)st->consumed[k] * w;
           starved_den += w;
         }
+      }
       }
       /* Rounded, not truncated: a light load consumes a handful of tokens a
        * cycle, where truncation halved share at a 99% target (2 * 99/100 -> 1). */
@@ -599,6 +662,17 @@ static inline int64_t sm_delta_est_control(sm_delta_est_t *st, int64_t total, in
   }
   return sm_delta_control(total, up_limit, user_current, share, bucket, boot, consumed,
                           inc_divisor, ramp_divisor, drain);
+}
+
+/* Discrete readings: each sample averages over its own period. */
+static inline int64_t sm_delta_est_control(sm_delta_est_t *st, int64_t total, int up_limit,
+                                           int user_current, uint64_t sample_ts_ms,
+                                           uint32_t now_ms, int64_t share, int64_t bucket,
+                                           int boot, int64_t consumed, int inc_divisor,
+                                           int ramp_divisor, int *drain) {
+  return sm_delta_est_control_avg(st, total, up_limit, user_current, user_current, sample_ts_ms, 0, now_ms,
+                                  share, bucket, boot, consumed, inc_divisor, ramp_divisor,
+                                  drain);
 }
 
 /* The bucket holds at most this many cycles of share (at least one token):
