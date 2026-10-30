@@ -13,8 +13,9 @@
  *      created through the 3D descriptor -- was sized at 0 bytes and skipped
  *      the budget check entirely.
  *
- * The expected byte sizes below are taken from the worked descriptor examples
- * in NVIDIA's cuda.h, quoted in array_size.h, NOT from another implementation.
+ * The expected byte sizes below come from NVIDIA's cuda.h -- its two worked
+ * descriptor examples, quoted in array_size.h -- or from a measured driver run
+ * (docs/cuda_array_size_measurements.md). Never from another implementation.
  * Needs no GPU, no driver and no CUDA toolkit: the arithmetic is pure.
  */
 #include <stdint.h>
@@ -77,8 +78,9 @@ static void test_format_bytes(void) {
 
   CHECK(vgpu_array_format_is_known(CU_AD_FORMAT_FLOAT), "float known");
   CHECK(vgpu_array_format_is_known(CU_AD_FORMAT_BC7_UNORM), "bc7 measured");
-  /* Still unmeasured: the driver refused both, so there is no number to use. */
-  CHECK(!vgpu_array_format_is_known(CU_AD_FORMAT_BC6H_UF16), "bc6h not known");
+  CHECK(vgpu_array_format_is_known(CU_AD_FORMAT_BC6H_UF16), "bc6h measured");
+  /* Still unmeasured: the driver refuses every planar YUV format, so there is
+   * no number to use. */
   CHECK(!vgpu_array_format_is_known(CU_AD_FORMAT_NV12), "nv12 not known");
 }
 
@@ -195,20 +197,24 @@ static void test_overflow(void) {
 
 /* An unclassified format is charged the documented upper bound, never zero and
  * never a rejection: the hook has to stay usable for formats we have not
- * measured. BC6H and the planar YUV range are the ones still in that bucket --
- * the driver refused both on the probed hardware, so there is no number for
- * them (docs/cuda_array_size_measurements.md). */
+ * measured. The planar YUV range is what is left in that bucket -- the driver
+ * refuses all 30 of them, so there is no number for any
+ * (docs/cuda_array_size_measurements.md). */
 static void test_unknown_format_is_conservative(void) {
-  size_t bc6h = 0, nv12 = 0;
+  size_t nv12 = 0, widest = 0;
   CUDA_ARRAY_DESCRIPTOR d;
 
-  d = desc2d(1024, 1024, CU_AD_FORMAT_BC6H_UF16, 1);
-  CHECK(vgpu_array_size(&d, &bc6h), "BC6H must still be sizable, not rejected");
   d = desc2d(1024, 1024, CU_AD_FORMAT_NV12, 1);
-  CHECK(vgpu_array_size(&d, &nv12), "NV12 must still be sizable, not rejected");
-  CHECK(bc6h != 0 && nv12 != 0, "unknown formats must not be free");
-  CHECK(!vgpu_array_format_is_known(CU_AD_FORMAT_BC6H_UF16), "BC6H unmeasured");
+  CHECK(vgpu_array_size(&d, &nv12) && nv12 != 0,
+        "NV12 must still be sizable and not free");
   CHECK(!vgpu_array_format_is_known(CU_AD_FORMAT_NV12), "NV12 unmeasured");
+
+  /* Not under the widest element cuda.h defines (4 x 16-bit = 8 bytes), so a
+   * format that lands on the fallback cannot be under-charged. Y416 is one of
+   * the refused YUV formats and is exactly that 8-byte element. */
+  d = desc2d(1024, 1024, CU_AD_FORMAT_Y416, 1);
+  CHECK(vgpu_array_size(&d, &widest) && widest >= 1024 * 1024 * 8,
+        "fallback %zu must cover an 8-byte element", widest);
 }
 
 /* The normalised families, against sizes measured on a real driver at
@@ -296,14 +302,19 @@ static void test_implied_channels_cannot_be_underpaid(void) {
   }
 }
 
-/* The shapes cuda.h defines through Flags, measured on the driver:
- *   cubemap FLOAT ch4 64x64x6     -> 393216, exactly Depth x the 2D size
- *   cubemap layered FLOAT 64x64x12 -> 786432, likewise
+/* The shapes cuda.h defines through Flags, at geometries measured on the
+ * driver (docs/cuda_array_size_measurements.md):
+ *   cubemap         FLOAT ch4 64x64x6  -> driver 393216, exactly 6 x the face
+ *   cubemap layered FLOAT ch4 64x64x12 -> driver 786432, exactly 12 x
  * Depth is the face/layer count and multiplies as-is, so Flags needs no case.
  *
- * 1D layered is in here as the one shape the driver pads heavily (8 layers of
- * 2048 bytes measured 131072, i.e. the layer count rounded to 64): the check is
- * that we stay a LOWER bound there, not that we reproduce the padding. */
+ * The other two are shapes the driver pads, where the check is that we stay a
+ * LOWER bound rather than reproduce the padding:
+ *   1D layered INT8 ch1 2048x8 -> driver 131072, we charge 16384 (the driver
+ *     inflates a 1D array's per-layer stride; it is NOT the layer count being
+ *     rounded, since 16384x4 layers measured 524288, not 64 layers' worth)
+ *   3D INT8 ch4 512x512x6      -> driver 8388608, we charge 6291456 (Depth
+ *     rounded up to the next power of two, 6 -> 8 slices) */
 static void test_measured_flag_shapes(void) {
   size_t got = 0;
   CUDA_ARRAY3D_DESCRIPTOR d;
@@ -317,8 +328,12 @@ static void test_measured_flag_shapes(void) {
         "cubemap layered = %zu want 786432", got);
 
   d = desc3d(2048, 0, 8, CU_AD_FORMAT_UNSIGNED_INT8, 1, CUDA_ARRAY3D_LAYERED);
-  CHECK(vgpu_array3d_size(&d, &got) && got == 16384 && got <= 131072,
-        "1D layered = %zu, want 16384 and never above the measured 131072", got);
+  CHECK(vgpu_array3d_size(&d, &got) && got == 16384 && got < 131072,
+        "1D layered = %zu, want 16384 and under the driver's 131072", got);
+
+  d = desc3d(512, 512, 6, CU_AD_FORMAT_UNSIGNED_INT8, 4, 0);
+  CHECK(vgpu_array3d_size(&d, &got) && got == 6291456 && got < 8388608,
+        "3D D=6 = %zu, want 6291456 and under the driver's 8388608", got);
 }
 
 /* Block rounding must not wrap. (extent + 3) / 4 does for an extent within 3
@@ -365,6 +380,11 @@ static void test_measured_block_compressed(void) {
       {CU_AD_FORMAT_BC5_SNORM, 2, 524288},
       {CU_AD_FORMAT_BC7_UNORM, 4, 524288},
       {CU_AD_FORMAT_BC7_UNORM_SRGB, 4, 524288},
+      /* BC6H's 16 bytes per block comes from the GL measurement rather than
+       * the CUDA sweep (cuArray3DCreate refuses the format); the channel count
+       * below is therefore the one BC7 needs, not one the driver confirmed. */
+      {CU_AD_FORMAT_BC6H_UF16, 4, 524288},
+      {CU_AD_FORMAT_BC6H_SF16, 4, 524288},
   };
   size_t got = 0, at4096 = 0, at4097 = 0, at4100 = 0;
   CUDA_ARRAY_DESCRIPTOR d;

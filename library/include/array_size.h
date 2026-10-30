@@ -23,7 +23,8 @@ limitations under the License.
  * header deliberately pulls in nothing but the CUDA descriptor types -- no
  * logging, no driver, no shared region -- which is what makes it testable.
  *
- * EVERY RULE BELOW IS QUOTED FROM NVIDIA's cuda.h, not inferred:
+ * EVERY RULE BELOW IS EITHER QUOTED FROM NVIDIA's cuda.h OR MEASURED AGAINST A
+ * REAL DRIVER (docs/cuda_array_size_measurements.md). None of it is inferred:
  *
  * ELEMENT SIZE IS IN BYTES. The old table here returned 8/16/32, i.e. the
  * format's width in BITS, while the result is compared against a byte-
@@ -58,16 +59,21 @@ limitations under the License.
  * CUDA_ARRAY3D_LAYERED makes Depth "the number of layers, not the depth of a
  * 3D array", and CUDA_ARRAY3D_CUBEMAP requires Depth to be six (or a multiple
  * of six when layered). Layers and cube faces are each a full slice, so the
- * product is the total either way and Flags needs no special case.
+ * product is the total either way and Flags needs no special case -- measured:
+ * a cubemap costs exactly six times its 2D face, a layered cubemap twelve.
  *
  * NUMCHANNELS IS 1, 2 OR 4 -- "it may be 1, 2, or 4". Anything else is a
  * descriptor the driver rejects.
  *
- * WHAT THESE FUNCTIONS DO NOT MODEL: the driver is free to pad rows and tile
- * the allocation, so the product below is a LOWER bound on what a CUDA array
- * actually occupies. That is the right direction for a budget check (it never
- * invents usage), and the residue is picked up anyway -- the budget is checked
- * against live per-process usage read back from NVML, not against a ledger we
+ * WHAT THESE FUNCTIONS DO NOT MODEL: the driver pads for its own tiling and
+ * allocator -- rows to 64 bytes, 2D heights to 128 rows, a 3D array's Depth up
+ * to the next power of two, a 1D array's per-layer stride by 8x, everything to
+ * a 64 KiB granule -- so the product below is a LOWER bound on what a CUDA
+ * array actually occupies. Those are architecture-dependent numbers and
+ * deliberately stay out (docs/cuda_array_size_measurements.md explains the
+ * sourcing rule). The lower bound is the right direction for a budget check
+ * (it never invents usage), and the residue is picked up anyway -- the budget
+ * is checked against live per-process usage read back from NVML, not a ledger we
  * maintain, so the driver's own accounting corrects any estimate on the very
  * next allocation. The same property is why an unsizable descriptor can be
  * forwarded unchecked: at worst one request slips through, and nothing
@@ -85,9 +91,8 @@ limitations under the License.
 /* Element size used for a format this table does not know.
  *
  * Deliberately an UPPER bound rather than a rejection or a zero: NVIDIA keeps
- * adding formats (cuda.h 13.4 defines ~50, of which the eight classic ones
- * below are the only ones whose element size is stated unambiguously), and
- * neither failing the allocation nor letting it through unmetered is
+ * adding formats (cuda.h 13.4 defines 65, of which 35 are classified below),
+ * and neither failing the allocation nor letting it through unmetered is
  * acceptable for one we have not classified yet.
  *
  *   - Rejecting is what HAMi-core PR #373 does (its table is 33 entries wide
@@ -101,17 +106,22 @@ limitations under the License.
  *
  * 8 bytes is the widest element among every format cuda.h 13.4 defines
  * (UNORM_INT16X4 / SNORM_INT16X4 / Y416 are 4 x 16-bit = 8 bytes), so no
- * classified format is ever under-charged.
+ * classified format is ever under-charged. It is a per-CHANNEL figure, so the
+ * NumChannels further down multiplies it to as much as 32 bytes per texel --
+ * more margin than any element needs, kept because for a format that does not
+ * exist yet there is nothing to say whether its NumChannels multiplies.
  *
  * WHAT STILL LANDS HERE, after the measurements below:
- *   - BC6H_UF16 / BC6H_SF16. Block-compressed like their siblings, but the
- *     driver REFUSED them on the probed hardware, so there is no measurement
- *     and the 16-bytes-per-block their siblings use is an inference, not a
- *     number. Left conservative on purpose.
- *   - the 32 planar/semi-planar/packed YUV formats. Also refused -- 24
- *     attempts each, every NumChannels and shape -- so they cannot reach these
- *     hooks at all on that driver; they arrive through external-memory import,
- *     which allocates nothing of ours.
+ *   - the 30 planar/semi-planar/packed YUV formats. The driver refused every
+ *     one -- 24 attempts each, every NumChannels and shape, on both probed
+ *     architectures -- so they cannot reach these hooks at all; they arrive
+ *     through external-memory import, which allocates nothing of ours. If some
+ *     future driver does accept one, 8 bytes per channel OVER-charges it (NV12
+ *     is 1.5 bytes per texel), which would OOM a workload that fits. We still
+ *     do not guess: a semi-planar descriptor's Height may or may not cover the
+ *     chroma planes, and that is unknowable without a driver that accepts it.
+ *     Charge the bound, log the format (vgpu_array_format_is_known), measure it
+ *     the day one shows up.
  *   - whatever NVIDIA adds next.
  */
 #define VGPU_ARRAY_UNKNOWN_FORMAT_BYTES ((size_t)8)
@@ -123,7 +133,14 @@ limitations under the License.
  * multiplied in on this path -- the driver confirmed it (BC1 with the
  * NumChannels=4 it demands still costs 8 bytes per block, not 32).
  *
- * BC6H is absent deliberately: the driver refused it, so there is no number.
+ * BC6H is in the table on a measurement taken through OpenGL rather than CUDA:
+ * cuArray3DCreate refuses BC6H on every shape, so the CUDA sweep cannot size
+ * it, but GL_TEXTURE_COMPRESSED_IMAGE_SIZE on the same GPU and driver reports
+ * 16 bytes per block for both halves of it. That path was calibrated first --
+ * it returns 8/8/16/16/16/16 for BC1/BC4/BC2/BC3/BC5/BC7, matching the CUDA
+ * numbers exactly. Leaving BC6H out would NOT have been the safe option: it
+ * would fall through to VGPU_ARRAY_UNKNOWN_FORMAT_BYTES and be charged 8 bytes
+ * per channel, i.e. 8x to 32x its real cost, the false-OOM direction.
  */
 static inline size_t vgpu_array_block_bytes(int format) {
   switch (format) {
@@ -140,6 +157,8 @@ static inline size_t vgpu_array_block_bytes(int format) {
   case CU_AD_FORMAT_BC3_UNORM_SRGB:
   case CU_AD_FORMAT_BC5_UNORM:
   case CU_AD_FORMAT_BC5_SNORM:
+  case CU_AD_FORMAT_BC6H_UF16:
+  case CU_AD_FORMAT_BC6H_SF16:
   case CU_AD_FORMAT_BC7_UNORM:
   case CU_AD_FORMAT_BC7_UNORM_SRGB:
     return 16;
@@ -375,11 +394,13 @@ static inline int vgpu_array_size(const CUDA_ARRAY_DESCRIPTOR *desc, size_t *out
 /* cuArray3DCreate / cuArray3DCreate_v2 / cuMipmappedArrayCreate descriptors
  * (1D, 2D, 3D, layered or cubemap).
  *
- * For a mipmapped array this is the base level only. A full mip chain adds
- * roughly a third on top, which is left out on purpose: the exact tail depends
- * on numMipmapLevels and on the driver's per-level rounding, and guessing it
- * would trade a bounded under-estimate for an unbounded one in the other
- * direction. The NVML read-back covers the difference (see the file comment).
+ * For a mipmapped array this is the base level only, which is left out of the
+ * charge on purpose: the tail depends on numMipmapLevels and on the driver's
+ * per-level rounding, and guessing it would trade a bounded under-estimate for
+ * an unbounded over-estimate. Bounded is measured, not assumed -- a full chain
+ * saturates at 1.375x the base level and never grows past it, however many
+ * levels are asked for (docs/cuda_array_size_measurements.md). The NVML
+ * read-back covers the difference (see the file comment).
  */
 static inline int vgpu_array3d_size(const CUDA_ARRAY3D_DESCRIPTOR *desc, size_t *out) {
   if (desc == NULL) {
