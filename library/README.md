@@ -55,12 +55,14 @@ Using [LUPINE](https://github.com/lupinemachines/lupine) to unlock remote GPU vi
 * VMEMORY_NODE_ENABLED: Enable virtual memory node tracing
 * Core limiting runs one controller, delta (include/sm_delta.h): a sample-driven estimate of the share
   from the tokens the container consumed per utilization point, validated on real GPUs and in the
-  no-GPU campaigns (docs/sm_delta_validation.md). The former aimd/auto controllers and their
-  CUDA_SM_CONTROLLER / CUDA_SM_AIMD_* variables were removed; those variables are now ignored.
+  no-GPU campaigns (docs/sm_delta_validation.md).
 * CUDA_SM_AUTO_DEBOUNCE_CYCLES: watcher cycles an exclusivity change must persist before the soft-limit
-  burst gate acts on it - default 10 (name kept from the removed auto mode)
+  burst gate acts on it - default 10
 * CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD: SM utilization (percent) of processes outside the container
-  above which the device counts as shared - default 1 (name kept likewise)
+  above which the device counts as shared - default 1
+* CUDA_SM_USAGE_THRESHOLD: soft limit only - free-headroom percent the elastic limit compares against
+  every ~3 s: above it the limit climbs toward the soft limit, below it steps back toward the hard limit -
+  default 5
 * CUDA_SM_DELTA_INCREMENT_DIVISOR: delta seed divisor R (min step = pool*5/R). Default 1310720; the
   granularity knob, not a speed knob -- see include/sm_delta.h
 * CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR: delta emergency cut floor divisor, active only when util exceeds
