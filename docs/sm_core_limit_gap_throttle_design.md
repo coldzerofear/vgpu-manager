@@ -3,6 +3,7 @@
 > 作用范围：`library/`（LD_PRELOAD 运行时库）。
 > 目标：修复"大 kernel 绕过令牌桶导致算力切分失效"的问题，并与现有 `soft_core` 弹性模式协同工作。
 > 状态：设计稿（默认关闭，环境变量灰度开启）。
+> **2026-10-31：AIMD / auto 控制器已彻底移除，delta 是唯一的核心限流算法**（`CUDA_SM_CONTROLLER`、`CUDA_SM_AIMD_*` 不再读取；共享区 `md_cooldown` 删除；sm_node 最终布局 v5 = main 的 v4 + 1）。下文涉及 AIMD/auto 的内容为历史记录。
 
 ---
 
@@ -18,13 +19,13 @@ ret = REAL_LAUNCH(...);                 // 真正下发 kernel
 ```
 
 - [`rate_limiter()`](../library/src/cuda_hook.c#L308)：把 `g_cur_cuda_cores[]` 减去 `grids`，**只有当桶里令牌已为负时才 `nanosleep` 阻塞**（[line 322](../library/src/cuda_hook.c#L322)）。
-- [`utilization_watcher`](../library/src/cuda_hook.c#L380)：后台线程，按约 80ms/设备 的节奏用 NVML 采样真实利用率，经 [`delta()`](../library/src/cuda_hook.c#L332) 反馈控制后用 `change_token()` 补充/回收令牌。
+- [`utilization_watcher`](../library/src/cuda_hook.c#L380)：后台线程，按约 100ms/设备 的节奏用 NVML 采样真实利用率，经 [`delta()`](../library/src/cuda_hook.c#L332) 反馈控制后用 `change_token()` 补充/回收令牌。
 
 ### 1.2 核心 Bug：大 kernel 绕过节流
 
 #### 1.2.1 直接症状
 
-`rate_limiter` 是"发射后不管"。一个大 kernel 只要进来时桶里令牌 ≥ 0,就**永远不会触发阻塞分支**,扣完不管多负也立即放行,在 GPU 上想跑多久跑多久。watcher 要 ~80ms 才采样一次,对单个大的、带同步的 kernel 来说太慢。
+`rate_limiter` 是"发射后不管"。一个大 kernel 只要进来时桶里令牌 ≥ 0,就**永远不会触发阻塞分支**,扣完不管多负也立即放行,在 GPU 上想跑多久跑多久。watcher 要 ~100ms 才采样一次,对单个大的、带同步的 kernel 来说太慢。
 
 典型失效场景:`N=8192` 矩阵乘 + `cuCtxSynchronize` 循环 —— NVML/令牌桶模式守不住目标算力占比,实测 SM 利用率冲到 ~100%。
 
@@ -50,7 +51,7 @@ CAS(&g_cur_cuda_cores[host_index], before, after);    // 即使 after 极负也�
 
 - 进来时 `before = 7M ≥ 0` → 不睡
 - 扣完 `after = 7M − 524288 = 6.5M`,CAS 写回,**立即返回**
-- kernel 上 GPU 跑 ~500ms,期间 watcher 周期(~80ms × 6 次)早把令牌补回去了
+- kernel 上 GPU 跑 ~500ms,期间 watcher 周期(~100ms × 5 次)早把令牌补回去了
 - 下一次迭代再来:`before` 又是 ~7M,又不睡 —— **永远不被节流**
 
 #### 1.2.4 哪些模式会被绕过 / 哪些不会
@@ -61,7 +62,7 @@ CAS(&g_cur_cuda_cores[host_index], before, after);    // 即使 after 极负也�
 | **连续大量小 kernel**(BATCH/流式推理) | ✅ 正常工作 | 桶被多个小 kernel 逐渐扣到负,后续 kernel 排队 nanosleep |
 | **极大 kernel(grids > total)** | ❌ 自身不被 | 同上;自己只付一次 CAS,欠的债"由下个调用者偿还" |
 
-**触发绕过的精确条件**:`g_cur_cuda_cores[host_index] >= 0 && 启动间隔 ≥ watcher 补满所需时间(~80ms)`。这正是同步/等待型工作负载的特征,也正是 GAP 路径精确覆盖的区间。
+**触发绕过的精确条件**:`g_cur_cuda_cores[host_index] >= 0 && 启动间隔 ≥ watcher 补满所需时间(~100ms)`。这正是同步/等待型工作负载的特征,也正是 GAP 路径精确覆盖的区间。
 
 ---
 
@@ -213,7 +214,7 @@ static int gap_effective_dc(int host_index) {
 }
 ```
 
-> **内存可见性**：`up_limits[]` 原为 watcher 线程私有,本设计首次引入跨线程读(launch 线程)。因此把它从 `static int` 改为 **`static volatile int`**,与 `g_cur_cuda_cores`(同样被 watcher 写、launch 线程读)保持一致 —— `volatile` 强制每次从内存加载(不被寄存器缓存),写方仍是单一 watcher 线程。这是对一个对齐 `int` 的无锁读:在 x86_64/aarch64 上加载原子(无撕裂),且目标值滞后一个 watcher 周期(~80ms)对启发式节流无害。`volatile` 不提供内存序,但此处只读单个独立标量,无需序保证。
+> **内存可见性**：`up_limits[]` 原为 watcher 线程私有,本设计首次引入跨线程读(launch 线程)。因此把它从 `static int` 改为 **`static volatile int`**,与 `g_cur_cuda_cores`(同样被 watcher 写、launch 线程读)保持一致 —— `volatile` 强制每次从内存加载(不被寄存器缓存),写方仍是单一 watcher 线程。这是对一个对齐 `int` 的无锁读:在 x86_64/aarch64 上加载原子(无撕裂),且目标值滞后一个 watcher 周期(~100ms)对启发式节流无害。`volatile` 不提供内存序,但此处只读单个独立标量,无需序保证。
 
 ### 5.4 gap_begin / gap_end
 
@@ -459,7 +460,7 @@ GAP 路径在跨进程之间**没有共享可变状态**(events、`g_gap_dc`、`
 
 ## 11. 后续路线
 
-- **✅ 已落地 — AIMD watcher 控制器**(详见 [sm_controller_aimd.md](sm_controller_aimd.md)):与 GAP 路径**正交、互补**。曾因单 Pod 锯齿问题移除,后因 delta 的 sm² 增量缺陷在大 SM 卡上限不住核心而恢复(HAMi-core #274 同源,见该文档沿革节)。`CUDA_SM_CONTROLLER=aimd` 启用,默认 `delta`(stock)。
+- **✅ 已落地 — AIMD watcher 控制器**(已于 2026-10-31 移除，设计与沿革见 git 历史中的 docs/sm_controller_aimd.md):与 GAP 路径**正交、互补**。曾因单 Pod 锯齿问题移除,后因 delta 的 sm² 增量缺陷在大 SM 卡上限不住核心而恢复(HAMi-core #274 同源,见该文档沿革节)。`CUDA_SM_CONTROLLER=aimd` 启用,默认 `delta`(stock)。
 - **P1 — BATCH 路径**：对密集小 kernel 按批次摊销 event 计时，替代纯令牌桶，提升小 kernel 场景的占比精度。
 - **P2 — 多进程协同**：复用已有的 `device_util_t` mmap 共享内存 + `F_SETLKW` 字节范围锁（参见 §8.5），各进程发布 `(目标占比, 最近忙时)` 到共享账本，据聚合需求各算 sleep，使同卡合计 duty cycle 收敛到目标。注意：这是**账本协同**而非整卡互斥（§8.3）。
 - **P3 — 反馈融合**：将 GAP 实测的真实 GPU 用时回灌给 watcher，减少其对 NVML 采样的依赖与抖动。

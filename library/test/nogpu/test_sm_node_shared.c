@@ -460,7 +460,7 @@ int main(void) {
   printf("  [0] ABI: dev=%zuB region=%zuB devices@%zu file=%d -> %s\n",
          sizeof(sm_node_dev_t), sizeof(sm_node_region_t),
          offsetof(sm_node_region_t, devices), SM_NODE_FILE_SIZE,
-         (sizeof(sm_node_dev_t) == CACHELINE_SIZE &&
+         (sizeof(sm_node_dev_t) == 3 * CACHELINE_SIZE &&
           sizeof(sm_node_region_t) <= SM_NODE_FILE_SIZE) ? "PASS" : "FAIL");
 
   char path[] = "/tmp/sm_node_test_XXXXXX";

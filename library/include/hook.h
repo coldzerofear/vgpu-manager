@@ -262,7 +262,12 @@ void relax_shared_dir_mode(const char *dir_path);
 #define MILLISEC (1000UL * 1000UL)
 
 #define TIME_TICK (10)
-#define FACTOR (32)
+/* SM token pool = threads/SM x SMs x FACTOR. 256 since launches are charged
+ * their thread count (sm_launch_tokens, include/sm_delta.h); the controller's
+ * constants are fractions of the pool, so FACTOR only sets where real
+ * workloads land relative to it -- chosen against the kernel-mix model
+ * (docs/sm_delta_validation.md section 11). Was 32 under grid charging. */
+#define FACTOR (256)
 #define MAX_UTILIZATION (100)
 
 #define GET_VALID_VALUE(x) (((x) >= 0 && (x) <= 100) ? (x) : 0)
@@ -446,41 +451,26 @@ extern resource_data_t *g_vgpu_config;
  *
  * usage_threshold:    avg-free-headroom threshold for soft-mode up_limit
  *                     periodic adjust. >= 0; env CUDA_SM_USAGE_THRESHOLD.
- * sm_controller_kind: 0=delta (stock), 1=aimd, 2=auto.
- * aimd_md_divisor:    AIMD MD factor as a double so users can pick 1.5
- *                     for a softer cut than 2 or 3. Clamped >= 1.01 at
- *                     load time so we never accidentally /1 (no-op) or
- *                     /<=0 (UB).
- * aimd_eff_ratio:     parts-per-thousand, eff_limit = up * x / 1000.
- * aimd_ai_base_div:   AI step base divisor.
- * aimd_deadband_ratio: parts-per-thousand, deadband lower edge.
- * aimd_md_cooldown_cycles: post-MD watcher-cycle cooldown (0 disables).
- * auto_debounce_cycles: N consecutive observations to flip exclusivity FSM.
- * auto_external_util_threshold: external util percent above which the
- *                     device is considered "shared with other Pods".
+ * excl_debounce_cycles: N consecutive observations to flip the exclusivity
+ *                     FSM; env CUDA_SM_AUTO_DEBOUNCE_CYCLES (name kept from the
+ *                     removed auto controller, so existing settings still apply).
+ * excl_external_util_threshold: external util percent above which the
+ *                     device is considered "shared with other Pods"; env
+ *                     CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD (name kept likewise).
  * delta_increment_divisor: seed divisor -- delta's minimum step is
  *                     total*MIN_INCREMENT/R, its granularity. 1310720 default;
  *                     see include/sm_delta.h.
- * delta_ramp_floor_divisor: delta()'s grow/cut step is floored at
- *                     g_total*diff/(up_limit*N); N sets the bulk-ramp length in
- *                     watcher cycles (~N cycles, SM-independent). Smaller = faster
- *                     ramp / coarser near-limit tracking on tiny slices. Default
- *                     64. N <= 0 disables the floor (delta reverts to its raw
- *                     sm^2-scaled step); delta() guards the division on N > 0, so
- *                     a non-positive value is not loaded-clamped.
+ * delta_ramp_floor_divisor: emergency cut floor -- when util is over twice
+ *                     the target, the cut is floored at g_total*diff/(u*N);
+ *                     grow is never floored. Default 64. N <= 0 disables the
+ *                     floor; delta() guards the division on N > 0, so a
+ *                     non-positive value is not load-clamped.
  */
 typedef struct {
   /* Preserved: was already in this struct in earlier versions. */
   int    usage_threshold;
-  /* Appended for V2.1/P1/P2: consolidates 8 prior file-static globals. */
-  int    sm_controller_kind;
-  double aimd_md_divisor;
-  int    aimd_eff_ratio;
-  int    aimd_ai_base_div;
-  int    aimd_deadband_ratio;
-  int    aimd_md_cooldown_cycles;
-  int    auto_debounce_cycles;
-  int    auto_external_util_threshold;
+  int    excl_debounce_cycles;
+  int    excl_external_util_threshold;
   int    delta_increment_divisor;
   int    delta_ramp_floor_divisor;
   /* APPENDED (see the field-ordering note above): container-wide shared token
@@ -650,14 +640,39 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
  * sizeof(sm_node_region_t): a later version may grow the struct without
  * changing the file size, so the region is never resized, so an older process
  * still holding a mapping can never have its tail fall past EOF (which would
- * be SIGBUS on access). Current use is 128 + 16*128 = 2176B. */
+ * be SIGBUS on access). Current use is 128 + 16*384 = 6272B. */
 #define SM_NODE_FILE_SIZE 8192
 
 #define SM_NODE_MAGIC          0x534D4E44U   /* "SMND" */
 /* BUMP THIS whenever any field below changes type, order, or offset.
  * The guard compares it and rebuilds the region on mismatch; forgetting to
  * bump it means a new library silently reads an old layout's bytes. */
-#define SM_NODE_LAYOUT_VERSION 4U   /* v4: + delta_mark / delta_mark_valid (observed consumption) */
+#define SM_NODE_LAYOUT_VERSION 5U   /* v5: + sample timestamp, sample-driven estimate state on its own two lines; - AIMD md_cooldown, - total_cuda_cores */
+
+/* Sample-driven estimate state (include/sm_delta.h, sm_delta_est_control_avg).
+ * Defined here so the shared region can hold it: the sample window spans
+ * cycles won by different processes, so it is controller state like the mark.
+ * The ring keeps the last SM_DELTA_EST_RING cycles' consumption with the
+ * wall-clock millisecond each was read at, so a sample is paired with exactly
+ * the cycles its timestamps cover, however late the driver publishes it. */
+#define SM_DELTA_EST_RING 16
+typedef struct {
+  uint64_t last_ts;                      /* ms of the last sample seen (0: none)     */
+  uint64_t win_ts;                       /* ms the open estimate window starts at    */
+  int32_t  win_reading_ms;               /* sum of reading x period over the window  */
+  int32_t  win_ms;                       /* sampled time in the window               */
+  int64_t  ref_consumed;                 /* per-cycle consumption the estimate saw   */
+  int32_t  have_est;                     /* an estimate has been taken               */
+  int32_t  zero_starved;                 /* last fresh sample read 0 while starved   */
+  int32_t  drop_cycles;                  /* consecutive cycles of a demand drop      */
+  int32_t  period_ms;                    /* smoothed sample period (0: not yet)      */
+  int32_t  long_gaps;                    /* consecutive gaps over twice period_ms    */
+
+  uint32_t head;                         /* records written (ring index = head % N)  */
+  uint32_t starved_mask;                 /* bit k: record k's bucket ran (about) dry */
+  uint32_t t_ms[SM_DELTA_EST_RING];      /* wall-clock ms the record was read at     */
+  int64_t  consumed[SM_DELTA_EST_RING];  /* tokens consumed in the cycle it closes   */
+} sm_delta_est_t;
 
 /* No volatile, no _Atomic. volatile provides no concurrency guarantee (today's
  * correctness comes entirely from the CAS macro), and _Atomic risks a
@@ -669,12 +684,11 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
 typedef struct {
   /* Hot: CAS'd by every launching thread in every process. */
   int64_t cur_cuda_cores;       /* the token bucket itself                  */
-  int64_t total_cuda_cores;     /* thread*sm*FACTOR; bucket ceiling         */
   int64_t last_refill_ns;       /* refill election stamp, CAS'd per cycle   */
   int64_t share;                /* was shares[]                             */
   /* Monotonic stamp of the last published utilization sample, written LAST
    * (release) by the sampling owner so a reader that acquire-loads it knows
-   * the four s_* fields below are complete. Also the staleness signal: if this
+   * the s_* fields below are complete. Also the staleness signal: if this
    * falls too far behind, the owner is alive but not sampling (hung in NVML,
    * say) and a standby resamples for itself rather than trusting it. */
   int64_t sample_published_ns;
@@ -688,11 +702,6 @@ typedef struct {
   int32_t is_cnt;               /* was is[]                                 */
   int32_t avg_sys_free;         /* was avg_sys_frees[]                      */
   int32_t pre_external_proc;    /* was pre_external_process_nums[]          */
-  int32_t md_cooldown;          /* was g_aimd_md_cooldown[] -- without this
-                                 * AIMD re-fires MD every cycle and cuts
-                                 * share by md_divisor^N ("MD avalanche"),
-                                 * which is the exact thing the cooldown was
-                                 * introduced to prevent.                   */
   int32_t excl_debounced;       /* was g_is_exclusive_debounced[]      ┐    */
   int32_t excl_streak;          /* was g_exclusive_pending_streak[]    │FSM */
   int32_t lost_excl_pending;    /* was g_lost_exclusivity_pending[]    ┘    */
@@ -741,7 +750,11 @@ typedef struct {
    * first refill after a rebuild. */
   int64_t delta_mark;
   int32_t delta_mark_valid;
-  uint8_t _pad[CACHELINE_SIZE - 116];
+  /* NVML timestamp of the published sample: a standby sees a fresh sample
+   * exactly when the owner did (sm_delta_est_control_avg acts once per sample). */
+  uint64_t s_sample_ts;
+  /* Its own two lines: the winner rewrites it whole every cycle. */
+  sm_delta_est_t est __attribute__((aligned(CACHELINE_SIZE)));
 } __attribute__((aligned(CACHELINE_SIZE))) sm_node_dev_t;
 
 typedef struct {
@@ -758,8 +771,10 @@ typedef struct {
   sm_node_dev_t devices[MAX_DEVICE_COUNT];
 } sm_node_region_t;
 
-_Static_assert(sizeof(sm_node_dev_t) == CACHELINE_SIZE,
-               "sm_node_dev_t must occupy exactly one padded cache line");
+_Static_assert(offsetof(sm_node_dev_t, est) == CACHELINE_SIZE,
+               "estimate state starts on the second cache line, off the hot one");
+_Static_assert(sizeof(sm_node_dev_t) == 3 * CACHELINE_SIZE,
+               "sm_node_dev_t must occupy exactly three padded cache lines");
 _Static_assert(_Alignof(sm_node_dev_t) == CACHELINE_SIZE,
                "sm_node_dev_t must be cache-line aligned or false sharing returns");
 _Static_assert(offsetof(sm_node_region_t, devices) == CACHELINE_SIZE,
@@ -792,6 +807,10 @@ typedef struct {
    * they don't cause repeated resets. HOST_COMPATIBILITY_MODE has no
    * container boundary -> this field stays 0. */
   int external_process_num;
+  /* Newest NVML timestamp among the samples read this cycle (0: none). It
+   * moves only when the driver produces a new sample, which on some parts is
+   * once a second while the watcher runs every 100 ms. */
+  uint64_t sample_ts;
 } utilization_t;
 
 typedef enum VGPU_COMPATIBILITY_MODE_enum {

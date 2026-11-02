@@ -67,16 +67,9 @@ extern void self_cgroup_init(self_cgroup_t *self, int cgroup_v1);
 extern void self_cgroup_ensure(self_cgroup_t *self);
 extern int self_cgroup_ns_is_private(self_cgroup_t *self, unsigned slot);
 
-/* SM throttle controller selection (see util.c). Defaults preserve stock
- * behaviour when env is unset. */
-extern int get_sm_controller_kind(int *kind);
-extern int get_aimd_md_divisor(double *out);
-extern int get_aimd_eff_ratio(int *out);
-extern int get_aimd_ai_base_div(int *out);
-extern int get_sm_auto_debounce_cycles(int *out);
-extern int get_sm_auto_external_util_threshold(int *out);
-extern int get_aimd_deadband_ratio(int *out);
-extern int get_aimd_md_cooldown_cycles(int *out);
+/* SM limiter tunables (see util.c); each keeps its default when the env is unset. */
+extern int get_sm_excl_debounce_cycles(int *out);
+extern int get_sm_excl_external_util_threshold(int *out);
 extern int get_usage_threshold(int *out);
 extern int get_delta_increment_divisor(int *out);
 extern int get_delta_ramp_floor_divisor(int *out);
@@ -190,6 +183,20 @@ static inline int32_t *sm_throttled_of(int host_index) {
                    : &g_throttled_since_watch[host_index];
 }
 
+/* No NVML sample has ever been valid for this device, yet launches wait on
+ * the bucket. The watcher used to skip the controller until a first sample
+ * arrived, but the first launch is let through on an empty bucket and can
+ * overdraw it, and if that launch never ran on the GPU -- a CUDA graph's
+ * kernels during stream capture -- the driver never produces a sample for
+ * the process: no sample, no refill, no kernel, for good (RTX 3090, a graph
+ * workload under a hard 95 hung 36 minutes). Run the controller on a zero
+ * reading instead: the estimate has no sample to act on and falls back to
+ * the cold-start ramp, and the kernels it lets through bring the samples. */
+static inline int sm_waiting_for_tokens(int host_index) {
+  return *sm_bucket_of(host_index) < 0 ||
+         __atomic_load_n(sm_throttled_of(host_index), __ATOMIC_RELAXED) != 0;
+}
+
 static int g_sm_num[MAX_DEVICE_COUNT]            = {0};
 static int g_max_thread_per_sm[MAX_DEVICE_COUNT] = {0};
 
@@ -228,7 +235,7 @@ static int              g_gap_evt_ready[MAX_DEVICE_COUNT]  = {0};
 static int              g_gap_dc[MAX_DEVICE_COUNT]         = {0};
 
 /* Per-device decimation tick for the periodic watcher utilization log. The
- * SM watcher samples ~every 80ms, which floods VERBOSE logs, so emit only 1
+ * SM watcher samples every ~100 ms, which floods VERBOSE logs, so emit only 1
  * in WATCHER_UTIL_LOG_STRIDE samples. Fixed-stride (not power-of-two) keeps
  * a steady cadence instead of going silent over a long run. Single-writer
  * per index, so a plain int needs no atomics. */
@@ -290,6 +297,14 @@ void child_after_fork(void) {
      * intact, and initialization() skips re-mapping since g_sm_node is
      * still set. */
     g_dev_hot[i].last_launch_ns = 0;
+    /* A per-process bucket (shared bucket off) is the parent's copy, and the
+     * delta controller carries overdrafts: drop any debt rather than make the
+     * child pay it. Defensive -- a parent in debt has launched, so CUDA is
+     * initialised and its forked child cannot launch -- but the store is
+     * free and async-signal-safe. */
+    if (g_sm_node == NULL && g_dev_hot[i].cur_cuda_cores < 0) {
+      g_dev_hot[i].cur_cuda_cores = 0;
+    }
     /* Re-init in case a parent thread held the lock at the moment of fork.
      * POSIX leaves the inherited mutex state undefined; glibc re-init on a
      * never-destroyed mutex is safe (no resource leak for a non-robust
@@ -444,9 +459,9 @@ static void init_device_cuda_cores(int *device_count);
 
 static void initialization();
 
-static void rate_limiter(int grids, int blocks, int host_index);
+static void rate_limiter(int64_t tokens, int host_index);
 
-static int64_t change_token(int64_t, int);
+static int64_t change_token(int64_t, int64_t, int64_t, int);
 
 static int64_t delta(int up_limit, int user_current, int64_t share, int host_index);
 
@@ -612,19 +627,19 @@ entry_t cuda_hooks_entry[] = {
 const int cuda_hook_nums =
     sizeof(cuda_hooks_entry) / sizeof(cuda_hooks_entry[0]);
 
-/* SOFT_ADJUST_INTERVAL: how many watcher cycles (~80ms each) elapse
+/* SOFT_ADJUST_INTERVAL: how many watcher cycles (~100 ms each) elapse
  * between successive periodic up_limit re-evaluations in soft mode.
  * Previously dynamic_config_t.change_limit_interval; promoted to a
  * compile-time constant because (1) no consumer ever wanted to tune
  * it, (2) it appears in the avg_sys_frees denominator and the every-
  * other-cycle reset condition (i % (INTERVAL/2)), so user-facing
  * tuning would need to expose two coupled knobs to be safe.
- * 30 cycles ~ 2.4s at the default ~80ms cadence.  */
+ * 30 cycles ~ 3 s at the default ~100 ms cadence.  */
 #define SOFT_ADJUST_INTERVAL    30
 
-/* delta()'s ramp-floor divisor is env-tunable via g_dynamic_config
+/* delta()'s emergency cut-floor divisor is env-tunable via g_dynamic_config
  * .delta_ramp_floor_divisor (CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR, default 64);
- * see the block comment at the use site in delta() and the loader in
+ * see sm_delta_step_cap() in include/sm_delta.h and the loader in
  * sm_controller_init(). */
 
 /* Defaults match the prior file-static initialisers; each field is
@@ -635,28 +650,22 @@ const int cuda_hook_nums =
  * init). */
 dynamic_config_t g_dynamic_config = {
   .usage_threshold              = 5,
-  .sm_controller_kind           = 0,     /* delta */
-  .aimd_md_divisor              = 3.0,
-  .aimd_eff_ratio               = 875,
-  .aimd_ai_base_div             = 400,
-  .aimd_deadband_ratio          = 800,
-  .aimd_md_cooldown_cycles      = 3,
-  .auto_debounce_cycles         = 10,
-  .auto_external_util_threshold = 1,
+  .excl_debounce_cycles         = 10,
+  .excl_external_util_threshold = 1,
   .delta_increment_divisor      = DELTA_INCREMENT_DIVISOR_DEFAULT,
   .delta_ramp_floor_divisor     = 64,
   .sm_shared_bucket             = 0,     /* per-process bucket (historical) */
 };
 
-/* The ceiling stays the per-process g_total_cuda_cores[]: it is derived from
- * device properties, so every process computes the same number, and reading it
- * locally removes any ordering dependency on the shared region being populated
- * (a transiently-zero shared ceiling would clamp the bucket to 0 and throttle
- * the whole container). The region's total_cuda_cores is observability only. */
-/* Returns the change this call actually applied (after - before of the CAS
- * that landed, so clamping included). The watcher adds it to the refill mark
- * (see g_delta_mark). */
-static int64_t change_token(int64_t delta, int host_index) {
+/* Adds delta to the bucket, clamped to [floor, ceiling] (the watcher's refill
+ * bounds, refill_ceiling()). Returns the change this call actually applied
+ * (after - before of the CAS that landed, so clamping included). The watcher
+ * adds it to the refill mark (see g_delta_mark). */
+/* ceiling: the most the bucket may hold after this change -- the pool, or the
+ * delta controller's ceiling (see refill_ceiling). floor: the least -- 0
+ * forgives any overdraft, a negative floor carries it (refill_ceiling's
+ * *floor). */
+static int64_t change_token(int64_t delta, int64_t ceiling, int64_t floor, int host_index) {
   int64_t cuda_cores_before = 0, cuda_cores_after = 0;
   volatile int64_t *bucket = sm_bucket_of(host_index);
 
@@ -665,24 +674,41 @@ static int64_t change_token(int64_t delta, int host_index) {
     cuda_cores_before = *bucket;
     cuda_cores_after = cuda_cores_before + delta;
 
-    if (unlikely(cuda_cores_after > g_total_cuda_cores[host_index])) {
-      cuda_cores_after = g_total_cuda_cores[host_index];
-    } else if (unlikely(cuda_cores_after < 0)) {
-      cuda_cores_after = 0;
+    if (unlikely(cuda_cores_after > ceiling)) {
+      cuda_cores_after = ceiling;
+    } else if (unlikely(cuda_cores_after < floor)) {
+      /* Debt beyond the floor is forgiven. */
+      cuda_cores_after = floor;
     }
   } while (!CAS(bucket, cuda_cores_before, cuda_cores_after));
   return cuda_cores_after - cuda_cores_before;
 }
 
-static void rate_limiter(int grids, int blocks, int host_index) {
-  (void)blocks;
+/* Empties a backlog (a positive bucket) and leaves a debt alone. The test
+ * and the store are one CAS: a launch that overdraws between the watcher's
+ * read and the drain keeps its debt, where adding -read through
+ * change_token's floor of 0 would have forgiven it. Returns the change applied. */
+static int64_t drain_backlog(int host_index) {
+  volatile int64_t *bucket = sm_bucket_of(host_index);
+  int64_t before;
+  do {
+    before = *bucket;
+    if (before <= 0) {
+      return 0;
+    }
+  } while (!CAS(bucket, before, 0));
+  return -before;
+}
+
+/* tokens: the launch's charge, sm_launch_tokens() (grid x block threads). */
+static void rate_limiter(int64_t tokens, int host_index) {
   if (host_index < 0) {
     return;
   }
   if (get_device_flag(host_index, core_limit)) {
     int64_t before_cuda_cores = 0;
     int64_t after_cuda_cores = 0;
-    int64_t kernel_size = (int64_t) grids;
+    int64_t kernel_size = tokens;
     /* Resolved once per launch, not per CAS retry. With the shared bucket on,
      * this is the ONLY change the consumer side needs: a CAS is a CPU
      * instruction and does not care whether the word is process-private or in
@@ -722,23 +748,39 @@ static int g_delta_calls[MAX_DEVICE_COUNT] = {0};
  *
  * mark/valid are controller state: loaded from / published to the shared
  * region around the election winner's block like shares[], since the next
- * winner may be another process. fresh is per-cycle and per-process: set
- * when delta() lays the baseline this cycle, so a cycle run by another
- * controller (auto routing to AIMD) invalidates the mark instead of adding
- * a refill to a stale baseline. */
+ * winner may be another process. Every refill follows a delta() call in the
+ * same winner block, which lays the baseline the refill is added to. */
 static int64_t g_delta_mark[MAX_DEVICE_COUNT]       = {0};
 static int     g_delta_mark_valid[MAX_DEVICE_COUNT] = {0};
-static int     g_delta_mark_fresh[MAX_DEVICE_COUNT] = {0};
+
+/* Sample-driven estimate state (include/sm_delta.h, sm_delta_est_control):
+ * controller state, loaded from / published to the shared region with the
+ * mark. g_delta_sample_ts is this cycle's NVML sample timestamp (us), set by
+ * the watcher before the controller runs. */
+static sm_delta_est_t g_delta_est[MAX_DEVICE_COUNT];
+/* How far back the utilization query looks (lastSeenTimeStamp = now minus
+ * this). NVML averages every sample after it, so on parts sampling faster than
+ * this each reading is a sliding mean over it, which the estimate must know
+ * (sm_delta_est_control_avg). pkg/config/watcher/util_adapter.go queries the
+ * same second for the shared watcher path; change both together. */
+#define SM_UTIL_QUERY_WINDOW_MS 1000
+/* The device-wide reading (every container's) of the cycle's sample, handed
+ * to the estimate like g_delta_sample_ts. */
+static int g_delta_device_reading[MAX_DEVICE_COUNT] = {0};
+static uint64_t g_delta_sample_ts[MAX_DEVICE_COUNT] = {0};
+/* When this process last saw the device's sample timestamp change (monotonic
+ * ns) and the timestamp it saw. Tracked every cycle by every process, so a
+ * process that wins the refill knows how long the samples have been silent. */
+static uint64_t g_sample_seen_ts[MAX_DEVICE_COUNT] = {0};
+static int64_t  g_sample_seen_ns[MAX_DEVICE_COUNT] = {0};
+/* Silence that means the GPU idles because we throttle it (two periods of the
+ * slowest sampling part, 1 s on the RTX 2080 Ti). */
+#define SM_SAMPLE_SILENT_NS (2LL * 1000000000LL)
 
 /* After the winner's refill (or bypass store): finish this cycle's mark. */
 static void delta_mark_refill(int host_index, int64_t applied) {
-  if (g_delta_mark_fresh[host_index]) {
-    g_delta_mark[host_index] += applied;
-    g_delta_mark_valid[host_index] = 1;
-  } else {
-    g_delta_mark_valid[host_index] = 0;
-  }
-  g_delta_mark_fresh[host_index] = 0;
+  g_delta_mark[host_index] += applied;
+  g_delta_mark_valid[host_index] = 1;
 }
 
 /* Thin binding of the pure step (include/sm_delta.h) to this process's
@@ -757,67 +799,38 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
   int64_t bucket = *sm_bucket_of(host_index);
   int64_t consumed = g_delta_mark_valid[host_index] ? g_delta_mark[host_index] - bucket : -1;
   int drain = 0;
-  int64_t next = sm_delta_control(g_total_cuda_cores[host_index], up_limit, user_current,
-                                  share, bucket, boot, consumed,
-                                  g_dynamic_config.delta_increment_divisor,
-                                  g_dynamic_config.delta_ramp_floor_divisor, &drain);
+  struct timeval now;
+  gettimeofday(&now, NULL);
+  uint32_t now_ms = (uint32_t)((uint64_t)now.tv_sec * 1000ULL + (uint64_t)now.tv_usec / 1000ULL);
+  /* Every reading averages over the second the query looks back
+   * (SM_UTIL_QUERY_WINDOW_MS; the device plugin's watcher queries the same). */
+  int64_t next = sm_delta_est_control_avg(&g_delta_est[host_index], g_total_cuda_cores[host_index],
+                                      up_limit, user_current, g_delta_device_reading[host_index],
+                                      g_delta_sample_ts[host_index] / 1000ULL, SM_UTIL_QUERY_WINDOW_MS,
+                                      now_ms, share, bucket, boot, consumed,
+                                      g_dynamic_config.delta_increment_divisor,
+                                      g_dynamic_config.delta_ramp_floor_divisor, &drain);
   g_delta_mark[host_index] = bucket;
-  g_delta_mark_fresh[host_index] = 1;
+  /* A drain empties a backlog; it never repays or forgives a debt. */
   if (drain) {
-    /* Through change_token's CAS so concurrent deductions are not undone;
-     * a stale `bucket` only makes the result clamp at 0, which is the aim. */
-    g_delta_mark[host_index] += change_token(-bucket, host_index);
+    g_delta_mark[host_index] += drain_backlog(host_index);
   }
   return next;
 }
 
-/* ---- Pluggable SM throttle controller ---- *
- * The per-cycle share update in the watcher loop is delegated to a
- * controller selected once at init by CUDA_SM_CONTROLLER:
- *
- *   "delta" (default) -- stock symmetric proportional controller (`delta`
- *                         above), identical to the pre-AIMD build.
- *   "aimd"             -- additive-increase / multiplicative-decrease;
- *                         measured MAE ~20% -> ~3% on RTX 4080 vs. delta.
- *
- * Drop-in for delta(): same signature, same call sites, no change to the
- * watcher's soft/hard mode logic or the GAP path. */
-
-typedef int64_t (*sm_controller_fn)(int up_limit, int user_current,
-                                    int64_t share, int host_index);
-
-enum {
-  SM_CONTROLLER_DELTA = 0,
-  SM_CONTROLLER_AIMD  = 1,
-  SM_CONTROLLER_AUTO  = 2,   /* experimental: route per device per cycle */
-};
-
-/* All SM-controller tunables now live in g_dynamic_config (hook.h).
- * The 8 file-static globals that used to mirror them were removed in
- * favour of direct reads, so there is exactly one source of truth and
- * the boot log can dump them in a single line. The non-tunable
- * per-device cooldown counter stays local because it is RUNTIME STATE,
- * not configuration, and changes every watcher cycle. */
-
-/* Per-device remaining cooldown counter. Watcher-thread-only access
- * (each watcher thread owns a disjoint host_index slice via
- * balance_batches; auto_routed_controller runs in the same watcher
- * thread). No volatile / atomics needed. fork() safety: child watcher
- * restarts and the static-zero initializer applies on first dispatch. */
-static int g_aimd_md_cooldown[MAX_DEVICE_COUNT] = {0};
-
 /* ---- Shared exclusivity FSM ---- *
- * "Are we exclusively using this device" is needed in three places: the
- * soft_core burst gate, the hard_limit jitter-init gate, and AUTO
- * controller routing. All three share one debounced state machine instead
+ * "Are we exclusively using this device" is needed in two places: the
+ * soft_core burst gate (debounced, below) and the hard_limit jitter-init
+ * bypass (raw, host_index_is_exclusive_raw()). The burst gate uses one
+ * debounced state machine instead
  * of each reacting to the raw per-cycle observation (host_index_is_
  * exclusive_raw()) -- a single-cycle dip in external util would otherwise
  * wrongly trigger soft_core burst and squeeze a real competing Pod.
  *
  * Updated at most once per watcher cycle via a memo, so calling the
  * predicate twice in one iteration doesn't double-advance the streak.
- * Starts as "not exclusive": at startup we wait auto_debounce_cycles
- * (~400ms) of observed exclusivity before allowing a burst -- costs a
+ * Starts as "not exclusive": at startup we wait excl_debounce_cycles
+ * (~1 s at the default 10) of observed exclusivity before allowing a burst -- costs a
  * slower ramp-up, avoids squeezing a Pod that was briefly idle.
  *
  * Threading: written/read only by the watcher thread owning that
@@ -838,120 +851,7 @@ static int      g_excl_memo_valid[MAX_DEVICE_COUNT] = {0};
 static int      g_excl_memo_value[MAX_DEVICE_COUNT] = {0};
 
 
-static int64_t aimd_controller(int up_limit, int user_current,
-                               int64_t share, int host_index);
-
-/* Function pointer set at init. Stays at delta if env is unset, so an
- * uninitialised call before sm_controller_init() runs is still safe. */
-static sm_controller_fn g_sm_controller = delta;
-
-/* AIMD: additive increase (gap-proportional) when under the buffered limit,
- * fast multiplicative cut otherwise. The asymmetric response is what pulls
- * down steady-state MAE compared to delta()'s symmetric step. Constants are
- * env-tunable since calibration was done on RTX 4080 -- bigger datacenter
- * GPUs (A100/H100) likely need a less aggressive MD factor.
- *
- * ai_step has a post-MD floor: without it, after MD divides share by
- * aimd_md_divisor (default 3), the next cycle could be left with a share
- * so small that AI would need many cycles to recover. Clamping `if (share
- * < ai_step) share = ai_step;` keeps MD from ever cutting below a "current
- * AI unit", which was the fix for utilization sticking at 0-1 against a
- * small hard_core (e.g. 5). */
-static int64_t aimd_controller(int up_limit, int user_current,
-                               int64_t share, int host_index) {
-  /* Three regions around the target (P1 hysteresis, see
-   * sm_controller_aimd_sawtooth_analysis.md):
-   *
-   *      user_current
-   *   0 +------ AI ------+---- deadband ----+------ MD ------+ 100
-   *                  deadband_low        eff_limit
-   *
-   *   AI region        : share += gap-proportional step (grow)
-   *   deadband region  : hold share (kills sawtooth)
-   *   MD region        : share /= md_divisor, then arm cooldown (cut)
-   *
-   * Defaults: deadband_ratio=800 (low=80% of up_limit), eff_ratio=875
-   * (high=87.5%); so deadband width = 7.5% of up_limit (scales with
-   * setpoint, no manual tuning per workload).
-   *
-   * sm_controller_init clamps deadband_ratio < eff_ratio so deadband_low
-   * < eff_limit always; we still guard at runtime as a defence in depth
-   * (g_total_cuda_cores etc. live in shared memory and could theoretically
-   * be perturbed by future code). */
-  int eff_limit = (int)((int64_t)up_limit * g_dynamic_config.aimd_eff_ratio / 1000);
-  if (eff_limit < 1) eff_limit = 1;
-  int deadband_low = (int)((int64_t)up_limit * g_dynamic_config.aimd_deadband_ratio / 1000);
-  if (deadband_low < 0) deadband_low = 0;
-  if (deadband_low >= eff_limit) deadband_low = eff_limit - 1;   /* defence */
-
-  int64_t sm_num     = (int64_t)g_sm_num[host_index];
-  int64_t max_thread = (int64_t)g_max_thread_per_sm[host_index];
-  /* Computed unconditionally: needed for both the AI step itself and the
-   * post-MD floor below. */
-  int64_t ai_step = sm_num * max_thread * 3 * (int64_t)eff_limit
-                    / (int64_t)g_dynamic_config.aimd_ai_base_div;
-  if (ai_step < 1) ai_step = 1;
-
-  /* Cooldown drains every cycle (TCP Reno time-based semantics, not
-   * event-based: an AI run shouldn't keep a stale cooldown alive). The
-   * counter is bumped to (cycles + 1) when MD fires below, then this
-   * decrement immediately knocks it down to `cycles`, so the post-MD
-   * cycles 1..N all see counter > 0 and stay blocked, then cycle N+1
-   * sees 0 and is free to MD again. This +1/decrement-first dance is
-   * the cheapest way to make "cooldown=N" gate exactly N post-MD
-   * cycles with a single integer of state. */
-  if (g_aimd_md_cooldown[host_index] > 0) {
-    g_aimd_md_cooldown[host_index]--;
-  }
-
-  if (user_current < deadband_low) {
-    /* AI: gap-proportional step (gap >= 5 floor to keep moving when very
-     * close to target). */
-    int gap = up_limit - user_current;
-    if (gap < 5) gap = 5;
-    int64_t step = ai_step * (int64_t)gap / 5;
-    share += step;
-    if (share > g_total_cuda_cores[host_index]) {
-      share = g_total_cuda_cores[host_index];
-    }
-  } else if (user_current > eff_limit) {
-    /* MD region. Honour cooldown: a cycle right after an MD must NOT
-     * MD again, even if util still over-shoots -- NVML's ~80ms sample
-     * + share-take-effect lag (~200-400ms total) means consecutive
-     * MD cuts share by md_divisor^N before the first cut's effect
-     * surfaces, hence "MD avalanche". Cooldown breaks the chain. */
-    if (g_aimd_md_cooldown[host_index] == 0) {
-      /* md_divisor is a double so users can pick 1.5 etc for softer cuts.
-       * share is int64_t; cast through double for the divide, then floor
-       * back to int64. share never exceeds g_total_cuda_cores (a few
-       * million), far below double's 2^53 mantissa limit, so no
-       * precision loss. md_divisor is clamped >= 1.01 at load time so
-       * division by ~zero is impossible. */
-      share = (int64_t)((double)share / g_dynamic_config.aimd_md_divisor);
-      if (share < 0) share = 0;
-      /* +1 because the decrement at the top of NEXT cycle takes us
-       * from cycles+1 to cycles, then cycles..1 = N cycles blocked. */
-      g_aimd_md_cooldown[host_index] = g_dynamic_config.aimd_md_cooldown_cycles + 1;
-      metrics_record_aimd_event(host_index, METRICS_AIMD_MD_FIRED);
-    } else {
-      /* In cooldown, hold share, do not MD. */
-      metrics_record_aimd_event(host_index, METRICS_AIMD_MD_BLOCKED);
-    }
-  } else {
-    /* Deadband region, hold share (no change). */
-    metrics_record_aimd_event(host_index, METRICS_AIMD_DEADBAND_HIT);
-  }
-
-  /* Floor: never let share fall below one AI step. Without this, after
-   * MD the next AI would need many cycles to bring share back into the
-   * useful range, especially when up_limit (and therefore ai_step) is
-   * small. This fixes the "utilization stuck near 0 against
-   * hard_core=5" regression. */
-  if (share < ai_step) share = ai_step;
-  return share;
-}
-
-/* Tentative declaration so auto_routed_controller / host_index_is_exclusive
+/* Tentative declaration so host_index_is_exclusive
  * can reference the watcher's top_results[] which is fully defined ~80 lines
  * below alongside the other watcher state arrays. C merges multiple tentative
  * defs of the same static object into a single allocation; the only one with
@@ -959,7 +859,7 @@ static int64_t aimd_controller(int up_limit, int user_current,
 static utilization_t top_results[MAX_DEVICE_COUNT];
 
 /* "Is this device exclusively used by our container?" predicate, shared by
- * AUTO routing and the watcher's soft_core burst path. True when no
+ * the hard_limit jitter-init gate and the watcher's soft_core burst path. True when no
  * non-self-container process is actually burning SM cycles, computed as
  * external_util = max(0, sys_current - user_current) from the user/sys
  * split get_used_gpu_utilization() already produces. A real competing Pod
@@ -986,7 +886,7 @@ static int host_index_is_exclusive_raw(int host_index) {
   int user = top_results[host_index].user_current;
   int external = sys - user;
   if (external < 0) external = 0;   /* defensive: NVML race may leave user > sys briefly */
-  return external < g_dynamic_config.auto_external_util_threshold;
+  return external < g_dynamic_config.excl_external_util_threshold;
 }
 
 /* Debounced exclusivity FSM. Reads top_results for the host_index,
@@ -1005,7 +905,7 @@ static int host_index_is_exclusive_debounced(int host_index) {
   int current  = g_is_exclusive_debounced[host_index];
   if (observed == current) {
     g_exclusive_pending_streak[host_index] = 0;
-  } else if (++g_exclusive_pending_streak[host_index] >= g_dynamic_config.auto_debounce_cycles) {
+  } else if (++g_exclusive_pending_streak[host_index] >= g_dynamic_config.excl_debounce_cycles) {
     /* Flip survived debounce -- commit. */
     LOGGER(INFO, "exclusivity changed: host_device=%d sys=%d user=%d ext=%d %s -> %s",
            host_index,
@@ -1034,43 +934,20 @@ static int host_index_is_exclusive_debounced(int host_index) {
   return current;
 }
 
-/* AUTO mode: per-device router between delta (single Pod, throughput) and
- * aimd (multi-Pod, fairness). Reads the SHARED debounced exclusivity FSM
- * (host_index_is_exclusive_debounced) so AUTO routing and the watcher's
- * burst gating always agree -- there is no second private FSM to drift
- * out of sync. shares[host_index] is shared across both controllers and
- * both algorithms are iterators on it, so flips carry over cleanly. */
-static int64_t auto_routed_controller(int up_limit, int user_current,
-                                      int64_t share, int host_index) {
-  if (host_index_is_exclusive_debounced(host_index)) {
-    return delta(up_limit, user_current, share, host_index);
-  }
-  return aimd_controller(up_limit, user_current, share, host_index);
-}
-
 /* Dump g_dynamic_config to the INFO log in a single deterministic line.
  * One source of truth: operators see exactly what the running process
  * actually believes its config is (after env load + clamp), not what
  * the docs claim the defaults should be. */
 static void dump_dynamic_config(void) {
-  static const char *kind_name[] = { "delta", "aimd", "auto" };
-  int k = g_dynamic_config.sm_controller_kind;
   LOGGER(INFO,
-    "+ DynamicConfig  : controller=%s usage_threshold=%d "
-    "aimd[md_div=%.3f eff_ratio=%d/1000 ai_base_div=%d deadband_ratio=%d/1000 md_cooldown=%d] "
-    "auto[debounce=%d ext_util_threshold=%d%%] "
+    "+ DynamicConfig  : usage_threshold=%d "
+    "exclusivity[debounce=%d ext_util_threshold=%d%%] "
     "shared_bucket=%d "
     "delta[inc_div=%d ramp_floor_div=%d grow_cap=1/%d] "
     "internal[soft_adjust_interval=%d]",
-    (k >= 0 && k <= 2) ? kind_name[k] : "?",
     g_dynamic_config.usage_threshold,
-    g_dynamic_config.aimd_md_divisor,
-    g_dynamic_config.aimd_eff_ratio,
-    g_dynamic_config.aimd_ai_base_div,
-    g_dynamic_config.aimd_deadband_ratio,
-    g_dynamic_config.aimd_md_cooldown_cycles,
-    g_dynamic_config.auto_debounce_cycles,
-    g_dynamic_config.auto_external_util_threshold,
+    g_dynamic_config.excl_debounce_cycles,
+    g_dynamic_config.excl_external_util_threshold,
     g_dynamic_config.sm_shared_bucket,
     g_dynamic_config.delta_increment_divisor,
     g_dynamic_config.delta_ramp_floor_divisor,
@@ -1091,27 +968,18 @@ static void sm_controller_init(void) {
    * pattern even when env is unset because some defaults could be
    * mismatched in future edits (the clamp is cheap insurance). */
 
-  /* Controller selection (delta/aimd/auto). */
-  int kind = SM_CONTROLLER_DELTA;
-  (void)get_sm_controller_kind(&kind);
-  if (kind < SM_CONTROLLER_DELTA || kind > SM_CONTROLLER_AUTO) {
-    kind = SM_CONTROLLER_DELTA;
-  }
-  g_dynamic_config.sm_controller_kind = kind;
-
   /* Soft-mode periodic adjust threshold. Range >= 0. */
   (void)get_usage_threshold(&g_dynamic_config.usage_threshold);
   if (g_dynamic_config.usage_threshold < 0) g_dynamic_config.usage_threshold = 0;
 
-  /* Exclusivity FSM tunables. Consulted in EVERY controller mode (used by
-   * the watcher's burst gate / jitter-init), so loaded unconditionally. */
-  (void)get_sm_auto_external_util_threshold(&g_dynamic_config.auto_external_util_threshold);
-  if (g_dynamic_config.auto_external_util_threshold < 1) g_dynamic_config.auto_external_util_threshold = 1;
-  (void)get_sm_auto_debounce_cycles(&g_dynamic_config.auto_debounce_cycles);
-  if (g_dynamic_config.auto_debounce_cycles < 1) g_dynamic_config.auto_debounce_cycles = 1;
+  /* Exclusivity FSM tunables (the watcher's soft_core burst gate and the
+   * hard_limit jitter-init gate). */
+  (void)get_sm_excl_external_util_threshold(&g_dynamic_config.excl_external_util_threshold);
+  if (g_dynamic_config.excl_external_util_threshold < 1) g_dynamic_config.excl_external_util_threshold = 1;
+  (void)get_sm_excl_debounce_cycles(&g_dynamic_config.excl_debounce_cycles);
+  if (g_dynamic_config.excl_debounce_cycles < 1) g_dynamic_config.excl_debounce_cycles = 1;
 
-  /* delta ramp-floor divisor. Loaded unconditionally: delta runs as the default
-   * controller and as an AUTO dispatch target. NO clamp here on purpose: a value
+  /* delta ramp-floor divisor. NO clamp here on purpose: a value
    * <= 0 is the user's explicit "disable the floor" sentinel, which delta()
    * honours by skipping the floor (and its division) entirely. */
   /* Pool-relative linear step divisor. Clamped positive: 0 would divide-by-
@@ -1146,47 +1014,7 @@ static void sm_controller_init(void) {
     g_dynamic_config.sm_shared_bucket = 1;
   }
 
-  /* AIMD tunables. Loaded unconditionally because AUTO can dispatch to
-   * aimd_controller when the device becomes shared, even if the user
-   * picked CUDA_SM_CONTROLLER=auto without setting AIMD env vars. */
-  (void)get_aimd_md_divisor(&g_dynamic_config.aimd_md_divisor);
-  (void)get_aimd_eff_ratio(&g_dynamic_config.aimd_eff_ratio);
-  (void)get_aimd_ai_base_div(&g_dynamic_config.aimd_ai_base_div);
-  (void)get_aimd_deadband_ratio(&g_dynamic_config.aimd_deadband_ratio);
-  (void)get_aimd_md_cooldown_cycles(&g_dynamic_config.aimd_md_cooldown_cycles);
-  /* md_divisor clamp: /1 is no-op, /<1 INVERTS the algorithm (would
-   * amplify share on overshoot). Floor 1.01 leaves room for FP rounding. */
-  if (g_dynamic_config.aimd_md_divisor < 1.01) g_dynamic_config.aimd_md_divisor = 1.01;
-  /* deadband must sit strictly below eff so AI/deadband/MD regions stay
-   * well-ordered. */
-  if (g_dynamic_config.aimd_deadband_ratio < 0) {
-    g_dynamic_config.aimd_deadband_ratio = 0;
-  } else if (g_dynamic_config.aimd_deadband_ratio >= g_dynamic_config.aimd_eff_ratio) {
-    LOGGER(WARNING, "AIMD deadband_ratio (%d) must be < eff_ratio (%d); clamping to eff_ratio-1",
-           g_dynamic_config.aimd_deadband_ratio, g_dynamic_config.aimd_eff_ratio);
-    g_dynamic_config.aimd_deadband_ratio = g_dynamic_config.aimd_eff_ratio - 1;
-  }
-  if (g_dynamic_config.aimd_md_cooldown_cycles < 0) g_dynamic_config.aimd_md_cooldown_cycles = 0;
-
-  /* === Bind the dispatch pointer + label metrics === */
-  switch (kind) {
-    case SM_CONTROLLER_AUTO:
-      g_sm_controller = auto_routed_controller;
-      metrics_set_controller_label("auto");
-      break;
-    case SM_CONTROLLER_AIMD:
-      g_sm_controller = aimd_controller;
-      metrics_set_controller_label("aimd");
-      break;
-    case SM_CONTROLLER_DELTA:
-    default:
-      g_sm_controller = delta;
-      metrics_set_controller_label("delta");
-      break;
-  }
-
-  /* Single deterministic dump line -- replaces the three prior controller-
-   * specific INFO lines so operators have ONE place to grep. */
+  /* Single deterministic dump line: ONE place for operators to grep. */
   dump_dynamic_config();
 }
 
@@ -1203,6 +1031,19 @@ static int session_has_core_limit(void) {
 }
 
 static int64_t shares[MAX_DEVICE_COUNT]    = {0};
+
+/* The bucket bounds for this cycle's refill, from the share the controller
+ * state now holds (fresh after a normal cycle, unchanged after a bypass):
+ * DELTA_BUCKET_CYCLES of share above, DELTA_DEBT_CYCLES of overdraft carried
+ * below (sm_delta_est_bucket_ceiling / sm_delta_debt_floor). *floor may be
+ * NULL where debt is forgiven anyway. */
+static int64_t refill_ceiling(int host_index, int64_t *floor) {
+  int64_t ceiling = sm_delta_est_bucket_ceiling(shares[host_index]);
+  if (floor != NULL) {
+    *floor = sm_delta_debt_floor(shares[host_index], ceiling);
+  }
+  return ceiling;
+}
 static int sys_frees[MAX_DEVICE_COUNT]      = {0};
 static int avg_sys_frees[MAX_DEVICE_COUNT]  = {0};
 static int is[MAX_DEVICE_COUNT]             = {0};
@@ -1215,12 +1056,28 @@ static int is[MAX_DEVICE_COUNT]             = {0};
  * the first cycle's value becomes the reference; later cycles only change
  * when a genuinely new external process arrives. */
 static int pre_external_process_nums[MAX_DEVICE_COUNT] = {0};
-static int pre_sys_process_nums[MAX_DEVICE_COUNT] = {0};
 static utilization_t top_results[MAX_DEVICE_COUNT] = {};
 /* volatile: written by the watcher thread, read cross-thread by the GAP path
  * (gap_effective_dc). Matches g_dev_hot[].cur_cuda_cores' convention -- forces a real
  * load (no register caching) of this single aligned int. */
 static volatile int up_limits[MAX_DEVICE_COUNT] = {0};
+
+/* Soft mode: drops the elastic limit back to hard_core (a new external Pod,
+ * or exclusivity lost) and restarts the ramp. The share scales by the same
+ * ratio instead of collapsing to one SM's threads: the estimator holds the
+ * share until its next sample (~1 s on a 200 ms-sample GPU), and a tiny share
+ * would starve the container for that long instead of releasing the burst.
+ * scale = 0 leaves the share alone: a new process that has not cost us
+ * exclusivity (an idle monitor) puts the limit straight back at soft_core. */
+static void soft_reset_to_hard(int host_index, int hard_core, int scale) {
+  int old = up_limits[host_index];
+  if (scale && old > hard_core && shares[host_index] > 0) {
+    shares[host_index] = shares[host_index] * hard_core / old;
+  }
+  up_limits[host_index] = hard_core;
+  is[host_index] = 0;
+  avg_sys_frees[host_index] = 0;
+}
 static nvmlDevice_t nvml_devices[MAX_DEVICE_COUNT] = {};
 
 /* ---- Refill election + shared controller state ---- *
@@ -1407,19 +1264,15 @@ static void sm_ctl_load(int host_index) {
   is[host_index]                         = d->is_cnt;
   avg_sys_frees[host_index]              = d->avg_sys_free;
   pre_external_process_nums[host_index]  = d->pre_external_proc;
-  pre_sys_process_nums[host_index]       = d->s_sys_process_num;
   /* Without these three the exclusivity FSM would advance once per N cycles in
    * each process and fracture; lost_excl_pending especially, being a one-shot
    * flag, would hang set in every non-winner and fire a stale reset cycles late. */
   g_is_exclusive_debounced[host_index]   = d->excl_debounced;
   g_exclusive_pending_streak[host_index] = d->excl_streak;
   g_lost_exclusivity_pending[host_index] = d->lost_excl_pending;
-  /* Without this, AIMD re-fires MD every cycle -- each winner sees its own
-   * never-advanced cooldown of 0 -- and share collapses by md_divisor^N. That
-   * avalanche is the exact failure the cooldown exists to prevent. */
-  g_aimd_md_cooldown[host_index]         = d->md_cooldown;
   g_delta_mark[host_index]               = d->delta_mark;
   g_delta_mark_valid[host_index]         = d->delta_mark_valid;
+  g_delta_est[host_index]                = d->est;
 }
 
 static void sm_ctl_publish(int host_index) {
@@ -1430,14 +1283,13 @@ static void sm_ctl_publish(int host_index) {
   d->up_limit          = up_limits[host_index];
   d->is_cnt            = is[host_index];
   d->avg_sys_free      = avg_sys_frees[host_index];
-  d->s_sys_process_num = pre_sys_process_nums[host_index];
   d->pre_external_proc = pre_external_process_nums[host_index];
   d->excl_debounced    = g_is_exclusive_debounced[host_index];
   d->excl_streak       = g_exclusive_pending_streak[host_index];
   d->lost_excl_pending = g_lost_exclusivity_pending[host_index];
-  d->md_cooldown       = g_aimd_md_cooldown[host_index];
   d->delta_mark        = g_delta_mark[host_index];
   d->delta_mark_valid  = g_delta_mark_valid[host_index];
+  d->est               = g_delta_est[host_index];
   __atomic_store_n(&d->share, shares[host_index], __ATOMIC_RELEASE);  /* publish */
 }
 
@@ -1507,6 +1359,7 @@ static void sm_publish_sample(int host_index) {
   d->s_sys_current       = top_results[host_index].sys_current;
   d->s_sys_process_num   = top_results[host_index].sys_process_num;
   d->s_external_proc_num = top_results[host_index].external_process_num;
+  d->s_sample_ts         = top_results[host_index].sample_ts;
   __atomic_store_n(&d->sample_published_ns, now, __ATOMIC_RELEASE);
 }
 
@@ -1531,6 +1384,7 @@ static int sm_load_published_sample(int host_index) {
   top_results[host_index].sys_current          = d->s_sys_current;
   top_results[host_index].sys_process_num      = d->s_sys_process_num;
   top_results[host_index].external_process_num = d->s_external_proc_num;
+  top_results[host_index].sample_ts            = d->s_sample_ts;
   top_results[host_index].valid                = 1;
   return 1;
 }
@@ -1550,17 +1404,20 @@ static void *utilization_watcher(void *arg) {
     is[host_index] = 0;
     shares[host_index] = 0;
     g_delta_mark_valid[host_index] = 0;
-    g_delta_mark_fresh[host_index] = 0;
+    memset(&g_delta_est[host_index], 0, sizeof(g_delta_est[host_index]));
+    g_delta_sample_ts[host_index] = 0;
+    g_sample_seen_ts[host_index] = 0;
+    g_sample_seen_ns[host_index] = 0;
     sys_frees[host_index] = 0;
     avg_sys_frees[host_index] = 0;
     pre_external_process_nums[host_index] = 0;
-    pre_sys_process_nums[host_index] = 0;
     up_limits[host_index] = get_device_flag(host_index, hard_core);
     top_results[host_index].user_current = 0;
     top_results[host_index].sys_current = 0;
     top_results[host_index].valid = 0;
     top_results[host_index].sys_process_num = 0;
     top_results[host_index].external_process_num = 0;
+    top_results[host_index].sample_ts = 0;
   }
   int dev_count = batch->end_index - batch->start_index;
   struct timespec wait = {
@@ -1632,15 +1489,18 @@ static void *utilization_watcher(void *arg) {
        * every ~100ms is exactly the call pattern the driver handles worst. */
       if (sm_sampling_claim(host_index)) {
         get_used_gpu_utilization((void *)&top_results[host_index], cuda_index, host_index, nvml_devices[host_index]);
-        if (unlikely(!top_results[host_index].valid)) continue;
-        sm_publish_sample(host_index);
+        if (unlikely(!top_results[host_index].valid)) {
+          if (!sm_waiting_for_tokens(host_index)) continue;
+        } else {
+          sm_publish_sample(host_index);
+        }
       } else if (!sm_load_published_sample(host_index)) {
         /* Owner holds the lock but has stopped publishing -- alive and stuck,
          * which the lock cannot express. Sample for ourselves so the bucket
          * keeps being replenished. Refill stays gated by the CAS below, so
          * this cannot double-supply even if several standbys do it at once. */
         get_used_gpu_utilization((void *)&top_results[host_index], cuda_index, host_index, nvml_devices[host_index]);
-        if (unlikely(!top_results[host_index].valid)) continue;
+        if (unlikely(!top_results[host_index].valid) && !sm_waiting_for_tokens(host_index)) continue;
       }
 
       /* Invalidate per-cycle exclusivity memo so the FIRST debounced
@@ -1649,6 +1509,13 @@ static void *utilization_watcher(void *arg) {
        * watcher cycle, regardless of how many code paths consult it). */
       g_excl_memo_valid[host_index] = 0;
 
+      int64_t mono = monotonic_ns();
+      if (top_results[host_index].sample_ts != g_sample_seen_ts[host_index] ||
+          g_sample_seen_ns[host_index] == 0) {
+        g_sample_seen_ts[host_index] = top_results[host_index].sample_ts;
+        g_sample_seen_ns[host_index] = mono;
+      }
+
       /* Sampling above happens in every process (metrics and logs want it);
        * from here down is the controller, and exactly one process per cycle
        * gets to run it. A no-op when the bucket is per-process. */
@@ -1656,6 +1523,29 @@ static void *utilization_watcher(void *arg) {
         continue;
       }
       sm_ctl_load(host_index);
+      /* A launch waits on the bucket (throttled -- a debt alone may just be a
+       * long kernel's overdraw before an idle stretch, and ramping then would
+       * bank share for the next burst), yet no new sample for two periods: the
+       * GPU idles because we hold it, and the driver stops sampling an idle
+       * process. The last reading then stays in place for good -- an estimate
+       * rounded to 0 at a 2% target held share at 0 against a stale 8 with the
+       * bucket at -1 (RTX 3090, persist kernels, hung 25 minutes). The reading
+       * is 0, and the estimate has nothing current to pair it with: start it
+       * over, so the cold-start ramp refills and the kernels it lets through
+       * bring samples back. */
+      if (top_results[host_index].valid &&
+          __atomic_load_n(sm_throttled_of(host_index), __ATOMIC_RELAXED) != 0 &&
+          mono - g_sample_seen_ns[host_index] > SM_SAMPLE_SILENT_NS) {
+        /* The sample period belongs to the GPU, not the workload: keep it,
+         * or the silence becomes the first period after samples return. */
+        int32_t period_ms = g_delta_est[host_index].period_ms;
+        memset(&g_delta_est[host_index], 0, sizeof(g_delta_est[host_index]));
+        g_delta_est[host_index].period_ms = period_ms;
+        top_results[host_index].user_current = 0;
+        top_results[host_index].sys_current = 0;
+      }
+      g_delta_sample_ts[host_index] = top_results[host_index].sample_ts;
+      g_delta_device_reading[host_index] = top_results[host_index].sys_current;
 
       sys_frees[host_index] = MAX_UTILIZATION - top_results[host_index].sys_current;
 
@@ -1688,7 +1578,7 @@ static void *utilization_watcher(void *arg) {
         if (host_index_is_exclusive_raw(host_index)
             && top_results[host_index].user_current < low_util_thr
             && !throttled) {
-          int64_t bypass_target = g_sm_controller(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
+          int64_t bypass_target = delta(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
           if (g_sm_node != NULL) {
             /* A plain store would erase tokens other processes CAS-deducted
              * between our read and our write -- tokens conjured back into the
@@ -1701,34 +1591,25 @@ static void *utilization_watcher(void *arg) {
              * bit the old behaviour. */
             volatile int64_t *bucket = sm_bucket_of(host_index);
             int64_t cur = __atomic_load_n(bucket, __ATOMIC_RELAXED);
-            delta_mark_refill(host_index, change_token(bypass_target - cur, host_index));
+            delta_mark_refill(host_index,
+                              change_token(bypass_target - cur, refill_ceiling(host_index, NULL), 0, host_index));
           } else {
             /* Plain store, so no applied delta to add: the store itself is the
              * mark. Racing launches are lost here anyway (historical path). */
+            int64_t ceiling = refill_ceiling(host_index, NULL);
+            if (bypass_target > ceiling) bypass_target = ceiling;
             g_dev_hot[host_index].cur_cuda_cores = bypass_target;
             g_delta_mark[host_index] = bypass_target;
-            g_delta_mark_valid[host_index] = g_delta_mark_fresh[host_index];
-            g_delta_mark_fresh[host_index] = 0;
+            g_delta_mark_valid[host_index] = 1;
           }
-          /* The controller ran, so it may have advanced md_cooldown or the
+          /* The controller ran, so it may have advanced its estimate or the
            * exclusivity FSM. Publish before the continue or those advances are
            * lost and the next winner recomputes from stale state. */
           sm_ctl_publish(host_index);
           continue;
         }
-        shares[host_index] = g_sm_controller(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
+        shares[host_index] = delta(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
       } else {
-//        // When the process inside the container changes, it should also quickly roll back to the hard core to give up resources
-//        if (pre_sys_process_nums[host_index] != top_results[host_index].sys_process_num) {
-//          if (pre_sys_process_nums[host_index] < top_results[host_index].sys_process_num) {
-//            shares[host_index] = (int64_t) g_max_thread_per_sm[host_index];
-//            up_limits[host_index] = dcfg.hard_core;
-//            is[host_index] = 0;
-//            avg_sys_frees[host_index] = 0;
-//          }
-//          pre_external_process_nums[host_index] = top_results[host_index].external_process_num;
-//          pre_sys_process_nums[host_index] = top_results[host_index].sys_process_num;
-//        }
         if (pre_external_process_nums[host_index] != top_results[host_index].external_process_num) {
           /* A NEW external process arrived (count grew) -> reset to
            * hard_core so all competitors negotiate from the same floor.
@@ -1741,14 +1622,11 @@ static void *utilization_watcher(void *arg) {
            * a single initial reset (which is harmless: we'd just been
            * at hard_core anyway). */
           if (pre_external_process_nums[host_index] < top_results[host_index].external_process_num) {
-            shares[host_index] = (int64_t) g_max_thread_per_sm[host_index];
-            up_limits[host_index] = dcfg.hard_core;
-            is[host_index] = 0;
-            avg_sys_frees[host_index] = 0;
+            soft_reset_to_hard(host_index, dcfg.hard_core,
+                               !host_index_is_exclusive_debounced(host_index));
           }
           pre_external_process_nums[host_index] = top_results[host_index].external_process_num;
         }
-        pre_sys_process_nums[host_index] = top_results[host_index].sys_process_num;
 
         /* 1. Device is exclusively used by us (no external Pod competing).
          *    Allocate cuda cores up to soft_core for burst headroom.
@@ -1760,14 +1638,14 @@ static void *utilization_watcher(void *arg) {
          *
          * Use the DEBOUNCED predicate: the burst grants exclusive access
          * to all of soft_core which directly squeezes any external Pod,
-         * so we MUST be confident (g_dynamic_config.auto_debounce_cycles consecutive
+         * so we MUST be confident (g_dynamic_config.excl_debounce_cycles consecutive
          * agreeing observations) before flipping into burst mode. The
          * debounced FSM also drops g_lost_exclusivity_pending when it
          * flips back, which the else branch consumes to give the burst
          * headroom back via reset. */
         if (host_index_is_exclusive_debounced(host_index)) {
           up_limits[host_index] = dcfg.soft_core;
-          shares[host_index] = g_sm_controller(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
+          shares[host_index] = delta(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
         } else {
           /* Lost-exclusivity reset (V2.1 option ①). When the debounced
            * FSM flipped true->false (we no longer have the card to
@@ -1775,10 +1653,7 @@ static void *utilization_watcher(void *arg) {
            * grabbed by resetting up_limits to hard_core and re-starting
            * the elastic ramp. One-shot: consume the flag. */
           if (g_lost_exclusivity_pending[host_index]) {
-            shares[host_index] = (int64_t) g_max_thread_per_sm[host_index];
-            up_limits[host_index] = dcfg.hard_core;
-            is[host_index] = 0;
-            avg_sys_frees[host_index] = 0;
+            soft_reset_to_hard(host_index, dcfg.hard_core, 1);
             g_lost_exclusivity_pending[host_index] = 0;
           }
           is[host_index]++;
@@ -1815,10 +1690,13 @@ static void *utilization_watcher(void *arg) {
             is[host_index] = 0;
           }
           avg_sys_frees[host_index] = is[host_index] % (SOFT_ADJUST_INTERVAL / 2) == 0 ? 0 : avg_sys_frees[host_index];
-          shares[host_index] = g_sm_controller(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
+          shares[host_index] = delta(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
         }
       }
-      delta_mark_refill(host_index, change_token(shares[host_index], host_index));
+      int64_t refill_lo = 0;
+      int64_t refill_hi = refill_ceiling(host_index, &refill_lo);
+      delta_mark_refill(host_index,
+                        change_token(shares[host_index], refill_hi, refill_lo, host_index));
       sm_ctl_publish(host_index);
       if ((g_share_log_tick[host_index]++ % WATCHER_UTIL_LOG_STRIDE) == 0) {
         g_share_log_tick[host_index] = 1;
@@ -2169,14 +2047,13 @@ static void initialization() {
    * above child_after_fork() in this file for the full rationale. */
   int device_count;
   init_device_cuda_cores(&device_count);
-  /* Select the SM throttle controller (delta/aimd) before watcher threads
-   * start so the function pointer is already pointing at the right impl by
-   * the time they hit the dispatch. Safe to run on every initialization()
-   * call because pthread_once guards the whole function. */
+  /* Load the SM controller's tunables before watcher threads start. Safe to
+   * run on every initialization() call because pthread_once guards the whole
+   * function. */
   sm_controller_init();
 
   /* Attach the container-wide bucket, if enabled. Deliberately placed after
-   * g_total_cuda_cores and the controller switch are known, but before
+   * g_total_cuda_cores and the controller tunables are known, but before
    * balance_batches spawns any watcher, so g_sm_node is final before
    * anything can observe it and needs no synchronisation.
    *
@@ -2200,11 +2077,6 @@ static void initialization() {
       }
       LOGGER(WARNING, "sm_node unavailable, falling back to per-process token bucket");
     } else {
-      for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
-        /* Observability only -- change_token clamps against the local copy. */
-        __atomic_store_n(&g_sm_node->devices[i].total_cuda_cores,
-                         g_total_cuda_cores[i], __ATOMIC_RELAXED);
-      }
       /* Remember which file we mapped, so shared_regions_check_identity() can notice it
        * being replaced under us. */
       struct stat sb;
@@ -2793,7 +2665,7 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(
   }
 
   gettimeofday(&cur, NULL);
-  struct timeval temp = {1, 0};
+  struct timeval temp = {SM_UTIL_QUERY_WINDOW_MS / 1000, (SM_UTIL_QUERY_WINDOW_MS % 1000) * 1000};
   timersub(&cur, &temp, &prev);
   uint64_t microsec = (uint64_t)prev.tv_sec * 1000000ULL + prev.tv_usec;
   top_result->checktime = microsec;
@@ -2879,6 +2751,12 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
   }
   if (unlikely(ret)) return;
 
+  top_result->sample_ts = 0;
+  for (unsigned int k = 0; k < processes_num; k++) {
+    if (processes_sample[k].timeStamp > top_result->sample_ts) {
+      top_result->sample_ts = processes_sample[k].timeStamp;
+    }
+  }
   top_result->user_current = 0;
   top_result->sys_current = 0;
   // In some versions of the driver, it is not possible to rely on nvmlDeviceGetComputeRunningProcesses
@@ -4085,8 +3963,8 @@ CUresult cuLaunchKernel_ptsz(CUfunction f, unsigned int gridDimX,
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(gridDimX * gridDimY * gridDimZ,
-              blockDimX * blockDimY * blockDimZ, host_index);
+  rate_limiter(sm_launch_tokens(gridDimX, gridDimY, gridDimZ,
+                                blockDimX, blockDimY, blockDimZ), host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchKernel_ptsz, f, gridDimX,
                          gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
@@ -4108,8 +3986,8 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX,
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(gridDimX * gridDimY * gridDimZ,
-              blockDimX * blockDimY * blockDimZ, host_index);
+  rate_limiter(sm_launch_tokens(gridDimX, gridDimY, gridDimZ,
+                                blockDimX, blockDimY, blockDimZ), host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernel), f, gridDimX,
                          gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
@@ -4133,8 +4011,9 @@ CUresult cuLaunchKernelEx(CUlaunchConfig *config, CUfunction f,
     goto DONE;
   }
   host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(config->gridDimX * config->gridDimY * config->gridDimZ,
-               config->blockDimX * config->blockDimY * config->blockDimZ, host_index);
+  rate_limiter(sm_launch_tokens(config->gridDimX, config->gridDimY, config->gridDimZ,
+                                config->blockDimX, config->blockDimY, config->blockDimZ),
+               host_index);
   gap = gap_begin(host_index, config->hStream);
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernelEx),
@@ -4158,8 +4037,9 @@ CUresult cuLaunchKernelEx_ptsz(CUlaunchConfig *config, CUfunction f,
     goto DONE;
   }
   host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(config->gridDimX *config->gridDimY * config->gridDimZ,
-               config->blockDimX * config->blockDimY * config->blockDimZ, host_index);
+  rate_limiter(sm_launch_tokens(config->gridDimX, config->gridDimY, config->gridDimZ,
+                                config->blockDimX, config->blockDimY, config->blockDimZ),
+               host_index);
   gap = gap_begin(host_index, config->hStream);
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchKernelEx_ptsz,
@@ -4177,7 +4057,10 @@ CUresult cuLaunch(CUfunction f) {
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(1, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], host_index);
+  if (host_index >= 0) {
+    rate_limiter(sm_launch_tokens(1, 1, 1, g_block_x[host_index], g_block_y[host_index],
+                                  g_block_z[host_index]), host_index);
+  }
   int gap = gap_begin(host_index, CU_STREAM_LEGACY);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunch, f);
   if (gap) gap_end(host_index, CU_STREAM_LEGACY, ret);
@@ -4197,8 +4080,8 @@ CUresult cuLaunchCooperativeKernel_ptsz(
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(gridDimX * gridDimY * gridDimZ,
-              blockDimX * blockDimY * blockDimZ, host_index);
+  rate_limiter(sm_launch_tokens(gridDimX, gridDimY, gridDimZ,
+                                blockDimX, blockDimY, blockDimZ), host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchCooperativeKernel_ptsz, f,
                          gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
@@ -4219,8 +4102,8 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
     goto DONE;
   }    
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(gridDimX * gridDimY * gridDimZ,
-              blockDimX * blockDimY * blockDimZ, host_index);
+  rate_limiter(sm_launch_tokens(gridDimX, gridDimY, gridDimZ,
+                                blockDimX, blockDimY, blockDimZ), host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchCooperativeKernel), f,
                          gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
@@ -4238,7 +4121,9 @@ CUresult cuLaunchGrid(CUfunction f, int grid_width, int grid_height) {
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(grid_width * grid_height, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], host_index);
+  rate_limiter(sm_launch_tokens(grid_width > 0 ? grid_width : 0, grid_height > 0 ? grid_height : 0, 1,
+                                g_block_x[host_index], g_block_y[host_index], g_block_z[host_index]),
+               host_index);
   int gap = gap_begin(host_index, CU_STREAM_LEGACY);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchGrid, f, grid_width,grid_height);
   if (gap) gap_end(host_index, CU_STREAM_LEGACY, ret);
@@ -4254,7 +4139,9 @@ CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height, CUstre
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  rate_limiter(grid_width * grid_height, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], host_index);
+  rate_limiter(sm_launch_tokens(grid_width > 0 ? grid_width : 0, grid_height > 0 ? grid_height : 0, 1,
+                                g_block_x[host_index], g_block_y[host_index], g_block_z[host_index]),
+               host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchGridAsync, f, grid_width, grid_height, hStream);
   if (gap) gap_end(host_index, hStream, ret);
@@ -4307,8 +4194,8 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
          * cuCtxGetDevice call above, which CUDA_INTERNAL_CHECK hides from
          * cppcheck, and it is only read when that call returned SUCCESS. */
         int host_index = get_host_device_index_by_cuda_device(device);
-        rate_limiter(p->gridDimX * p->gridDimY * p->gridDimZ,
-                     p->blockDimX * p->blockDimY * p->blockDimZ, host_index);
+        rate_limiter(sm_launch_tokens(p->gridDimX, p->gridDimY, p->gridDimZ,
+                                      p->blockDimX, p->blockDimY, p->blockDimZ), host_index);
       }
       _cuCtxPopCurrent(&prev);
     }
@@ -4342,8 +4229,7 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
 #define GRAPH_COST_CACHE_SIZE 256
 typedef struct {
   CUgraphExec exec;       /* NULL = unused slot */
-  int total_grids;        /* sum of gridDimX*Y*Z over all kernel nodes */
-  int max_blocks;         /* max blockDim product across kernel nodes */
+  int64_t tokens;         /* sum of sm_launch_tokens() over all kernel nodes */
 } graph_cost_entry_t;
 static graph_cost_entry_t g_graph_cost_cache[GRAPH_COST_CACHE_SIZE];
 static pthread_mutex_t g_graph_cost_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -4360,7 +4246,7 @@ static void graph_cost_after_fork(void) {
 
 extern CUresult _cuGraphKernelNodeGetParams(CUgraphNode hNode, CUDA_KERNEL_NODE_PARAMS *nodeParams);
 
-static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks) {
+static void walk_graph_cost(CUgraph graph, int64_t *tokens) {
   if (unlikely(!graph)) return;
   /* Driver-availability guard: CUDA_INTERNAL_CHECK calls fn_ptr directly
    * without a NULL check, and cuGraphInstantiate succeeding doesn't
@@ -4392,9 +4278,9 @@ static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks
       if (type == CU_GRAPH_NODE_TYPE_KERNEL) {
         CUDA_KERNEL_NODE_PARAMS params = {0};
         if (_cuGraphKernelNodeGetParams(nodes[i], &params) != CUDA_SUCCESS) continue;
-        *total_grids += (int64_t)params.gridDimX * params.gridDimY * params.gridDimZ;
-        int b = params.blockDimX * params.blockDimY * params.blockDimZ;
-        if (b > *max_blocks) *max_blocks = b;
+        int64_t t = sm_launch_tokens(params.gridDimX, params.gridDimY, params.gridDimZ,
+                                     params.blockDimX, params.blockDimY, params.blockDimZ);
+        *tokens = *tokens > SM_LAUNCH_TOKENS_MAX - t ? SM_LAUNCH_TOKENS_MAX : *tokens + t;
       } else if (type == CU_GRAPH_NODE_TYPE_GRAPH) {
         if (unlikely(!CUDA_FIND_ENTRY(cuda_library_entry, cuGraphChildGraphNodeGetGraph))) {
           continue;
@@ -4402,7 +4288,7 @@ static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks
         CUgraph child = NULL;
         if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphChildGraphNodeGetGraph,
                                 nodes[i], &child) == CUDA_SUCCESS) {
-          walk_graph_cost(child, total_grids, max_blocks);
+          walk_graph_cost(child, tokens);
         }
       }
     }
@@ -4410,23 +4296,21 @@ static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks
   free(nodes);
 }
 
-static void graph_cost_remember(CUgraphExec exec, int grids, int blocks) {
-  if (unlikely(!exec) || grids <= 0) return;
+static void graph_cost_remember(CUgraphExec exec, int64_t tokens) {
+  if (unlikely(!exec) || tokens <= 0) return;
   pthread_mutex_lock(&g_graph_cost_lock);
   int free_slot = -1;
   for (int i = 0; i < GRAPH_COST_CACHE_SIZE; i++) {
     if (g_graph_cost_cache[i].exec == exec) {
-      g_graph_cost_cache[i].total_grids = grids;
-      g_graph_cost_cache[i].max_blocks  = blocks;
+      g_graph_cost_cache[i].tokens = tokens;
       pthread_mutex_unlock(&g_graph_cost_lock);
       return;
     }
     if (g_graph_cost_cache[i].exec == NULL && free_slot < 0) free_slot = i;
   }
   if (free_slot >= 0) {
-    g_graph_cost_cache[free_slot].exec        = exec;
-    g_graph_cost_cache[free_slot].total_grids = grids;
-    g_graph_cost_cache[free_slot].max_blocks  = blocks;
+    g_graph_cost_cache[free_slot].exec   = exec;
+    g_graph_cost_cache[free_slot].tokens = tokens;
   } else if (!g_graph_cost_full_warned) {
     g_graph_cost_full_warned = 1;
     LOGGER(WARNING, "graph cost cache full (%d entries); newly-instantiated "
@@ -4436,13 +4320,12 @@ static void graph_cost_remember(CUgraphExec exec, int grids, int blocks) {
   pthread_mutex_unlock(&g_graph_cost_lock);
 }
 
-static int graph_cost_lookup(CUgraphExec exec, int *grids, int *blocks) {
+static int graph_cost_lookup(CUgraphExec exec, int64_t *tokens) {
   if (unlikely(!exec)) return 0;
   pthread_mutex_lock(&g_graph_cost_lock);
   for (int i = 0; i < GRAPH_COST_CACHE_SIZE; i++) {
     if (g_graph_cost_cache[i].exec == exec) {
-      *grids  = g_graph_cost_cache[i].total_grids;
-      *blocks = g_graph_cost_cache[i].max_blocks;
+      *tokens = g_graph_cost_cache[i].tokens;
       pthread_mutex_unlock(&g_graph_cost_lock);
       return 1;
     }
@@ -4456,9 +4339,8 @@ static void graph_cost_forget(CUgraphExec exec) {
   pthread_mutex_lock(&g_graph_cost_lock);
   for (int i = 0; i < GRAPH_COST_CACHE_SIZE; i++) {
     if (g_graph_cost_cache[i].exec == exec) {
-      g_graph_cost_cache[i].exec        = NULL;
-      g_graph_cost_cache[i].total_grids = 0;
-      g_graph_cost_cache[i].max_blocks  = 0;
+      g_graph_cost_cache[i].exec   = NULL;
+      g_graph_cost_cache[i].tokens = 0;
       break;
     }
   }
@@ -4468,11 +4350,9 @@ static void graph_cost_forget(CUgraphExec exec) {
 static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph) {
   if (unlikely(!exec || !src_graph)) return;
   int64_t total = 0;
-  int max_blocks = 1;
-  walk_graph_cost(src_graph, &total, &max_blocks);
+  walk_graph_cost(src_graph, &total);
   if (total > 0) {
-    if (total > INT_MAX) total = INT_MAX;
-    graph_cost_remember(exec, (int)total, max_blocks);
+    graph_cost_remember(exec, total);
     return;
   }
   /* Walk found no kernel work in this graph. For cuGraphInstantiate this
@@ -4559,9 +4439,9 @@ CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
   int host_index = get_host_device_index_by_cuda_device(device);
-  int grids = 1, blocks = 1;
-  graph_cost_lookup(hGraphExec, &grids, &blocks);
-  rate_limiter(grids, blocks, host_index);
+  int64_t tokens = 1;
+  graph_cost_lookup(hGraphExec, &tokens);
+  rate_limiter(tokens, host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuGraphLaunch),
                          hGraphExec, hStream);
@@ -4576,9 +4456,9 @@ CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
   int host_index = get_host_device_index_by_cuda_device(device);
-  int grids = 1, blocks = 1;
-  graph_cost_lookup(hGraphExec, &grids, &blocks);
-  rate_limiter(grids, blocks, host_index);
+  int64_t tokens = 1;
+  graph_cost_lookup(hGraphExec, &tokens);
+  rate_limiter(tokens, host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphLaunch_ptsz,
                          hGraphExec, hStream);
@@ -4606,7 +4486,7 @@ CUresult cuGraphExecDestroy(CUgraphExec hGraphExec) {
  * Deliberately does NOT call graph_cost_forget() before the walk:
  * graph_cost_remember() overwrites in place, whereas dropping the entry
  * first would open a window where a concurrent cuGraphLaunch misses the
- * cache and degrades to grids=1 (effectively unthrottled). Since
+ * cache and degrades to tokens=1 (effectively unthrottled). Since
  * cuGraphExecUpdate only succeeds when the topology is unchanged, the OLD
  * cost is a close approximation to the NEW one for that window. */
 static void refresh_cost_on_update(CUresult ret, CUgraphExec hGraphExec, CUgraph hGraph) {

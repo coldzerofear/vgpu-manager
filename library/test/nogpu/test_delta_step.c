@@ -441,10 +441,10 @@ static void test_invariants(void) {
     /* Firing state: target 50, util 80, consumed 3000 < share 10000,
      * bucket 100000 > 8 * share. */
     int drain = 0;
-    int64_t fired = sm_delta_observe(50, 80, 10000, 9000, 100000, 3000, &drain);
+    int64_t fired = sm_delta_observe(1000000, 50, 80, 10000, 9000, 100000, 3000, &drain);
     int ok = fired == 3000 * 50 / 80 && drain == 1;
     /* never raises the step's own result */
-    ok &= sm_delta_observe(50, 80, 10000, 1000, 100000, 3000, &drain) == 1000 && drain == 1;
+    ok &= sm_delta_observe(1000000, 50, 80, 10000, 1000, 100000, 3000, &drain) == 1000 && drain == 1;
     struct { int up, util; int64_t share, bucket, consumed; } off[] = {
       {100, 100, 10000, 100000, 3000},   /* unlimited                         */
       {50, 59, 10000, 100000, 3000},     /* overshoot < 10 points             */
@@ -454,8 +454,8 @@ static void test_invariants(void) {
       {50, 80, 10000, 80000, 3000},      /* backlog not above 8 cycles: pause */
     };
     for (unsigned i = 0; i < sizeof(off) / sizeof(off[0]); i++) {
-      int64_t r = sm_delta_observe(off[i].up, off[i].util, off[i].share, 7777, off[i].bucket,
-                                   off[i].consumed, &drain);
+      int64_t r = sm_delta_observe(1000000, off[i].up, off[i].util, off[i].share, 7777,
+                                   off[i].bucket, off[i].consumed, &drain);
       ok &= r == 7777 && drain == 0;
     }
     if (!ok) {
@@ -463,6 +463,298 @@ static void test_invariants(void) {
       failures++;
     } else {
       printf("  [ok] observed cut caps at consumed*target/util + drain; each gate alone keeps it off\n");
+    }
+  }
+
+  /* v16 headroom: share may pass the pool only as far as twice the measured
+   * consumption, never above DELTA_HEADROOM_POOLS pools, and an idle cycle
+   * neither grows it past the pool nor pushes an established share down. */
+  {
+    int64_t total = 108LL * 2048 * 256;
+    int ok = sm_delta_share_cap(total, 0, -1) == total                    /* unknown       */
+          && sm_delta_share_cap(total, 0, 0) == total                     /* idle          */
+          && sm_delta_share_cap(total, 0, total / 2) == total             /* below a pool  */
+          && sm_delta_share_cap(total, 0, 3 * total) == 6 * total         /* demand x2     */
+          && sm_delta_share_cap(total, 50 * total, 0) == 50 * total       /* idle holds    */
+          && sm_delta_share_cap(total, 50 * total, 3 * total) == 50 * total
+          && sm_delta_share_cap(total, 0, INT64_MAX / 4) == total * DELTA_HEADROOM_POOLS
+          && sm_delta_share_cap(INT64_MAX / 2, 0, INT64_MAX / 2) == INT64_MAX;
+    /* the step follows the cap: unlimited targets return it, growth stops at it */
+    ok &= sm_delta_step_cap(total, 7 * total, 100, 0, 0, 0, 0, DIV, 64) == 7 * total;
+    ok &= sm_delta_step_cap(total, total, 50, 0, total, -1, 0, DIV, 64) == total;
+    ok &= sm_delta_step_cap(total, 4 * total, 50, 0, 3 * total, -1, 0, DIV, 64) > 3 * total;
+    ok &= sm_delta_step_cap(total, 4 * total, 50, 0, 3 * total, -1, 0, DIV, 64) <= 4 * total;
+    if (!ok) {
+      printf("  [FAIL] headroom: share cap or unlimited target\n");
+      failures++;
+    } else {
+      printf("  [ok] headroom: share past the pool only on measured demand (x2/cycle), idle holds\n");
+    }
+  }
+
+  /* v16 observe gates: a saturated reading is the overshoot above a 90..95
+   * target (none above 95), and past the pool the backlog gate is 1.9 cycles. */
+  {
+    int drain = 0, ok = 1;
+    int64_t total = 1000000;
+    /* target 93: util 100 is 7 over -- fires; util 99 does not */
+    ok &= sm_delta_observe(total, 93, 100, 10000, 9000, 100000, 3000, &drain) == 3000 * 93 / 100 && drain;
+    ok &= sm_delta_observe(total, 93, 99, 10000, 9000, 100000, 3000, &drain) == 9000 && !drain;
+    ok &= sm_delta_observe(total, 95, 100, 10000, 9000, 100000, 3000, &drain) == 3000 * 95 / 100 && drain;
+    ok &= sm_delta_observe(total, 96, 100, 10000, 9000, 100000, 3000, &drain) == 9000 && !drain;
+    ok &= sm_delta_observe(total, 90, 100, 10000, 9000, 100000, 3000, &drain) == 3000 * 90 / 100 && drain;
+    ok &= sm_delta_observe(total, 90, 99, 10000, 9000, 100000, 3000, &drain) == 9000 && !drain;
+    /* deep share (past the pool): 1.5-cycle backlog gate */
+    int64_t sh = 3 * total;
+    ok &= sm_delta_observe(total, 50, 80, sh, sh, sh / 10 * 15 + 1, total, &drain) == total * 50 / 80 && drain;
+    ok &= sm_delta_observe(total, 50, 80, sh, sh, sh / 10 * 15, total, &drain) == sh && !drain;
+    if (!ok) {
+      printf("  [FAIL] observe gates: high-target saturation trigger or deep backlog gate\n");
+      failures++;
+    } else {
+      printf("  [ok] observe: saturated reading triggers at targets 90-95 only; deep share gates at 1.5 cycles\n");
+    }
+  }
+
+  /* v16.1 sample-driven estimate. One cycle = 100 ms; samples and cycle
+   * reads on the same millisecond grid, so window weights are exact. */
+  {
+    int ok = 1, drain = 0;
+    const int64_t total = 1000000;
+    sm_delta_est_t st;
+    int64_t r = 0;
+
+    /* acts once per window: the first sample opens it, the next one 500 ms
+     * later closes it at starved-mean * target / reading; holds in between */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      r = sm_delta_est_control(&st, total, 25, 50, t < 6 ? 100 : 600, t * 100, 5000, 0, 0,
+                               5000, DIV, 64, &drain);
+    }
+    ok &= r == 5000 * 25 / 50 && st.have_est;
+    ok &= sm_delta_est_control(&st, total, 25, 50, 600, 700, 2500, 0, 0, 2500, DIV, 64, &drain) == 2500;
+    int once = ok;
+
+    /* a sample every cycle: nothing until 500 ms of samples are in */
+    memset(&st, 0, sizeof st);
+    int early = 0;
+    for (int t = 1; t <= 5; t++) {
+      r = sm_delta_est_control(&st, total, 25, 50, t * 100, t * 100, 5000, 0, 0, 5000, DIV, 64, &drain);
+      early |= st.have_est;
+    }
+    ok &= !early;
+    r = sm_delta_est_control(&st, total, 25, 50, 600, 600, 5000, 0, 0, 5000, DIV, 64, &drain);
+    ok &= r == 2500 && st.have_est;
+    int window = ok;
+
+    /* aligned by timestamp: the sample (ts 600) arrives at 900 and the
+     * cycles after 600 were idle -- they are not part of its window */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 9; t++) {
+      int64_t c = t <= 6 ? 5000 : 0;
+      r = sm_delta_est_control(&st, total, 25, 50, t < 9 ? 100 : 600, t * 100, 5000,
+                               c ? 0 : 5000, 0, c, DIV, 64, &drain);
+    }
+    ok &= r == 2500;
+    int aligned = ok;
+
+    /* a starved zero means util < 1: consumption * target is a lower bound */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      r = sm_delta_est_control(&st, total, 40, 0, t < 6 ? 100 : 600, t * 100, 1000, 0, 0,
+                               1000, DIV, 64, &drain);
+    }
+    ok &= r == 1000 * 40 && st.zero_starved;
+    int lower = ok;
+
+    /* an idle zero (nothing consumed, bucket full) holds share, before and
+     * after an estimate */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 12; t++) {
+      r = sm_delta_est_control(&st, total, 40, 0, t < 6 ? 100 : 600, t * 100, 7000, 7000, 0, 0,
+                               DIV, 64, &drain);
+    }
+    ok &= r == 7000;
+    int idle = ok;
+
+    /* an unconstrained window (surplus) cuts to mean consumption in one step
+     * and drains the backlog */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      r = sm_delta_est_control(&st, total, 50, 100, t < 6 ? 100 : 600, t * 100, 100000, 150000,
+                               0, 10000, DIV, 64, &drain);
+    }
+    ok &= r == 10000 * 50 / 100 && drain == 1;
+    int cut = ok;
+
+    /* a constrained window is sized by the cycles that hit the share: heavy
+     * cycles (8000, starved) alternate with light ones (100, under the cap);
+     * the mean would give 2025 */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      int heavy = t % 2 == 0;
+      r = sm_delta_est_control(&st, total, 30, 60, t < 6 ? 100 : 600, t * 100, 8000,
+                               heavy ? 0 : 7900, 0, heavy ? 8000 : 100, DIV, 64, &drain);
+    }
+    ok &= r == 8000 * 30 / 60;
+    int constrained = ok;
+
+    /* demand drop: after an estimate on 5000 a cycle, two unthrottled cycles
+     * at 1000 (< 5000/4) cut to consumption * target / 100 and drain; one
+     * cycle does not, and an idle cycle (0) is not a drop */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      r = sm_delta_est_control(&st, total, 25, 50, t < 6 ? 100 : 600, t * 100, 5000, 0, 0,
+                               5000, DIV, 64, &drain);
+    }
+    int64_t first = sm_delta_est_control(&st, total, 25, 50, 600, 700, 2500, 4000, 0, 1000, DIV, 64, &drain);
+    int64_t idle_r = sm_delta_est_control(&st, total, 25, 50, 600, 800, 2500, 4000, 0, 0, DIV, 64, &drain);
+    sm_delta_est_control(&st, total, 25, 50, 600, 900, 2500, 4000, 0, 1000, DIV, 64, &drain);
+    r = sm_delta_est_control(&st, total, 25, 50, 600, 1000, 2500, 4000, 0, 1000, DIV, 64, &drain);
+    ok &= first == 2500 && idle_r == 2500 && r == 1000 * 25 / 100 && drain == 1;
+    int dropped = ok;
+
+    /* a huge launch (2^61 tokens) in a drop cycle: 128-bit, no overflow */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      sm_delta_est_control(&st, total, 25, 50, t < 6 ? 100 : 600, t * 100, 5000, 0, 0,
+                           5000, DIV, 64, &drain);
+    }
+    st.ref_consumed = INT64_MAX;
+    sm_delta_est_control(&st, total, 99, 50, 600, 700, 2500, 4000, 0, (int64_t)1 << 61, DIV, 64, &drain);
+    r = sm_delta_est_control(&st, total, 99, 50, 600, 800, 2500, 4000, 0, (int64_t)1 << 61, DIV, 64, &drain);
+    ok &= r == 2500;
+    int huge = ok;
+
+    /* an unlimited target after an estimate rails share to its cap instead of
+     * holding the estimate (a soft limit of 100 once the device is exclusive) */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 6; t++) {
+      r = sm_delta_est_control(&st, total, 50, 50, t < 6 ? 100 : 600, t * 100, 5000, 0, 0,
+                               5000, DIV, 64, &drain);
+    }
+    ok &= st.have_est && r == 5000;
+    r = sm_delta_est_control(&st, total, 100, 50, 600, 700, 5000, 0, 0, 5000, DIV, 64, &drain);
+    ok &= r == sm_delta_share_cap(total, 5000, 5000);
+    int unlimited = ok;
+
+    /* a sample after an hour without any: the period is bounded, the
+     * accumulators stay in range and the window estimates as usual */
+    memset(&st, 0, sizeof st);
+    sm_delta_est_control(&st, total, 25, 50, 100, 100, 5000, 0, 0, 5000, DIV, 64, &drain);
+    for (int t = 2; t <= 6; t++) {
+      r = sm_delta_est_control(&st, total, 25, 1000, t < 6 ? 100 : 3600100, t * 100, 5000, 0, 0,
+                               5000, DIV, 64, &drain);
+    }
+    ok &= st.win_ms == 0 && st.win_reading_ms == 0 && r == (5000 * 25 + 500) / 1000;
+    int gap = ok;
+
+    /* bucket bounds: two cycles of share above (at least a token), a hundred
+     * below, saturating */
+    ok &= sm_delta_est_bucket_ceiling(0) == 1 && sm_delta_est_bucket_ceiling(5000) == 10000
+       && sm_delta_est_bucket_ceiling(INT64_MAX - 1) == INT64_MAX;
+    ok &= sm_delta_debt_floor(5000, 10000) == -500000 && sm_delta_debt_floor(0, 1) == -1
+       && sm_delta_debt_floor(INT64_MAX / 4, INT64_MAX) == -INT64_MAX;
+    if (!ok) {
+      printf("  [FAIL] estimate: once %d window %d aligned %d lower %d idle %d cut %d constrained %d drop %d "
+             "huge %d unlimited %d gap %d bounds %d\n",
+             once, window, aligned, lower, idle, cut, constrained, dropped, huge, unlimited, gap, ok);
+      failures++;
+    } else {
+      printf("  [ok] estimate: once per >=500 ms window, timestamp-aligned, starved-zero bound, idle holds, "
+             "surplus cut+drain, constrained by starved cycles, demand-drop guard, unlimited rails, long gaps bounded; "
+             "bucket 2 cycles up, 100 down\n");
+    }
+  }
+
+  /* Sliding readings (sm_delta_est_control_avg): a 200 ms sample period,
+   * each reading the mean of the last second, as NVML returns for a 1 s
+   * lookback on an RTX 3090. Cycles every 100 ms, as in the tests above. */
+  {
+    int ok = 1, drain = 0;
+    const int64_t total = 1000000;
+    sm_delta_est_t st;
+    int64_t r = 0;
+
+    /* steady, starved: each window pairs the mean reading with the mean
+     * consumption over the spans its samples cover -- the same C * u / m */
+    memset(&st, 0, sizeof st);
+    int64_t est = 0;
+    for (int t = 1; t <= 30; t++) {
+      uint64_t ts = (uint64_t)(t / 2) * 200;
+      int32_t open = st.win_ms;
+      r = sm_delta_est_control_avg(&st, total, 50, 25, 25, ts, 1000, t * 100, 5000, 0, 0,
+                                   5000, DIV, 64, &drain);
+      if (open > 0 && st.win_ms == 0) {
+        est = r;   /* the cycle that closed a window */
+      }
+    }
+    int steady = st.have_est && st.period_ms == 200 && est == 5000 * 50 / 25;
+    ok &= steady;
+
+    /* a 0 with the bucket dry acts on the sample if the device read 0 too
+     * (idle because we hold it); not if another container had the GPU */
+    int acted[2];
+    for (int dev = 0; dev < 2; dev++) {
+      memset(&st, 0, sizeof st);
+      for (int t = 1; t <= 16; t++) {
+        uint64_t ts = (uint64_t)(t / 2) * 200;
+        sm_delta_est_control_avg(&st, total, 50, 25, 25, ts, 1000, t * 100, 5000, 0, 0,
+                                 5000, DIV, 64, &drain);
+      }
+      int32_t before = st.win_ms;
+      sm_delta_est_control_avg(&st, total, 50, 0, dev ? 40 : 0, 1800, 1000, 1700, 5000, 0, 0,
+                               1, DIV, 64, &drain);
+      acted[dev] = before < DELTA_EST_MIN_WINDOW_MS && st.win_ms == 0;
+    }
+    int zero = acted[0] && !acted[1];
+    ok &= zero;
+
+    /* a silence (a 3 s gap) does not stretch the period */
+    memset(&st, 0, sizeof st);
+    for (int t = 1; t <= 10; t++) {
+      sm_delta_est_control_avg(&st, total, 50, 25, 25, (uint64_t)(t / 2) * 200, 1000, t * 100,
+                               5000, 0, 0, 5000, DIV, 64, &drain);
+    }
+    sm_delta_est_control_avg(&st, total, 50, 25, 25, 4000, 1000, 4000, 5000, 0, 0, 5000, DIV, 64,
+                             &drain);
+    int silence = st.period_ms == 200;
+    ok &= silence;
+
+    /* ...but DELTA_EST_PERIOD_READOPT long gaps in a row are the period */
+    int long_seen = 0;
+    for (int k = 1; k <= DELTA_EST_PERIOD_READOPT; k++) {
+      long_seen |= st.period_ms != 200 && k < DELTA_EST_PERIOD_READOPT;
+      sm_delta_est_control_avg(&st, total, 50, 25, 25, 4000 + (uint64_t)k * 600, 1000,
+                               4000 + k * 600, 5000, 0, 0, 5000, DIV, 64, &drain);
+    }
+    int readopt = !long_seen && st.period_ms == 600;
+    ok &= readopt;
+
+    if (!ok) {
+      printf("  [FAIL] sliding estimate: steady %d (est %lld) zero-acts %d/%d silence %d readopt %d (period %d) zero %d\n",
+             steady, (long long)est, acted[0], acted[1], silence, readopt, st.period_ms, zero);
+      failures++;
+    } else {
+      printf("  [ok] sliding estimate: span-paired C*u/m, zero acts only on an idle device, "
+             "silences do not stretch the period, repeated long gaps re-set it\n");
+    }
+  }
+
+  /* v16 charge: grid x block threads, saturating instead of wrapping. */
+  {
+    int ok = sm_launch_tokens(1, 1, 1, 1, 1, 1) == 1
+          && sm_launch_tokens(2048, 1, 1, 256, 1, 1) == 2048 * 256
+          && sm_launch_tokens(132, 1, 1, 384, 1, 1) == 132 * 384
+          && sm_launch_tokens(0, 1, 1, 1024, 1, 1) == 0
+          && sm_launch_tokens(4294967295ULL, 65535, 65535, 1024, 1, 1) == SM_LAUNCH_TOKENS_MAX
+          && sm_launch_tokens(2147483647ULL, 65535, 1, 1024, 1, 1) == (int64_t)2147483647 * 65535 * 1024
+          && sm_launch_tokens(65536, 65536, 1, 1024, 1, 1) == (int64_t)1 << 42;
+    if (!ok) {
+      printf("  [FAIL] sm_launch_tokens: wrong product or wrapped instead of saturating\n");
+      failures++;
+    } else {
+      printf("  [ok] launch charge = grid x block threads, saturating at INT64_MAX/4\n");
     }
   }
 }

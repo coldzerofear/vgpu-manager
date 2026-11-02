@@ -40,23 +40,10 @@ static volatile uint64_t g_oom_driver_return_total[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_gap_throttle_total[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_gap_sleep_us_total[MAX_DEVICE_COUNT] = {0};
 
-/* V2.1 + P1 observability counters. Together they let an operator confirm
- * the new anti-sawtooth + exclusivity-FSM machinery is actually firing in
- * production -- without these, those code paths are invisible from logs. */
+/* Exclusivity-FSM observability counters: without these the FSM's flips
+ * are invisible from logs. */
 static volatile uint64_t g_exclusivity_flip_gained_total[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_exclusivity_flip_lost_total[MAX_DEVICE_COUNT]   = {0};
-static volatile uint64_t g_aimd_md_total[MAX_DEVICE_COUNT]                 = {0};
-static volatile uint64_t g_aimd_md_blocked_total[MAX_DEVICE_COUNT]         = {0};
-static volatile uint64_t g_aimd_deadband_hit_total[MAX_DEVICE_COUNT]       = {0};
-
-/* SM controller label included in rate_limit_hit emissions. Set once at
- * init by sm_controller_init() in cuda_hook.c; "delta" is the safe default
- * if init is delayed (counter still increments, label is just the default). */
-static const char *g_sm_controller_label = "delta";
-
-void metrics_set_controller_label(const char *name) {
-  if (name && *name) g_sm_controller_label = name;
-}
 
 static int is_valid_metric_index(int index) {
   return index >= 0 && index < MAX_DEVICE_COUNT;
@@ -165,15 +152,10 @@ void metrics_record_rate_limit_hit(int host_index) {
     return;
   }
   total = __sync_add_and_fetch(&g_kernel_rate_limit_hit_total[host_index], 1);
-  /* Power-of-two sampling matches maybe_log_counter_metric. The controller
-   * label lets operators distinguish hit-rate distribution shifts caused by
-   * switching CUDA_SM_CONTROLLER (e.g. delta -> aimd) from real workload
-   * changes. AIMD typically increases the hit count (tighter control => more
-   * frequent shorter rate_limiter sleeps) which would otherwise look like a
-   * regression on dashboards. */
+  /* Power-of-two sampling matches maybe_log_counter_metric. */
   if ((total & (total - 1)) == 0) {
-    LOGGER(INFO, "metric=kernel_rate_limit_hit host_device=%d controller=%s total=%" PRIu64,
-           host_index, g_sm_controller_label, total);
+    LOGGER(INFO, "metric=kernel_rate_limit_hit host_device=%d total=%" PRIu64,
+           host_index, total);
   }
 }
 
@@ -239,25 +221,5 @@ void metrics_record_exclusivity_flip(int host_index,
     maybe_log_counter_metric("exclusivity_flip_lost", host_index,
                              &g_exclusivity_flip_lost_total[host_index]);
     return;
-  }
-}
-
-void metrics_record_aimd_event(int host_index, metrics_aimd_event_t event) {
-  if (!should_collect_metrics() || !is_valid_metric_index(host_index)) {
-    return;
-  }
-  switch (event) {
-    case METRICS_AIMD_MD_FIRED:
-      maybe_log_counter_metric("aimd_md", host_index,
-                               &g_aimd_md_total[host_index]);
-      return;
-    case METRICS_AIMD_MD_BLOCKED:
-      maybe_log_counter_metric("aimd_md_blocked", host_index,
-                               &g_aimd_md_blocked_total[host_index]);
-      return;
-    case METRICS_AIMD_DEADBAND_HIT:
-      maybe_log_counter_metric("aimd_deadband_hit", host_index,
-                               &g_aimd_deadband_hit_total[host_index]);
-      return;
   }
 }

@@ -1712,11 +1712,7 @@ static void sm_node_rebuild_locked(sm_node_region_t *r) {
   for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
     /* Seed up_limit here, once, rather than in each watcher thread -- that
      * stops a late-joining process from resetting the container's already
-     * converged limit every time it starts a watcher. total_cuda_cores is
-     * left 0: it depends on CUDA device properties not yet queried, and is
-     * published later purely for observability -- the authoritative ceiling
-     * stays the per-process g_total_cuda_cores[], computed identically by
-     * every process from the same device. */
+     * converged limit every time it starts a watcher. */
     r->devices[i].up_limit = get_device_snapshot(i).hard_core;
   }
 
