@@ -709,13 +709,12 @@ func IsHealthy(taints []resourceapi.DeviceTaint) bool {
 	return true
 }
 
-// updateSMWatcherHealth tells the SM watcher which devices to stop sampling.
-// A NoSchedule taint evicts nothing, so containers keep running on a device with
-// a fatal XID and still depend on the shared samples. Only a lost GPU, which
-// NVML can no longer reach, is skipped.
-func updateSMWatcherHealth(healthDeviceMap map[string]*manager.GPUDevice, dev *AllocatableDevice, eventType DeviceHealthEventType) {
-	if device, ok := healthDeviceMap[dev.CanonicalName()]; ok && eventType == HealthEventGPULost {
-		device.Healthy = false
+// updateSMWatcherHealth stops sampling a device that carries a NoSchedule taint.
+// This is deliberate: workloads on the device then fall back to local NVML
+// polling and log it, which is how users notice a GPU that needs repair.
+func updateSMWatcherHealth(healthDeviceMap map[string]*manager.GPUDevice, dev *AllocatableDevice) {
+	if device, ok := healthDeviceMap[dev.CanonicalName()]; ok {
+		device.Healthy = IsHealthy(dev.Taints())
 	}
 }
 
@@ -739,7 +738,7 @@ func (d *driver) deviceHealthEvents(ctx context.Context, healthDeviceMap map[str
 				klog.Warningf("Received %s health event for device %s", event.EventType, dev.CanonicalName())
 				if d.state.AddDeviceTaint(dev, taint) {
 					modified = true
-					updateSMWatcherHealth(healthDeviceMap, dev, event.EventType)
+					updateSMWatcherHealth(healthDeviceMap, dev)
 				}
 			}
 			if !modified {

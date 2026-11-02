@@ -125,6 +125,7 @@ The rules it enforces:
 * `VGPUSupport` ⊗ `MPSSupport`
 * `VGPUSupport` ⊗ `PassthroughSupport`
 * `VGPUSupport` ⊗ `IMEXDaemonsWithDNSNames`
+* `RemoteGPUSupport` ⊗ `DynamicMIG`
 * `DynamicMIG` ⊗ `PassthroughSupport`
 * `DynamicMIG` ⊗ `MPSSupport`
 * `PassthroughSupport` ⊗ `NVMLDeviceHealthCheck`
@@ -291,8 +292,9 @@ Watches NVML events (Xid, ECC) and applies DRA device taints to unhealthy device
 stops placing new claims on them. Off by default in the driver; the chart turns it on.
 
 An error of a whole GPU taints every device announced on it, including its MIG devices. Tainted
-devices keep running their workloads, so `SharedSMUtilizationWatcher` keeps sampling them and only
-stops on a GPU that is lost.
+devices keep running their workloads. `SharedSMUtilizationWatcher` stops sampling a device with a
+NoSchedule taint on purpose: its workloads fall back to local NVML polling and log a WARNING
+(`fallback to nvml driver`), which shows the GPU needs repair.
 
 ### NRISupport
 
@@ -313,7 +315,8 @@ instead of being pre-configured on the node.
 With `VGPUSupport` on, a GPU that supports it is announced as both a vGPU and MIG devices, and is
 used as one or the other at any given time: a single vGPU claim keeps MIG devices off that GPU and
 a single MIG device keeps vGPU claims off it. It switches when the last claim of one kind is gone.
-vGPU devices do not run inside MIG devices.
+vGPU devices do not run inside MIG devices. See
+[how_to_use_dra_dynamic_mig.md](./how_to_use_dra_dynamic_mig.md) for setup and examples.
 
 | GPU | Announced | Switches |
 | --- | --- | --- |

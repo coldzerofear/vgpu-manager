@@ -160,7 +160,7 @@ go-nvml 的返回顺序是 `(activationStatus, ret)`，而 `nvlib.go:612`、`nvl
 - 一个容器同时请求 vGPU 与 MIG 时没有 webhook 拒绝，`libvgpu-control.so` 不感知 MIG，行为未定义。
 - 时间片复位在其他 vGPU claim 还在用这张卡时也会执行：`isGpuUUIDInUseByOtherClaims` 只看 `dev.Gpu`，不看 `dev.VGpu`。
 - `partitions.go:233`：DynamicMIG 开启、卡不可动态 MIG 但已开 MIG（仅 vGPU guest）时会 panic，场景很窄，记录不修。
-- 调度是 first-fit，不感知"卡的模式"，混合负载下可能把多张卡各占一点。需要固定比例时，用节点分组或 selector 约束。
+- 调度是 first-fit，不感知卡的模式。初稿"把多张卡各占一点"不准确，节点内实际按模式聚拢，见第 9 节。
 
 ## 4. 建议改造顺序
 
@@ -234,22 +234,21 @@ go-nvml 的返回顺序是 `(activationStatus, ret)`，而 `nvlib.go:612`、`nvl
 
 ### 7.1 健康检查对 SM watcher 的影响
 
-存在影响，基线上被 3.2 掩盖，修 3.2 后才会真正触发，所以一并处理：
+基线行为：`Healthy = IsHealthy(taints)`，设备带 NoSchedule 污点后 `smWatcherSingleDevice` 直接返回，`LastSeenTimeStamp` 停止刷新。
+基线上 3.2 使整卡 XID 根本打不到 vGPU 上，这条路径实际被掩盖，修 3.2 后才真正生效。
 
-- `smWatcherSingleDevice` 遇到 `!Healthy` 直接返回，`LastSeenTimeStamp` 停止刷新。
-- 基线下 `Healthy` 由 `IsHealthy(taints)` 计算，且污点不恢复，一次致命 XID 会让该卡 watcher 永久停摆。
-- NoSchedule 不驱逐，业务继续运行。读方前 5 秒拿到冻结样本，之后每个容器退回本地 NVML 轮询（限流仍然有效，但
-  O(1) 退化为 O(N)）。
+**决策（2026-11-02）**：保留基线语义，致命 XID 和 GPU_LOST 都停止采样。首版修复曾改为仅 GPU_LOST 才停，已撤回。
+停采是有意的告警手段：业务退回本地 NVML 采样并输出回退日志，用户据此发现坏卡并联系管理员。
 
-修复：`Healthy` 在 DRA 路径只有 watcher 使用，改为仅 `GPU_LOST` 才置 false。另外
+代价：
+
+- 该卡容器从共享 watcher 退回每容器轮询（O(1) 变 O(N)），限流仍然有效。
+- 污点不恢复，修复硬件后要重启插件，否则该卡 watcher 一直停着。
+- 回退日志：原先 `fallback to nvml driver` 是 VERBOSE，默认 `LOGGER_LEVEL=2` 下看不到。43ef197 已改为 WARNING，
+  按 `WATCHER_UTIL_LOG_STRIDE` 节流（约每 63 次采样一次）；`metric=nvml_fallback` 只在启用外部 watcher 时计数。
+
 `healthDeviceMap` 原先在 goroutine 里填充，同时被健康事件循环读取，存在 map 并发读写，已改为启动 goroutine 前同步填好。
-
-仍存在的限制：
-
-- NVML 的 `GPU_LOST` 通常分不清是哪张卡，会标记全节点，此时所有卡的 watcher 都停，直到插件重启，容器走本地轮询。
-- `Healthy` 是无同步的 bool，读写之间有良性数据竞争。
-- device-plugin 路径的 `Healthy` 同样让 watcher 跳过，但语义不同（设备会从 kubelet 摘除），本次未改。
-- device-monitor 不读这份共享文件，不受影响。
+`Healthy` 是无同步的 bool，读写之间有良性数据竞争。device-monitor 不读这份共享文件，不受影响。
 
 ### 7.2 校正
 
@@ -268,7 +267,7 @@ go-nvml 的返回顺序是 `(activationStatus, ret)`，而 `nvlib.go:612`、`nvl
 | --- | --- |
 | `GetGPUDeviceByUUID` 不识别 vGPU | 被 `TestFullGPUXIDAffectsWholeCard` 等发现 |
 | 整卡事件不扇出 | 被 `TestFullGPUXIDAffectsWholeCard` 发现 |
-| XID 也让 watcher 停止 | 被 `TestUpdateSMWatcherHealth` 发现 |
+| 致命污点不停 watcher | 被 `TestUpdateSMWatcherHealth` 覆盖（7.1 撤回后重写，未重跑变异） |
 | 最低版本放宽到 1.36.1 | 被 `TestValidateVGPUDynamicMIGSupport` 发现 |
 | 不读实时 MIG 状态 | 被 `TestMaybeDisableMigMode` 发现 |
 | 卡级 XID 被 MIG 销毁清掉 | 被 `TestClearDynamicMIGXIDTaintKeepsCardLevelXID` 发现 |
@@ -280,3 +279,81 @@ go-nvml 的返回顺序是 `(activationStatus, ret)`，而 `nvlib.go:612`、`nvl
 `TestClearDynamicMIGXIDTaint` 的 `MigSpec` 没有 Parent。生产路径上这些状态都不会出现，所以改夹具，没有加防御代码。
 
 `ensureMigDisabled` 串入 `prepareDevices` 的调用点、`NewDriver` 里的版本校验调用点只有单元级覆盖，没有端到端测试。
+
+## 8. 未修复项细节
+
+### 8.1 启动时拓扑/内存读取早于 MIG 清理（3.6）
+
+只在插件重启时卡仍处于 MIG 模式才触发。`link-strict` 一直不匹配或 `vgpu-N` 内存读数偏差，重启插件可恢复。
+待真机确认：MIG 模式下 NVML 的链路和内存读数是否真的不同。确认后把清理移到读取之前，或清理后重读。
+
+### 8.2 vGPU guest panic（不处理）
+
+NVIDIA vGPU（GRID）虚拟机：`isDynamicMIGCapable` 对其返回 false，若卡此时处于 MIG 模式且有实例，会产生静态 MIG 设备，
+`DynamicMIG` 下的 `PartGetDevice` 在 `partitions.go:233` panic。GRID guest 一般不支持 MIG，条件不成立，按决定不处理。
+
+## 9. 设备调度策略调研
+
+### 9.1 上游现状（k8s 1.37.1 源码）
+
+- 分配器没有设备打分：`allocator_incubating.go:938` 注释写明 "Without scoring, we stop and use the first solution"。
+- 遍历顺序固定：pool 按名字，slice 按名字，设备按 slice 内顺序。本驱动设备名排序，所以卡序靠前优先。
+- 节点级 `Score`（`dynamicresources.go:1383`）只看 `firstAvailable` 命中的子请求序号，排名越靠前分越高，不看设备占用。
+- 上游跟踪项 [enhancements#4970](https://github.com/kubernetes/enhancements/issues/4970) 无 KEP，目标版本已过期；
+  [KEP-4815](https://www.kubernetes.dev/resources/keps/4815/) 把设备选择质量列为范围外；
+  [KEP-5517](https://github.com/kubernetes/enhancements/tree/master/keps/sig-scheduling/5517-dra-node-allocatable-resources) 的节点打分明确不做设备解析。
+
+结论：没有 binpack/spread 这类配置，等不到上游，短期也不会有。device-plugin 路径的策略不能照搬。
+
+### 9.2 仿真数据
+
+方法：真实分配器 v0.37.1，4 张 H100 夹具，split 切片，分配结果持久化到下一轮。临时测试，未入库。
+
+| 场景 | 结果 |
+| --- | --- |
+| A. 交替申请 vGPU(10 core, 8Gi) 与 MIG 1g 各 12 个 | vGPU 全在 `vgpu-0`，MIG 依次占 `gpu-1..3`，不分散。第 11 个 vGPU 起失败（`vgpu-0` cores 满，其余卡在 MIG 模式） |
+| B. 3 个 vGPU(60,60Gi)，再 MIG 1g，再整卡 MIG，再小 vGPU | vGPU 占 0/1/2，MIG 到 3，整卡 MIG 失败，小 vGPU 回填 `vgpu-0` |
+| C. 4 个 vGPU(60,60Gi)，再 MIG 1g | 4 张卡都进 vGPU 模式，各剩 40% 算力，MIG 失败 |
+
+单卡 MIG 数量由夹具 counter 决定，不代表真机。
+
+修正 3.7 初稿：节点内 first-fit 按模式聚拢，小负载不分散。真实缺口有三：
+
+1. 大 vGPU 溢出后把卡逐张锁进 vGPU 模式（场景 C）。
+2. 模式一旦锁定，容量互不流动，A 里 `vgpu-0` 满后 vGPU 失败，而其他卡只是部分被 MIG 占用。
+3. 跨节点没有聚拢：节点打分不看 GPU 占用，小 vGPU 可能分散到多个节点，每个节点各锁一张卡。这条来自代码阅读，未仿真。
+
+### 9.3 方案
+
+| 方案 | 做法 | 效果 | 代价 |
+| --- | --- | --- | --- |
+| 节点分组（现在可用） | nodeSelector 分 vGPU/MIG 节点池 | 容量确定 | 不能动态流动 |
+| firstAvailable + 动态属性（推荐做下一步） | 插件按卡实时发布 `mode` 属性；webhook 把 claim 改写成 `firstAvailable`：先选同模式卡，再选空闲卡 | 节点内优先同模式，且 `Score` 按子请求序号打分，跨节点也倾向已有同模式卡的节点 | 属性随 Prepare/Unprepare 重发 slice；有滞后，但只影响偏好，互斥仍由 counter 保证 |
+| Scheduler extender Prioritize | 复用现有 extender，按 ResourceSlice 和 claim 算节点分 | 策略灵活，能做 binpack/spread | 只管节点不管设备；需维护占用视图 |
+| 重排设备顺序 | 运行时调整 slice 内设备顺序 | 改 first-fit 落点 | 依赖未承诺的实现细节，不建议 |
+| 自定义调度器 | fork 分配器加打分 | 彻底 | 维护成本过高，不建议 |
+
+建议：现在用节点分组；要动态能力时做 firstAvailable + 动态属性。`mode` 属性方案尚未验证，动手前先用仿真确认 `firstAvailable` 改写与现有 claim 解析、拓扑阶梯的组合。
+
+## 10. DRA 路径 MIG 指标方案
+
+现状：`CollectBasedOnNvml` 已把实时 MIG 填进 `devMigInfosMap`，只差发布。动态 MIG 设备在 ResourceSlice 里没有 `uuid`
+（实例尚未创建），所以被 `dra_gpu.go` 的"无 uuid"分支跳过，`appendResult` 也拿不到它。
+
+方案：
+
+1. **设备指标**：把 `node_gpu.go:705-745` 抽成共用函数，容器归属用回调传入。`mig_device_*` 三个指标不依赖分配关系，先发布。
+2. **容器关联**：不能靠 UUID。allocation result 里是规格名，如 `gpu-0-mig-1g10gb-19-0`，用现有 `NewMigSpecTupleFromCanonicalName` 解析出
+   `(ParentMinor, ProfileID, PlacementStart)`，与实时 `MigInfo` 的 `(Parent.Minor, GiProfileInfo.Id, Placement.Start)` 匹配。
+   容器到 claim 的映射复用现有 `claimRefs` 逻辑，不走 device-plugin 的 PodResources。
+3. **静态 MIG**：slice 有 `uuid`，直接按 UUID 关联。
+4. **健康**：`migDeviceHealthStatus` 取父卡状态，再叠加该 MIG 设备自身的污点。动态设备按设备名查 slice。
+
+注意点：
+
+- `MigEnabled` 卡的 `vgpu-N` 仍在 slice 中，节点 vGPU 总量会把 MIG 模式的卡算进去，需要决定是否从 total 扣除。
+- 实例在采集中途可能被销毁，匹配不到时跳过。匹配不到要打 V(4) 日志，不能 panic，同 `dra_gpu.go:811` 的注释。
+- `container_mig_device_memory_*` 是实例级数据，无进程级拆分。MIG 没有整卡利用率，与 device-plugin 路径保持一致，不新增。
+- 需先在真机确认 `Placement.Start` 与发布的 `PlacementStart` 一致。
+
+工作量小，改动集中在 `pkg/metrics/collector`。

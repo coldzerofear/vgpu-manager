@@ -484,12 +484,11 @@ func TestUpdateSMWatcherHealth(t *testing.T) {
 	watched := &manager.GPUDevice{Healthy: true}
 	devices := map[string]*manager.GPUDevice{vg.CanonicalName(): watched}
 
-	updateSMWatcherHealth(devices, vg, HealthEventXID)
-	require.True(t, watched.Healthy, "workloads outlive a NoSchedule taint and still need the samples")
+	vg.AddOrUpdateTaint(&resourceapi.DeviceTaint{Key: TaintKeyUnmonitored, Effect: resourceapi.DeviceTaintEffectNone})
+	updateSMWatcherHealth(devices, vg)
+	require.True(t, watched.Healthy, "a non-fatal taint keeps the samples flowing")
 
-	updateSMWatcherHealth(devices, vg, HealthEventUnmonitored)
-	require.True(t, watched.Healthy)
-
-	updateSMWatcherHealth(devices, vg, HealthEventGPULost)
-	require.False(t, watched.Healthy)
+	vg.AddOrUpdateTaint(&resourceapi.DeviceTaint{Key: TaintKeyXID, Value: "79", Effect: resourceapi.DeviceTaintEffectNoSchedule})
+	updateSMWatcherHealth(devices, vg)
+	require.False(t, watched.Healthy, "a fatal XID stops sampling so workloads fall back and log it")
 }
