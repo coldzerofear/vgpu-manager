@@ -11,7 +11,7 @@ require (
 	github.com/NVIDIA/go-nvml v0.13.4-1
 	github.com/NVIDIA/nvidia-container-toolkit v1.20.1
 	github.com/adhocore/jsonc v0.10.0
-	github.com/containerd/nri v0.12.3
+	github.com/containerd/nri v0.12.5
 	github.com/docker/go-units v0.5.0
 	github.com/evanphx/json-patch v5.9.11+incompatible
 	github.com/fsnotify/fsnotify v1.10.1
