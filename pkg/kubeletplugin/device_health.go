@@ -264,11 +264,6 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 				continue
 			}
 
-			//if m.skippedXids[xid] {
-			//	klog.V(6).Infof("Skipping XID event: Data=%d, Type=%d, GI=%d, CI=%d", xid, eType, gi, ci)
-			//	continue
-			//}
-
 			klog.V(4).Infof("Processing event XID=%d event", xid)
 			// this seems an extreme action.
 			// should we just log the error and proceed anyway.
@@ -279,21 +274,21 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 				m.sendHealthEventForAllDevices(HealthEventGPULost)
 				continue
 			}
-			affectedDevice, err := m.resolveDeviceByEventAddress(eventUUID, event.Device, gi, ci)
-			// An error indicates inconsistent UUID/PCI inventory. A nil device
+			affectedDevices, err := m.resolveDevicesByEventAddress(eventUUID, event.Device, gi, ci)
+			// An error indicates inconsistent UUID/PCI inventory. No device
 			// without an error means the event's GI/CI is not available.
 			if err != nil {
 				klog.Warningf("Unable to resolve XID=%d event for UUID:%s, GI:%d, CI:%d: %v", xid, eventUUID, gi, ci, err)
 				continue
 			}
-			if affectedDevice == nil {
+			if len(affectedDevices) == 0 {
 				klog.V(6).Infof("Ignoring event for unexpected device (UUID:%s, GI:%d, CI:%d)", eventUUID, gi, ci)
 				continue
 			}
 
-			klog.V(4).Infof("Sending XID=%d health event for device %s", xid, affectedDevice.CanonicalName())
+			klog.V(4).Infof("Sending XID=%d health event for %d device(s), first: %s", xid, len(affectedDevices), affectedDevices[0].CanonicalName())
 			m.unhealthy <- &DeviceHealthEvent{
-				Devices:   []*AllocatableDevice{affectedDevice},
+				Devices:   affectedDevices,
 				EventType: HealthEventXID,
 				EventData: xid,
 			}
@@ -322,9 +317,12 @@ func (m *nvmlDeviceHealthMonitor) sendHealthEventForDevices(devices AllocatableD
 // ID, compute instance ID). A full-GPU event reports FullGPUInstanceID for both
 // the GPU instance ID and compute instance ID.
 //
-// resolveDeviceByEventAddress maps this address, extracted from an NVML event,
-// to an advertised allocatable device.
-func (m *nvmlDeviceHealthMonitor) resolveDeviceByEventAddress(parentUUID string, eventDevice nvml.Device, gi, ci uint32) (*AllocatableDevice, error) {
+// resolveDevicesByEventAddress maps this address, extracted from an NVML event,
+// to the advertised allocatable devices it affects. A full-GPU event affects
+// the whole card, so the Dynamic MIG devices announced on it are included: they
+// share the hardware with the full GPU or vGPU device and would otherwise stay
+// schedulable on a faulty GPU.
+func (m *nvmlDeviceHealthMonitor) resolveDevicesByEventAddress(parentUUID string, eventDevice nvml.Device, gi, ci uint32) ([]*AllocatableDevice, error) {
 	parent, ok := m.gpuInfosByUUID[parentUUID]
 	if !ok {
 		return nil, fmt.Errorf("failed to find parent GPU UUID %s in the discovered GPU inventory", parentUUID)
@@ -336,7 +334,11 @@ func (m *nvmlDeviceHealthMonitor) resolveDeviceByEventAddress(parentUUID string,
 
 	switch {
 	case gi == FullGPUInstanceID && ci == FullGPUInstanceID:
-		return devices.GetGPUDeviceByUUID(parentUUID), nil
+		parentDevice := devices.GetGPUDeviceByUUID(parentUUID)
+		if parentDevice == nil {
+			return nil, nil
+		}
+		return append(devices.GetMigDynamicDevices(), parentDevice), nil
 
 	case gi != FullGPUInstanceID && ci != FullGPUInstanceID:
 		if featuregates.Enabled(featuregates.DynamicMIG) {
@@ -344,13 +346,13 @@ func (m *nvmlDeviceHealthMonitor) resolveDeviceByEventAddress(parentUUID string,
 			if err != nil {
 				return nil, fmt.Errorf("failed to resolve Dynamic MIG device for parent %s, GI=%d, CI=%d: %w", parentUUID, gi, ci, err)
 			}
-			return devices.GetMigDynamicDeviceByTuple(spec), nil
+			return singleDevice(devices.GetMigDynamicDeviceByTuple(spec)), nil
 		}
-		return devices.GetMigStaticDeviceByLiveTuple(&MigLiveTuple{
+		return singleDevice(devices.GetMigStaticDeviceByLiveTuple(&MigLiveTuple{
 			ParentUUID: parentUUID,
 			GIID:       int(gi),
 			CIID:       int(ci),
-		}), nil
+		})), nil
 
 	default:
 		// A GI can exist without a CI, but it does not represent a usable,
@@ -364,6 +366,13 @@ func (m *nvmlDeviceHealthMonitor) resolveDeviceByEventAddress(parentUUID string,
 		klog.V(6).Infof("Ignoring NVML event with inconsistent instance address for parent UUID %s: GI=%d, CI=%d", parentUUID, gi, ci)
 		return nil, nil
 	}
+}
+
+func singleDevice(device *AllocatableDevice) []*AllocatableDevice {
+	if device == nil {
+		return nil
+	}
+	return []*AllocatableDevice{device}
 }
 
 // resolveMigEvent translates the live GI/CI address reported by NVML into the

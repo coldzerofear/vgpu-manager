@@ -590,6 +590,17 @@ func (l deviceLib) maybeDisableMigMode(uuid string, nvmldev nvml.Device) error {
 		return fmt.Errorf("uuid not in gpuInfosByUUID: %s", uuid)
 	}
 
+	// Read the live mode: SetMigMode may unbind or reset the device, so it must
+	// not reach a GPU that is not in MIG mode and may be running workloads.
+	migEnabled, err := isMigModeEnabled(nvmldev)
+	if err != nil {
+		return fmt.Errorf("error getting MIG mode for device %s: %w", gpu.String(), err)
+	}
+	gpu.MigEnabled = migEnabled
+	if !migEnabled {
+		return nil
+	}
+
 	migs, err := l.GetMigDeviceInfos(gpu)
 	if err != nil {
 		return fmt.Errorf("error getting MIG devices for %s: %w", gpu.String(), err)
@@ -609,20 +620,62 @@ func (l deviceLib) maybeDisableMigMode(uuid string, nvmldev nvml.Device) error {
 
 	klog.V(6).Infof("Attempting to disable MIG mode for device %s", gpu.String())
 	t0 := time.Now()
-	ret, activationStatus := nvmldev.SetMigMode(nvml.DEVICE_MIG_DISABLE)
+	err = setMigMode(nvmldev, nvml.DEVICE_MIG_DISABLE)
 	klog.V(6).Infof("t_disable_mig %.3f s", time.Since(t0).Seconds())
-	if ret != nvml.SUCCESS {
-		// activationStatus would return the appropriate error code upon unsuccessful activation
-		klog.Warningf("SetMigMode activationStatus (device %s): %s", gpu.String(), activationStatus)
+	if err != nil {
 		// We could also log this as an error and proceed, and hope for the
 		// state machine to clean this up in the future. Probably not a good
 		// idea.
-		return fmt.Errorf("error disabling MIG mode for device %s: %w", gpu.String(), ret)
+		return fmt.Errorf("error disabling MIG mode for device %s: %w", gpu.String(), err)
 	}
 	gpu.MigEnabled = false
-	// Note: when we're here, disabling MIG mode might still have failed.
-	// `activationStatus` may reflect "in use by another client".
-	klog.V(1).Infof("Called nvml.SetMigMode(nvml.DEVICE_MIG_DISABLE) for device %s, got activationStatus: %s", gpu.String(), activationStatus)
+	klog.V(1).Infof("Disabled MIG mode for device %s", gpu.String())
+	return nil
+}
+
+// ensureMigDisabled takes the GPU out of MIG mode if nothing is using it, and
+// fails if that leaves it in MIG mode.
+func (l deviceLib) ensureMigDisabled(gpu *GpuDeviceInfo) error {
+	device, ret := l.DeviceGetHandleByUUID(gpu.UUID)
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("error getting GPU device handle: %w", ret)
+	}
+	if err := l.maybeDisableMigMode(gpu.UUID, device); err != nil {
+		return err
+	}
+	migEnabled, err := isMigModeEnabled(device)
+	if err != nil {
+		return fmt.Errorf("error getting MIG mode for device %s: %w", gpu.String(), err)
+	}
+	if migEnabled {
+		return fmt.Errorf("GPU %s is in MIG mode", gpu.String())
+	}
+	return nil
+}
+
+// isMigModeEnabled returns the mode currently in effect, not a pending one. A
+// GPU that does not support MIG is not in MIG mode.
+func isMigModeEnabled(device nvml.Device) (bool, error) {
+	current, _, ret := device.GetMigMode()
+	if ret == nvml.ERROR_NOT_SUPPORTED {
+		return false, nil
+	}
+	if ret != nvml.SUCCESS {
+		return false, ret
+	}
+	return current == nvml.DEVICE_MIG_ENABLE, nil
+}
+
+// setMigMode reports both ways the change can fail: the call itself, and the
+// activation, which for example returns "in use" when the device is not idle.
+func setMigMode(device nvml.Device, mode int) error {
+	activationStatus, ret := device.SetMigMode(mode)
+	if ret != nvml.SUCCESS {
+		return ret
+	}
+	if activationStatus != nvml.SUCCESS {
+		return fmt.Errorf("activation failed: %w", activationStatus)
+	}
 	return nil
 }
 
@@ -795,16 +848,14 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 		klog.V(6).Infof("%s: Attempting to enable MIG mode for to-be parent %s", logpfx, gpu.String())
 		// If this is newer than A100 and if device unused: enable MIG.
 		tem0 := time.Now()
-		ret, activationStatus := device.SetMigMode(nvml.DEVICE_MIG_ENABLE)
-		if ret != nvml.SUCCESS {
-			// activationStatus would return the appropriate error code upon unsuccessful activation
-			klog.Warningf("%s: SetMigMode activationStatus (device %s): %s", logpfx, gpu.String(), activationStatus)
-			return nil, fmt.Errorf("error enabling MIG mode for device %s: %w", gpu.String(), ret)
+		if err := setMigMode(device, nvml.DEVICE_MIG_ENABLE); err != nil {
+			return nil, fmt.Errorf("error enabling MIG mode for device %s: %w", gpu.String(), err)
 		}
 		gpu.MigEnabled = true
 		klog.V(1).Infof("%s: MIG mode now enabled for device %s, t_enable_mig %.3f s", logpfx, gpu.String(), time.Since(tem0).Seconds())
 	} else {
 		klog.V(6).Infof("%s: MIG mode already enabled for device %s", logpfx, gpu.String())
+		gpu.MigEnabled = true
 	}
 
 	// All candidate MIG profiles only differ by CI profile.

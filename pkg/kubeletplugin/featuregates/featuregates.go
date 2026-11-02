@@ -361,6 +361,10 @@ func ValidateFeatureGates() error {
 		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, DevicePluginClientMode)
 	}
 
+	if Enabled(RemoteGPUSupport) && Enabled(DynamicMIG) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, DynamicMIG)
+	}
+
 	if Enabled(DynamicMIG) && Enabled(PassthroughSupport) {
 		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, PassthroughSupport)
 	}

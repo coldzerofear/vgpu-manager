@@ -2644,7 +2644,10 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(
   unsigned int running_processes = MAX_PIDS;
   int host_index = get_host_device_index_by_cuda_device(cuda_index);
 
-  metrics_record_nvml_fallback(host_index);
+  // Only when the external SM watcher is enabled, will the nvml rollback log be output.
+  if (g_vgpu_config->sm_watcher && g_device_util != NULL) {
+    metrics_record_nvml_fallback(host_index);
+  }
 
   nvmlReturn_t ret = _nvmlDeviceGetComputeRunningProcesses(dev, &running_processes, pids_on_device);
   if (unlikely(ret)) {
@@ -2732,7 +2735,10 @@ DONE:
   device_util_unlock(fd, host_index);
   if (expired) {
      metrics_record_watcher_miss(host_index, METRICS_WATCHER_EXPIRED);
-     LOGGER(VERBOSE, "host device %d process utilization time window timeout detected, fallback to nvml driver", host_index);
+     // Print tags for reuse utilization logs to prevent external SM Watcher from flashing logs after stopping.
+     if ((g_util_log_tick[host_index] % WATCHER_UTIL_LOG_STRIDE) == 0) {
+       LOGGER(WARNING, "host device %d process utilization time window timeout detected, fallback to nvml driver", host_index);
+     }
      return get_gpu_process_from_local_nvml_driver(top_result, processes_sample, processes_size, cuda_index, dev);
   }
   return NVML_SUCCESS;

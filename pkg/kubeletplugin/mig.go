@@ -152,7 +152,7 @@ func CommonAttributesMig(parent *nvidia.GpuInfo, profileName string) map[resourc
 			StringValue: ptr.To("mig"),
 		},
 		"parentUUID": {
-			StringValue: ptr.To(strings.ToLower(parent.UUID)),
+			StringValue: ptr.To(parent.UUID),
 		},
 		"profile": {
 			StringValue: ptr.To(profileName),

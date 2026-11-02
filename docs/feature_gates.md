@@ -125,8 +125,8 @@ The rules it enforces:
 * `VGPUSupport` ⊗ `MPSSupport`
 * `VGPUSupport` ⊗ `PassthroughSupport`
 * `VGPUSupport` ⊗ `IMEXDaemonsWithDNSNames`
+* `RemoteGPUSupport` ⊗ `DynamicMIG`
 * `DynamicMIG` ⊗ `PassthroughSupport`
-* `DynamicMIG` ⊗ `NVMLDeviceHealthCheck`
 * `DynamicMIG` ⊗ `MPSSupport`
 * `PassthroughSupport` ⊗ `NVMLDeviceHealthCheck`
 
@@ -289,7 +289,12 @@ is what makes the DRA driver hand out *virtual* GPUs rather than whole ones, and
 * action scope: kubelet-plugin
 
 Watches NVML events (Xid, ECC) and applies DRA device taints to unhealthy devices so the scheduler
-stops placing new claims on them. On by default.
+stops placing new claims on them. Off by default in the driver; the chart turns it on.
+
+An error of a whole GPU taints every device announced on it, including its MIG devices. Tainted
+devices keep running their workloads. `SharedSMUtilizationWatcher` stops sampling a device with a
+NoSchedule taint on purpose: its workloads fall back to local NVML polling and log a WARNING
+(`fallback to nvml driver`), which shows the GPU needs repair.
 
 ### NRISupport
 
@@ -306,6 +311,24 @@ See [dra_nri_integration_design.md](./dra_nri_integration_design.md).
 
 Enables dynamic MIG device management: MIG partitions are created and destroyed to match claims
 instead of being pre-configured on the node.
+
+With `VGPUSupport` on, a GPU that supports it is announced as both a vGPU and MIG devices, and is
+used as one or the other at any given time: a single vGPU claim keeps MIG devices off that GPU and
+a single MIG device keeps vGPU claims off it. It switches when the last claim of one kind is gone.
+vGPU devices do not run inside MIG devices. See
+[how_to_use_dra_dynamic_mig.md](./how_to_use_dra_dynamic_mig.md) for setup and examples.
+
+| GPU | Announced | Switches |
+| --- | --- | --- |
+| Hopper and newer | vGPU and MIG devices | Yes |
+| Ampere, MIG off at plugin start | vGPU only | No |
+| Ampere, MIG on at plugin start | MIG devices only | No |
+| No MIG support | vGPU only | Not applicable |
+
+This combination requires **Kubernetes 1.36.2 or later**, and the plugin refuses to start on an older
+API server if a GPU is announced both ways: older schedulers do not count vGPU allocations against
+the counters that separate the two, and could place MIG devices on a GPU running vGPU workloads. The
+check reads the API server version, so keep kube-scheduler at 1.36.2 or later as well.
 
 ### PassthroughSupport
 

@@ -464,6 +464,13 @@ func TestValidateFeatureGates(t *testing.T) {
 		//	description: "should be valid when IMEXDaemonsWithDNSNames is enabled but ComputeDomainCliques is not",
 		//},
 		{
+			name:         "RemoteGPUSupport enabled with DynamicMIG",
+			fgMap:        map[featuregate.Feature]bool{VGPUSupport: true, RemoteGPUSupport: true, DynamicMIG: true},
+			expectError:  true,
+			errorMessage: "feature gate RemoteGPUSupport is currently mutually exclusive with DynamicMIG",
+			description:  "should fail when both RemoteGPUSupport and DynamicMIG are enabled",
+		},
+		{
 			name:         "DynamicMIG enabled with PassthroughSupport",
 			fgMap:        map[featuregate.Feature]bool{VGPUSupport: false, DynamicMIG: true, PassthroughSupport: true},
 			expectError:  true,

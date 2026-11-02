@@ -75,6 +75,11 @@ type fakeNVMLGPU struct {
 	giProfile       nvml.GpuInstanceProfileInfo
 	setMigModeCalls []int
 	events          *[]string
+	// Zero values are a GPU in MIG mode on which SetMigMode succeeds.
+	migModeDisabled  bool
+	migModeRet       nvml.Return
+	setMigModeRet    nvml.Return
+	activationStatus nvml.Return
 }
 
 func (*fakeNVMLGPU) GetMaxMigDeviceCount() (int, nvml.Return) {
@@ -109,11 +114,25 @@ func (d *fakeNVMLGPU) SetMigMode(mode int) (nvml.Return, nvml.Return) {
 	if d.events != nil {
 		*d.events = append(*d.events, "set-mig-mode")
 	}
-	return nvml.SUCCESS, nvml.SUCCESS
+	if d.activationStatus == nvml.SUCCESS && d.setMigModeRet == nvml.SUCCESS {
+		d.migModeDisabled = mode == nvml.DEVICE_MIG_DISABLE
+	}
+	return d.activationStatus, d.setMigModeRet
+}
+
+func (d *fakeNVMLGPU) GetMigMode() (int, int, nvml.Return) {
+	if d.migModeRet != nvml.SUCCESS {
+		return 0, 0, d.migModeRet
+	}
+	if d.migModeDisabled {
+		return nvml.DEVICE_MIG_DISABLE, nvml.DEVICE_MIG_DISABLE, nvml.SUCCESS
+	}
+	return nvml.DEVICE_MIG_ENABLE, nvml.DEVICE_MIG_ENABLE, nvml.SUCCESS
 }
 
 type fakeNVMLGpuInstance struct {
 	nvml.GpuInstance
+	onDestroy                func()
 	info                     nvml.GpuInstanceInfo
 	ci                       nvml.ComputeInstance
 	ciProfile                nvml.ComputeInstanceProfileInfo
@@ -150,6 +169,9 @@ func (g *fakeNVMLGpuInstance) CreateComputeInstance(profile *nvml.ComputeInstanc
 }
 
 func (g *fakeNVMLGpuInstance) Destroy() nvml.Return {
+	if g.onDestroy != nil {
+		g.onDestroy()
+	}
 	if g.events != nil {
 		*g.events = append(*g.events, "destroy-gi")
 	}
@@ -356,6 +378,7 @@ func TestDeviceStateRollbackAfterComputeInstanceCreationFailure(t *testing.T) {
 		giProfile: nvml.GpuInstanceProfileInfo{Id: 19},
 		events:    &events,
 	}
+	gi.onDestroy = func() { gpu.migDevice = nil }
 	parent := &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{UUID: "GPU-1", Minor: 1, PciBusID: "0000:01:00.0"}}
 	nvmllib := &mockNVMLLibrary{
 		deviceGetHandleByUUIDFunc: func(uuid string) (nvml.Device, nvml.Return) {
@@ -424,6 +447,7 @@ func TestDeviceLibDeleteMigDevice(t *testing.T) {
 	gpu := &fakeNVMLGPU{gi: gi, events: &events}
 	parent := &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{UUID: "GPU-1", Minor: 1}}
 	l := deviceLib{
+		DeviceLib:       &nvidia.DeviceLib{},
 		devhandleByUUID: map[string]nvml.Device{parent.UUID: gpu},
 		gpuInfosByUUID:  map[string]*GpuDeviceInfo{parent.UUID: parent},
 	}

@@ -347,7 +347,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	)
 
 	CollectBasedOnNvml(ch, c.DeviceLib, c.nodeName, c.managerRoot, devTypeMap, devIndexMap, devHealthMap,
-		devHealthLvs, devMemInfoMap, devProcInfoMap, devProcUtilMap, devMigInfosMap, c.utilAdapter, c.featureGate)
+		devHealthLvs, devMemInfoMap, devProcInfoMap, devProcUtilMap, devMigInfosMap, nil, c.utilAdapter, c.featureGate)
 
 	var (
 		//vGpuHealthMap      = make(map[string]bool)

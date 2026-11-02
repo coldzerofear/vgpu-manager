@@ -50,7 +50,7 @@ func testSlice() *resourceapi.ResourceSlice {
 					Name: "vgpu-2",
 					Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
 						remote.AttrAccessMode:        {StringValue: ptr.To(remote.AccessModeRemote)},
-						remote.AttrUUID:              {StringValue: ptr.To("gpu-aaaa")}, // published lowercase
+						remote.AttrUUID:              {StringValue: ptr.To("gpu-aaaa")}, // lowercased by drivers before verbatim UUIDs
 						remote.AttrMinor:             {IntValue: ptr.To[int64](2)},
 						remote.AttrCUDADriverVersion: {VersionValue: ptr.To("12.9.0")},
 						remote.AttrDriverVersion:     {VersionValue: ptr.To("575.57.8")},
@@ -64,7 +64,7 @@ func testSlice() *resourceapi.ResourceSlice {
 					Name: "vgpu-0",
 					Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
 						remote.AttrAccessMode: {StringValue: ptr.To(remote.AccessModeRemote)},
-						remote.AttrUUID:       {StringValue: ptr.To("gpu-bbbb")},
+						remote.AttrUUID:       {StringValue: ptr.To("GPU-bbbb")}, // published verbatim
 						remote.AttrMinor:      {IntValue: ptr.To[int64](0)},
 					},
 					Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{

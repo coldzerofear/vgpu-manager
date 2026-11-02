@@ -236,6 +236,59 @@ func ConvertDRAContainerRequest(ctx context.Context, resourceName string, contai
 	return &resourceInfo
 }
 
+// attributeSubstringSelector selects devices by a string attribute the way the
+// device-plugin path does (util.CheckDeviceType, util.CheckDeviceUuid): each
+// comma-separated entry of value matches as a case-insensitive substring, so
+// "A100" selects "NVIDIA A100-SXM4-80GB" and a UUID prefix selects its device.
+// An include selector needs one entry to match, an exclude selector rejects
+// the device when one does. A device without the attribute is named by no
+// entry. It returns nil when value has no usable entry, so a malformed
+// annotation is ignored instead of rejecting every device.
+func attributeSubstringSelector(attribute, value string, exclude bool) *resourceapi.DeviceSelector {
+	var entries []string
+	for _, entry := range strings.Split(value, ",") {
+		if entry = strings.TrimSpace(entry); entry != "" {
+			// upperAscii() in CEL folds ASCII only; fold the entry the same way.
+			entries = append(entries, strconv.Quote(upperASCII(entry)))
+		}
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	attributes := fmt.Sprintf("device.attributes[%q]", util.DRADriverName)
+	named := fmt.Sprintf("(%q in %s && [%s].exists(e, %s.%s.upperAscii().contains(e)))",
+		attribute, attributes, strings.Join(entries, ","), attributes, attribute)
+	if exclude {
+		named = "!" + named
+	}
+	return &resourceapi.DeviceSelector{CEL: &resourceapi.CELDeviceSelector{Expression: named}}
+}
+
+func upperASCII(s string) string {
+	return strings.Map(func(r rune) rune {
+		if 'a' <= r && r <= 'z' {
+			return r - 'a' + 'A'
+		}
+		return r
+	}, s)
+}
+
+// vgpuAccessModeExpression selects vGPU devices of the given access mode. A
+// device without the accessMode attribute was published by a driver predating
+// remote GPU support, and is local.
+func vgpuAccessModeExpression(accessMode string) string {
+	attributes := fmt.Sprintf("device.attributes[%q]", util.DRADriverName)
+	isVGPU := fmt.Sprintf(`%q in %s && %s.type == %q`, "type", attributes, attributes, kubeletplugin.VGpuDeviceType)
+	hasMode := fmt.Sprintf(`%q in %s`, util.AccessModeAttribute, attributes)
+	modeIs := func(mode string) string {
+		return fmt.Sprintf(`%s.%s == %q`, attributes, util.AccessModeAttribute, mode)
+	}
+	if accessMode == util.AccessModeRemote {
+		return fmt.Sprintf(`%s && %s && %s`, isVGPU, hasMode, modeIs(util.AccessModeRemote))
+	}
+	return fmt.Sprintf(`%s && (!(%s) || %s)`, isVGPU, hasMode, modeIs(util.AccessModeLocal))
+}
+
 func BuildDeviceRequest(pod *corev1.Pod, deviceClassName string, info ResourceInfo) resourceapi.DeviceRequest {
 	var (
 		deviceCount     int64
@@ -258,77 +311,21 @@ func BuildDeviceRequest(pod *corev1.Pod, deviceClassName string, info ResourceIn
 	accessMode, _ := util.PodVGPUAccessMode(pod)
 
 	deviceSelectors := []resourceapi.DeviceSelector{{
-		CEL: &resourceapi.CELDeviceSelector{
-			Expression: fmt.Sprintf(`device.attributes["%s"].type == "%s" && device.attributes["%s"].%s == "%s"`,
-				util.DRADriverName, kubeletplugin.VGpuDeviceType, util.DRADriverName, util.AccessModeAttribute, accessMode),
-		},
+		CEL: &resourceapi.CELDeviceSelector{Expression: vgpuAccessModeExpression(accessMode)},
 	}}
-	if uuids, _ := util.HasAnnotation(pod, util.PodIncludeGPUUUIDAnnotation); len(uuids) > 0 {
-		split := strings.Split(strings.ToLower(uuids), ",")
-		includeUuids := make([]string, 0, len(split))
-		for _, uuid := range split {
-			if uuid = strings.TrimSpace(uuid); uuid != "" {
-				includeUuids = append(includeUuids, strconv.Quote(uuid))
-			}
-		}
-		if len(includeUuids) > 0 {
-			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
-				CEL: &resourceapi.CELDeviceSelector{
-					Expression: fmt.Sprintf(`device.attributes[%q].uuid in [%s]`,
-						util.DRADriverName, strings.Join(includeUuids, ",")),
-				},
-			})
-		}
-	}
-	if uuids, _ := util.HasAnnotation(pod, util.PodExcludeGPUUUIDAnnotation); len(uuids) > 0 {
-		split := strings.Split(strings.ToLower(uuids), ",")
-		excludeUuids := make([]string, 0, len(split))
-		for _, uuid := range split {
-			if uuid = strings.TrimSpace(uuid); uuid != "" {
-				excludeUuids = append(excludeUuids, strconv.Quote(uuid))
-			}
-		}
-		if len(excludeUuids) > 0 {
-			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
-				CEL: &resourceapi.CELDeviceSelector{
-					Expression: fmt.Sprintf(`!(device.attributes[%q].uuid in [%s])`,
-						util.DRADriverName, strings.Join(excludeUuids, ",")),
-				},
-			})
-		}
-	}
-	if types, _ := util.HasAnnotation(pod, util.PodIncludeGpuTypeAnnotation); len(types) > 0 {
-		split := strings.Split(strings.ToUpper(types), ",")
-		includeTypes := make([]string, 0, len(split))
-		for _, name := range split {
-			if name = strings.TrimSpace(name); name != "" {
-				includeTypes = append(includeTypes, strconv.Quote(name))
-			}
-		}
-		if len(includeTypes) > 0 {
-			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
-				CEL: &resourceapi.CELDeviceSelector{
-					Expression: fmt.Sprintf(`device.attributes[%q].productName in [%s]`,
-						util.DRADriverName, strings.Join(includeTypes, ",")),
-				},
-			})
-		}
-	}
-	if types, _ := util.HasAnnotation(pod, util.PodExcludeGpuTypeAnnotation); len(types) > 0 {
-		split := strings.Split(strings.ToUpper(types), ",")
-		excludeTypes := make([]string, 0, len(split))
-		for _, name := range split {
-			if name = strings.TrimSpace(name); name != "" {
-				excludeTypes = append(excludeTypes, strconv.Quote(name))
-			}
-		}
-		if len(excludeTypes) > 0 {
-			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
-				CEL: &resourceapi.CELDeviceSelector{
-					Expression: fmt.Sprintf(`!(device.attributes[%q].productName in [%s])`,
-						util.DRADriverName, strings.Join(excludeTypes, ",")),
-				},
-			})
+	for _, filter := range []struct {
+		annotation string
+		attribute  string
+		exclude    bool
+	}{
+		{util.PodIncludeGPUUUIDAnnotation, "uuid", false},
+		{util.PodExcludeGPUUUIDAnnotation, "uuid", true},
+		{util.PodIncludeGpuTypeAnnotation, "productName", false},
+		{util.PodExcludeGpuTypeAnnotation, "productName", true},
+	} {
+		value, _ := util.HasAnnotation(pod, filter.annotation)
+		if selector := attributeSubstringSelector(filter.attribute, value, filter.exclude); selector != nil {
+			deviceSelectors = append(deviceSelectors, *selector)
 		}
 	}
 	policy, _ := util.HasAnnotation(pod, util.MemorySchedulerPolicyAnnotation)
@@ -337,13 +334,16 @@ func BuildDeviceRequest(pod *corev1.Pod, deviceClassName string, info ResourceIn
 	case policy == util.VirtualMemoryPolicy.String(), strings.HasPrefix(policy, "virt"):
 		deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
 			CEL: &resourceapi.CELDeviceSelector{
-				Expression: fmt.Sprintf(`device.attributes[%q].memoryRatio > 100`, util.DRADriverName),
+				Expression: fmt.Sprintf(`%q in device.attributes[%q] && device.attributes[%q].%s > 100`,
+					remote.AttrMemoryRatio, util.DRADriverName, util.DRADriverName, remote.AttrMemoryRatio),
 			},
 		})
 	case policy == util.PhysicalMemoryPolicy.String(), strings.HasPrefix(policy, "phy"):
 		deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
 			CEL: &resourceapi.CELDeviceSelector{
-				Expression: fmt.Sprintf(`device.attributes[%q].memoryRatio <= 100`, util.DRADriverName),
+				// A device without the attribute is not oversubscribed.
+				Expression: fmt.Sprintf(`!(%q in device.attributes[%q]) || device.attributes[%q].%s <= 100`,
+					remote.AttrMemoryRatio, util.DRADriverName, util.DRADriverName, remote.AttrMemoryRatio),
 			},
 		})
 	}
