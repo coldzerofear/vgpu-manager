@@ -335,25 +335,61 @@ NVIDIA vGPU（GRID）虚拟机：`isDynamicMIGCapable` 对其返回 false，若�
 
 建议：现在用节点分组；要动态能力时做 firstAvailable + 动态属性。`mode` 属性方案尚未验证，动手前先用仿真确认 `firstAvailable` 改写与现有 claim 解析、拓扑阶梯的组合。
 
-## 10. DRA 路径 MIG 指标方案
+## 10. DRA 路径 MIG 指标（已实现）
 
-现状：`CollectBasedOnNvml` 已把实时 MIG 填进 `devMigInfosMap`，只差发布。动态 MIG 设备在 ResourceSlice 里没有 `uuid`
-（实例尚未创建），所以被 `dra_gpu.go` 的"无 uuid"分支跳过，`appendResult` 也拿不到它。
+实现在 `pkg/metrics/collector/dra_mig.go`，`dra_gpu.go` 只改接入点。device-plugin 路径（`node_gpu.go`）行为不变。
 
-方案：
+### 10.1 数据来源与边界
 
-1. **设备指标**：把 `node_gpu.go:705-745` 抽成共用函数，容器归属用回调传入。`mig_device_*` 三个指标不依赖分配关系，先发布。
-2. **容器关联**：不能靠 UUID。allocation result 里是规格名，如 `gpu-0-mig-1g10gb-19-0`，用现有 `NewMigSpecTupleFromCanonicalName` 解析出
-   `(ParentMinor, ProfileID, PlacementStart)`，与实时 `MigInfo` 的 `(Parent.Minor, GiProfileInfo.Id, Placement.Start)` 匹配。
-   容器到 claim 的映射复用现有 `claimRefs` 逻辑，不走 device-plugin 的 PodResources。
-3. **静态 MIG**：slice 有 `uuid`，直接按 UUID 关联。
-4. **健康**：`migDeviceHealthStatus` 取父卡状态，再叠加该 MIG 设备自身的污点。动态设备按设备名查 slice。
+| 内容 | 来源 | 说明 |
+| --- | --- | --- |
+| 有哪些 MIG 设备 | NVML 实时枚举（`GetMigInfosByDevice`） | 指标集合由它决定：创建后下一次采集出现，销毁后消失；已发布未创建的 spec 不出指标 |
+| 健康 | 父卡健康 × slice 中该 MIG 设备的污点 | 整卡故障已扇出到全部 MIG 设备（3.2），MIG 自身污点覆盖单实例故障 |
+| 分给哪个容器 | ResourceClaim 分配结果 + 容器 claimRefs | 复用 vGPU 的 `resolvePodAllocations`，同样处理 template claim、FirstAvailable、扩展资源 |
+| 容器用量 | MIG handle 上的进程表，按容器 cgroup PID 过滤 | 多个容器共享一个 MIG 时各算各的 |
 
-注意点：
+### 10.2 MIG 设备识别（已对照依赖源码）
 
-- `MigEnabled` 卡的 `vgpu-N` 仍在 slice 中，节点 vGPU 总量会把 MIG 模式的卡算进去，需要决定是否从 total 扣除。
-- 实例在采集中途可能被销毁，匹配不到时跳过。匹配不到要打 V(4) 日志，不能 panic，同 `dra_gpu.go:811` 的注释。
-- `container_mig_device_memory_*` 是实例级数据，无进程级拆分。MIG 没有整卡利用率，与 device-plugin 路径保持一致，不新增。
-- 需先在真机确认 `Placement.Start` 与发布的 `PlacementStart` 一致。
+slice 设备与实例的匹配：
 
-工作量小，改动集中在 `pkg/metrics/collector`。
+- 静态 MIG：slice 的 `uuid` 属性，与 NVML 的 MIG UUID 比对。
+- 动态 MIG：slice 设备没有 `uuid`（实例创建后才有）。用 `parentUUID` 属性加上从设备名
+  `gpu-<minor>-mig-<profile>-<profileID>-<placementStart>` 解析出的两个数字，与实例的
+  `(父卡 UUID, GiInfo.ProfileId, GiInfo.Placement.Start)` 比对。
+
+核对过程：
+
+1. 名字里的 `profileID` 来自 `inspectMigProfilesAndPlacements`：`GetGpuInstanceProfileInfo(GIProfileID)` 的入参是
+   profile **索引**常量（`NVML_GPU_INSTANCE_PROFILE_1_SLICE=0x0` 等），返回结构的 `id` 才是"设备内唯一 profile ID"
+   （nvml.h `nvmlGpuInstanceProfileInfo_st`）。运行中 GI 的 `nvmlGpuInstanceInfo_t.profileId` 注释相同，是同一 ID 空间。
+   因此比对用 `GiInfo.ProfileId`，不用 GI 实例号 `GiInfo.Id`。
+2. `placementStart` 来自 `GetGpuInstancePossiblePlacements`，创建时原样传给 `CreateGpuInstanceWithPlacement`。
+   `nvmlGpuInstancePlacement_t.start` 是"首个占用的内存 slice 下标"，运行中 GI 的 `placement` 同一结构。
+3. 插件自身就用这两个值认定实例：`FindMigDevBySpec`（`nvlib.go:1172-1180`）和 `resolveMigEvent`（`device_health.go:402-403`）。
+   指标与插件的认定一致，不是另立规则。
+4. 名字解析复用插件的 `NewMigSpecTupleFromCanonicalName`，正则 `^gpu-(\d+)-mig-(.+)-(\d+)-(\d+)$` 的 `(.+)` 贪婪匹配后回溯，
+   `1g10gb-me` 这类带横杠的 profile 名不影响末尾两个数字（有测试）。
+5. 父卡用 `parentUUID` 属性，不用名字里的 minor。属性值为小写，经 `DeviceUUIDFromAttribute` 还原成 NVML 写法。
+
+profile 标签：插件发布的 `profile` 属性和指标里的 `profile` 标签都来自 go-nvlib `MigProfileInfo.String()`（`<G>g.<GB>gb[+属性]`），
+GB 由 `getMigMemorySizeGB(父卡总显存, profile 显存)` 按 1/8 向上取整得到。显存 override 只作用于统一内存卡（`resolveDeviceMemory`），
+不影响 MIG 卡。标签只用于展示，不参与匹配。
+
+### 10.3 限制
+
+- `GetMigInfosByDevice` 中任一实例匹配不到 profile，整张卡的 MIG 都枚举失败、不出指标。插件的 `createMigDevice` 调用的也是这个函数，
+  这种情况下创建同样会失败，所以不会出现“实例存在但无指标”的长期状态。
+- MIG handle 的进程查询在 vGPU host 虚拟化模式下不支持（nvml.h 注释）。查询失败时容器用量退回整个实例的用量。
+- 容器 PID 来自 cgroup，NVML 返回宿主 PID，依赖 device-monitor 的 `hostPID: true`（chart 与 deploy 已设）。
+- 父卡显存在插件启动时和采集时可能处于不同 MIG 模式（3.6），这时 profile 标签与 `profile` 属性可能不同。未真机确认。
+- MIG 模式卡的 `vgpu-N` 仍计入节点 vGPU 总量，未改。
+- 远程 GPU：MIG 设备只在本节点 Pod 上统计，远程消费者不走这条路径；`RemoteGPUSupport` 与 `DynamicMIG` 已互斥，
+  远程节点 slice 中没有 MIG 设备，vGPU 和远程统计代码未改动。
+
+### 10.4 测试数据
+
+`dra_mig_test.go` 覆盖：名字与属性解析（含带横杠的 profile 名）、动态/静态匹配、未创建/已销毁不出指标、MIG 污点与父卡健康、
+容器按进程过滤用量与回退、同一容器重复引用去重、`resolvePodAllocations` 收集 MIG 且不影响 vGPU 结果。
+
+变异检查（逐项破坏，均被发现）：placement 改用 size、profile 改用 GI 实例号、动态不匹配、忽略 MIG 污点、忽略父卡健康、
+用量不过滤进程、不去重。`Collect` 里的接线没有端到端测试（需要 NVML），未真机验证。

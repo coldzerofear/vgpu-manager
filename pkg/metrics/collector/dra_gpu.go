@@ -141,14 +141,12 @@ func (c draGPUCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- containerVGPUPhysicalMemoryLimit
 	ch <- containerVGPUMemoryUtilRate
 	ch <- containerVGPUCoreUtilRate
-	// MIG devices are not reported on the DRA path yet; see node_gpu.go for the
-	// device-plugin equivalent.
-	//ch <- migDeviceHealthStatus
-	//ch <- migDeviceGiProfileMemory
-	//ch <- migDeviceGiProfileSMCount
-	//ch <- containerMIGMemoryLimit
-	//ch <- containerMIGMemoryUsage
-	//ch <- containerMIGMemoryUtilRate
+	ch <- migDeviceHealthStatus
+	ch <- migDeviceGiProfileMemory
+	ch <- migDeviceGiProfileSMCount
+	ch <- containerMIGMemoryLimit
+	ch <- containerMIGMemoryUsage
+	ch <- containerMIGMemoryUtilRate
 }
 
 // listManagerResourceSlices returns every ResourceSlice this node's driver
@@ -206,7 +204,8 @@ func CollectBasedOnNvml(
 	ch chan<- prometheus.Metric, lib *nvidia.DeviceLib, nodeName, managerRoot string, devTypeMap map[string]string,
 	devIndexMap map[string]int, devHealthMap map[string]int, devHealthLvs map[string][]string,
 	devMemInfoMap map[string]nvml.Memory, devProcInfoMap map[string]procInfoList, devProcUtilMap map[string]procUtilList,
-	devMigInfosMap map[string][]*nvidia.MigInfo, utilAdapter watcher.DeviceUtilInterface, featureGate featuregate.FeatureGate,
+	devMigInfosMap map[string][]*nvidia.MigInfo, devMigProcInfoMap map[string]procInfoList,
+	utilAdapter watcher.DeviceUtilInterface, featureGate featuregate.FeatureGate,
 ) {
 	err := lib.NvmlInit()
 	if err != nil {
@@ -301,6 +300,10 @@ func CollectBasedOnNvml(
 		}
 		if len(migInfos) > 0 {
 			devMigInfosMap[gpuInfo.UUID] = maps.Values[map[string]*nvidia.MigInfo](migInfos)
+			// Per-instance processes: nil on paths that do not report them.
+			if devMigProcInfoMap != nil {
+				collectMigProcesses(lib, migInfos, devMigProcInfoMap)
+			}
 		}
 
 		// Skip unsupported operations after enabling MIG.
@@ -421,6 +424,8 @@ type draContainerAlloc struct {
 	claims []draAllocClaim
 	// podUID of the owning pod (NRI-mode session key).
 	podUID types.UID
+	// migDevices are the MIG devices the container holds, by device name.
+	migDevices []string
 }
 
 // draFootprint mirrors device.PodDeviceFootprint for the DRA path.
@@ -532,7 +537,8 @@ type claimAllocation struct {
 // instance by splitting result.Request on '/') diverges on FirstAvailable
 // subrequests and on claims created from a template, which would make the
 // exporter disagree with the admission rules about which container owns a GPU.
-func (c draGPUCollector) resolvePodAllocations(pod *corev1.Pod, devInfoNameMap map[string]*DRADeviceInfo) []draContainerAlloc {
+func (c draGPUCollector) resolvePodAllocations(pod *corev1.Pod, devInfoNameMap map[string]*DRADeviceInfo,
+	migDevices map[string]*draMigDevice) []draContainerAlloc {
 	// Claims are resolved at most once per pod claim name; a nil entry is a
 	// remembered negative result.
 	claimCache := map[string]*claimAllocation{}
@@ -601,7 +607,7 @@ func (c draGPUCollector) resolvePodAllocations(pod *corev1.Pod, devInfoNameMap m
 	appendResult := func(dst []draAllocResult, seen sets.Set[string], result v1.DeviceRequestAllocationResult) []draAllocResult {
 		devInfo, ok := devInfoNameMap[result.Device]
 		if !ok {
-			// Not a device we report on (MIG, VFIO, or a slice/NVML mismatch).
+			// Not a vGPU or GPU device (MIG, VFIO, or a slice/NVML mismatch).
 			return dst
 		}
 		key := result.Request + "|" + result.Device
@@ -630,14 +636,25 @@ func (c draGPUCollector) resolvePodAllocations(pod *corev1.Pod, devInfoNameMap m
 		})
 	}
 
+	// appendMig collects the MIG devices among the results, once per container.
+	appendMig := func(dst []string, seen sets.Set[string], result v1.DeviceRequestAllocationResult) []string {
+		if _, ok := migDevices[result.Device]; !ok || seen.Has(result.Device) {
+			return dst
+		}
+		seen.Insert(result.Device)
+		return append(dst, result.Device)
+	}
+
 	containerRefs := util.GetAllPodContainers(pod)
 	allocs := make([]draContainerAlloc, 0, len(containerRefs))
 	seenByContainer := make(map[string]sets.Set[string], len(containerRefs))
+	seenMigByContainer := make(map[string]sets.Set[string], len(containerRefs))
 	indexByName := make(map[string]int, len(containerRefs))
 
 	for _, ref := range containerRefs {
-		seen := sets.New[string]()
+		seen, seenMig := sets.New[string](), sets.New[string]()
 		var results []draAllocResult
+		var migs []string
 		var claims []draAllocClaim
 		for _, claimRef := range ref.Claims {
 			allocation := loadClaim(claimRef.Name)
@@ -649,11 +666,13 @@ func (c draGPUCollector) resolvePodAllocations(pod *corev1.Pod, devInfoNameMap m
 			for _, mainRequest := range mainRequests {
 				for _, result := range allocation.resultsByMainRequest[mainRequest] {
 					results = appendResult(results, seen, result)
+					migs = appendMig(migs, seenMig, result)
 				}
 			}
 		}
 		indexByName[ref.Name] = len(allocs)
 		seenByContainer[ref.Name] = seen
+		seenMigByContainer[ref.Name] = seenMig
 		allocs = append(allocs, draContainerAlloc{
 			name:        ref.Name,
 			kind:        ref.Kind,
@@ -661,6 +680,7 @@ func (c draGPUCollector) resolvePodAllocations(pod *corev1.Pod, devInfoNameMap m
 			results:     results,
 			claims:      claims,
 			podUID:      pod.UID,
+			migDevices:  migs,
 		})
 	}
 
@@ -687,6 +707,7 @@ func (c draGPUCollector) resolvePodAllocations(pod *corev1.Pod, devInfoNameMap m
 						continue
 					}
 					allocs[idx].results = appendResult(allocs[idx].results, seenByContainer[mapping.ContainerName], result)
+					allocs[idx].migDevices = appendMig(allocs[idx].migDevices, seenMigByContainer[mapping.ContainerName], result)
 				}
 			}
 		}
@@ -707,10 +728,11 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		devProcInfoMap = make(map[string]procInfoList)
 		devProcUtilMap = make(map[string]procUtilList)
 		devMigInfosMap = make(map[string][]*nvidia.MigInfo)
+		migProcMap     = make(map[string]procInfoList)
 	)
 
 	CollectBasedOnNvml(ch, c.DeviceLib, c.nodeName, c.managerRoot, devTypeMap, devIndexMap, devHealthMap,
-		devHealthLvs, devMemInfoMap, devProcInfoMap, devProcUtilMap, devMigInfosMap, c.utilAdapter, c.featureGate)
+		devHealthLvs, devMemInfoMap, devProcInfoMap, devProcUtilMap, devMigInfosMap, migProcMap, c.utilAdapter, c.featureGate)
 
 	// Get current node.
 	node, err := c.nodeLister.Get(c.nodeName)
@@ -731,6 +753,7 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		nodeVGPUTotalMemBytes uint64
 		devInfoUuidMap        = make(map[string]*DRADeviceInfo)
 		devInfoNameMap        = make(map[string]*DRADeviceInfo)
+		migDevices            = make(map[string]*draMigDevice)
 	)
 
 	for _, resourceSlice := range resourceSlices {
@@ -744,6 +767,13 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				accessMode:  util.AccessModeLocal,
 			}
 			devInfo.devType = remote.StringAttr(dev, "type")
+			// Static and dynamic MIG devices are both published with type mig.
+			if devInfo.devType == kubeletplugin.MigStaticDeviceType {
+				if migDev, ok := newDRAMigDevice(dev); ok {
+					migDevices[migDev.name] = migDev
+				}
+				continue
+			}
 			if devInfo.devType != kubeletplugin.VGpuDeviceType && devInfo.devType != kubeletplugin.GpuDeviceType {
 				continue
 			}
@@ -822,6 +852,9 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 			physicalGPUHealthStatus, prometheus.GaugeValue, float64(status), labelValues...)
 	}
 
+	migIndex := newLiveMigIndex(devMigInfosMap)
+	collectDRAMigDeviceMetrics(ch, c.nodeName, devMigInfosMap, devHealthMap, migHealthByUUID(migDevices, migIndex))
+
 	ch <- prometheus.MustNewConstMetric(
 		nodeVGPUTotalMemory, prometheus.GaugeValue, float64(nodeVGPUTotalMemBytes), c.nodeName)
 
@@ -885,7 +918,7 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 			return
 		}
 
-		containerAllocs := c.resolvePodAllocations(pod, devInfoNameMap)
+		containerAllocs := c.resolvePodAllocations(pod, devInfoNameMap, migDevices)
 
 		// Aggregate the allocated resources on the node, collapsing each pod's
 		// claims to the per-GPU lifecycle peak so a sequential init container
@@ -935,7 +968,7 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		for _, alloc := range containerAllocs {
-			if len(alloc.results) == 0 || !collectable.Has(alloc.name) {
+			if (len(alloc.results) == 0 && len(alloc.migDevices) == 0) || !collectable.Has(alloc.name) {
 				continue
 			}
 
@@ -963,6 +996,12 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 					vmemNodeFiles = append(vmemNodeFiles,
 						filepath.Join(c.managerRoot, util.Claims, string(ref.claim.UID), partitionKey, util.VMemNode, util.VMemNodeFile))
 				}
+			}
+
+			// MIG devices are node-local; remote consumers never hold one.
+			if len(alloc.migDevices) > 0 && pod.Spec.NodeName == c.nodeName {
+				collectDRAContainerMigMetrics(ch, c.nodeName, pod, alloc.name, alloc.migDevices,
+					migDevices, migIndex, migProcMap, containerPids)
 			}
 
 			// Stable vdevice_idx across scrapes: allocation results arrive in

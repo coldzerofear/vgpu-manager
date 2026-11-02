@@ -260,7 +260,7 @@ kubectl get resourceclaim -o custom-columns=NAME:.metadata.name,DEVICE:.status.a
 ## 7. 限制
 
 * MIG 的隔离由硬件提供，`cores` 和 `memory` 软限制不适用。一个容器不要混用 vGPU 和 MIG。
-* DRA 路径目前不上报 MIG 指标，切到 MIG 的卡上的容器监控为空。物理卡指标不受影响。
+* MIG 指标需要开启 device-monitor（chart 中 `kubeletPlugin.containers.monitor.enabled: true`）：`mig_device_*` 随实例创建出现、销毁消失；`container_mig_device_memory_*` 带 `pod_namespace`/`pod_name`/`container_name` 标签，显示实例分给了哪些容器。MIG 没有算力利用率指标。
 * `TimeSlicingSettings` 对 MIG 设备不起作用。
 * Shared SM watcher 不采样处于 MIG 模式的卡。
 * 致命 XID 会给该卡的 vGPU 和全部 MIG 设备打 NoSchedule 污点，已运行的业务不被驱逐。污点不会自动清除，修复硬件后需要重启插件。
