@@ -242,6 +242,7 @@ Matching rules:
 * An entry matches as a case-insensitive substring of the device type, so `A100` selects `NVIDIA A100-SXM4-80GB`.
 * When both annotations are present, both apply: the device must be named by the include list and must not be named by the exclude list.
 * Blank entries are ignored, so `"A10,"` means the same as `"A10"`, and an annotation with no usable entry (`""`, `"  "`, `","`) is treated as if it were not set.
+* The DRA webhook applies the same rules: it turns the annotations into CEL selectors on the device's `productName` (and `uuid`) attribute, and a device without that attribute is named by no entry.
 
 ### Device UUID
 

@@ -349,14 +349,16 @@ func (d *DRADeviceInfo) memoryOversubscription() float64 {
 	return float64(d.memoryRatio) / float64(util.HundredCore)
 }
 
-// DeviceUUIDFromAttribute converts a ResourceSlice `uuid` attribute back to the
+// DeviceUUIDFromAttribute converts a ResourceSlice `uuid` attribute to the
 // NVML spelling used everywhere else in this collector.
 //
-// The driver publishes strings.ToLower(nvmlUUID) (GpuDeviceInfo.Attributes), and
-// NVML renders the body as lowercase hex, so re-upcasing only the prefix before
-// the first '-' ("gpu-5e4b..." -> "GPU-5e4b...") is the exact inverse. Without
-// this the UUID never matches devIndexMap/devHealthLvs and the device silently
-// drops out of every per-device metric.
+// The driver publishes the NVML UUID verbatim ("GPU-5e4b..."), which this
+// returns unchanged. Drivers before that published it lowercased
+// ("gpu-5e4b..."), and their slices remain until the driver is upgraded and
+// republishes. NVML renders the body as lowercase hex, so re-upcasing the
+// prefix before the first '-' recovers the NVML spelling from either form.
+// Without this an old slice's UUID never matches devIndexMap/devHealthLvs and
+// the device silently drops out of every per-device metric.
 func DeviceUUIDFromAttribute(value string) string {
 	idx := strings.Index(value, "-")
 	if idx < 0 {

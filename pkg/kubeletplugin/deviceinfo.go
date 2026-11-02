@@ -19,7 +19,6 @@ package kubeletplugin
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/Masterminds/semver"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
@@ -152,7 +151,7 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 			StringValue: ptr.To(GpuDeviceType),
 		},
 		"uuid": {
-			StringValue: ptr.To(strings.ToLower(d.UUID)),
+			StringValue: ptr.To(d.UUID),
 		},
 		"minor": {
 			IntValue: ptr.To(int64(d.Minor)),
@@ -260,7 +259,7 @@ func (d *MigDeviceInfo) GetDevice() resourceapi.Device {
 
 	attrs := CommonAttributesMig(d.Parent, d.Profile)
 	attrs["uuid"] = resourceapi.DeviceAttribute{
-		StringValue: ptr.To(strings.ToLower(d.UUID)),
+		StringValue: ptr.To(d.UUID),
 	}
 
 	device := resourceapi.Device{
@@ -289,7 +288,7 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 				StringValue: ptr.To(VfioDeviceType),
 			},
 			"uuid": {
-				StringValue: ptr.To(strings.ToLower(d.UUID)),
+				StringValue: ptr.To(d.UUID),
 			},
 			"deviceID": {
 				StringValue: &d.deviceID,

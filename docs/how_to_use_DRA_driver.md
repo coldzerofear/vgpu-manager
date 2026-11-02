@@ -43,6 +43,10 @@ kubectl apply -f  example/dra/pod-multi-vgpu.yaml
 
 DRA Webhook supports converting the traditional vGPU resource request format of vGPU Manager into DRA request format, and is compatible with converting some of the control scheduling annotations supported by vGPU Manager, providing admission verification for DRA type resource requests.
 
+The device selection annotations (`nvidia.com/include-gpu-type`, `nvidia.com/exclude-gpu-type`, `nvidia.com/include-gpu-uuid`, `nvidia.com/exclude-gpu-uuid`) follow the same rules as on the device-plugin path: each entry is a case-insensitive substring, see [Device TYPE](../README.md#device-type).
+
+> Changed: the driver publishes the `uuid` and `parentUUID` attributes as NVML reports them (`GPU-5e4b...`, `MIG-...`) instead of lowercased (`gpu-5e4b...`). A hand-written selector that compares them literally, such as `device.attributes["manager.nvidia.com"].uuid == "gpu-5e4b..."`, has to use the NVML spelling or compare case-insensitively (`.lowerAscii() == "gpu-5e4b..."`).
+
 You can deploy a webhook using the following command
 
 ```yaml

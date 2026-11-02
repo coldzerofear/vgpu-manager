@@ -372,7 +372,7 @@ slice 设备与实例的匹配：
 5. 设备类型：插件内部 `Type()` 对动态 MIG 返回 `migdyn`，但发布到 slice 的 `type` 属性静态、动态都是 `mig`
    （`types.go:30-33`，`CommonAttributesMig` 写入）。collector 按 `type == mig` 收集，再按有无 `uuid` 区分静态/动态。
    `TestDynamicMigDevicePublishedByPluginIsRecognised` 直接用插件的 `PartGetDevice()` 生成设备来验证。
-6. 父卡用 `parentUUID` 属性，不用名字里的 minor。属性值为小写，经 `DeviceUUIDFromAttribute` 还原成 NVML 写法。
+6. 父卡用 `parentUUID` 属性，不用名字里的 minor。插件现在原样发布 NVML UUID；旧版插件发布小写，`DeviceUUIDFromAttribute` 对两种写法都还原成 NVML 写法。
 
 profile 标签：插件发布的 `profile` 属性和指标里的 `profile` 标签都来自 go-nvlib `MigProfileInfo.String()`（`<G>g.<GB>gb[+属性]`），
 GB 由 `getMigMemorySizeGB(父卡总显存, profile 显存)` 按 1/8 向上取整得到。显存 override 只作用于统一内存卡（`resolveDeviceMemory`），

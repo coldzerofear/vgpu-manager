@@ -80,11 +80,11 @@ func find(ms []collected, desc *prometheus.Desc) []collected {
 func sliceMig(name, migUUID string, taints ...v1.DeviceTaint) v1.Device {
 	attrs := map[v1.QualifiedName]v1.DeviceAttribute{
 		"type":       {StringValue: ptr.To(kubeletplugin.MigStaticDeviceType)},
-		"parentUUID": {StringValue: ptr.To("gpu-1d2e3f40-0000-0000-0000-000000000001")},
+		"parentUUID": {StringValue: ptr.To(testParentUUID)},
 		"profile":    {StringValue: ptr.To("1g.10gb")},
 	}
 	if migUUID != "" {
-		attrs["uuid"] = v1.DeviceAttribute{StringValue: ptr.To("mig-5a6b7c80-0000-0000-0000-000000000001")}
+		attrs["uuid"] = v1.DeviceAttribute{StringValue: ptr.To(migUUID)}
 	}
 	return v1.Device{Name: name, Attributes: attrs, Taints: taints}
 }
@@ -128,6 +128,15 @@ func TestNewDRAMigDevice(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, testMigUUID, dev.uuid)
 	require.False(t, dev.healthy)
+
+	// Drivers before verbatim UUIDs published them lowercased.
+	legacy := sliceMig("gpu-0-mig-1g10gb-19-2", testMigUUID)
+	legacy.Attributes["parentUUID"] = v1.DeviceAttribute{StringValue: ptr.To("gpu-1d2e3f40-0000-0000-0000-000000000001")}
+	legacy.Attributes["uuid"] = v1.DeviceAttribute{StringValue: ptr.To("mig-5a6b7c80-0000-0000-0000-000000000001")}
+	dev, ok = newDRAMigDevice(&legacy)
+	require.True(t, ok)
+	require.Equal(t, testParentUUID, dev.spec.parentUUID)
+	require.Equal(t, testMigUUID, dev.uuid)
 
 	bad := sliceMig("not-a-mig-name", "")
 	_, ok = newDRAMigDevice(&bad)
