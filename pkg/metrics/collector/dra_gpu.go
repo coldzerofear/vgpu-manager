@@ -1000,8 +1000,8 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 
 			// MIG devices are node-local; remote consumers never hold one.
 			if len(alloc.migDevices) > 0 && pod.Spec.NodeName == c.nodeName {
-				collectDRAContainerMigMetrics(ch, c.nodeName, pod, alloc.name, alloc.migDevices,
-					migDevices, migIndex, migProcMap, containerPids)
+				collectDRAContainerMigMetrics(ch, c.nodeName, pod, alloc.name,
+					alloc.migDevices, migDevices, migIndex, migProcMap, containerPids)
 			}
 
 			// Stable vdevice_idx across scrapes: allocation results arrive in

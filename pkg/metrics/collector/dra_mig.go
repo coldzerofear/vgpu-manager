@@ -25,6 +25,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
+	"github.com/docker/go-units"
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/resource/v1"
@@ -157,13 +158,16 @@ func migDeviceLabels(nodeName, parentUUID string, mig *nvidia.MigInfo) []string 
 // when its parent is and, if published, the MIG device itself is untainted. A
 // whole-GPU fault taints every MIG device on the card, so both sides agree; the
 // MIG taint adds faults scoped to one instance.
-func collectDRAMigDeviceMetrics(ch chan<- prometheus.Metric, nodeName string,
-	devMigInfosMap map[string][]*nvidia.MigInfo, devHealthMap map[string]int, migHealth map[string]bool) {
+func collectDRAMigDeviceMetrics(
+	ch chan<- prometheus.Metric, nodeName string,
+	devMigInfosMap map[string][]*nvidia.MigInfo,
+	devHealthMap map[string]int, migHealth map[string]bool,
+) {
 	FlattenMigInfosMapEach(devMigInfosMap, func(parentUUID string, mig *nvidia.MigInfo) {
 		labels := migDeviceLabels(nodeName, parentUUID, mig)
 		if mig.GiProfileInfo != nil {
 			ch <- prometheus.MustNewConstMetric(migDeviceGiProfileMemory, prometheus.GaugeValue,
-				float64(mig.GiProfileInfo.MemorySizeMB)*1024*1024, labels...)
+				float64(mig.GiProfileInfo.MemorySizeMB)*float64(units.MiB), labels...)
 			ch <- prometheus.MustNewConstMetric(migDeviceGiProfileSMCount, prometheus.GaugeValue,
 				float64(mig.GiProfileInfo.MultiprocessorCount), labels...)
 		}
@@ -181,9 +185,11 @@ func collectDRAMigDeviceMetrics(ch chan<- prometheus.Metric, nodeName string,
 // that containers sharing one device each see their own part. When the
 // per-instance process list could not be read, it falls back to the usage of
 // the whole device.
-func collectDRAContainerMigMetrics(ch chan<- prometheus.Metric, nodeName string, pod *corev1.Pod, container string,
+func collectDRAContainerMigMetrics(
+	ch chan<- prometheus.Metric, nodeName string, pod *corev1.Pod, container string,
 	migNames []string, migDevices map[string]*draMigDevice, index liveMigIndex,
-	migProcInfoMap map[string]procInfoList, containerPids []uint32) {
+	migProcInfoMap map[string]procInfoList, containerPids []uint32,
+) {
 	names := append([]string(nil), migNames...)
 	sort.Strings(names)
 	reported := sets.New[string]()
