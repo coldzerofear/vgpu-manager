@@ -385,7 +385,7 @@ func TestHasVGPUOnPartitionableGPU(t *testing.T) {
 	st, vg, _ := newCoexistState(t)
 	require.True(t, st.hasVGPUOnPartitionableGPU())
 
-	vg.VGpu.GpuDeviceInfo.maxCapacities = nil
+	vg.VGpu.maxCapacities = nil
 	require.False(t, st.hasVGPUOnPartitionableGPU(), "a GPU without MIG profiles has no counters to share")
 }
 

@@ -111,7 +111,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 			klog.Warningf("DynamicMIG enabled but no MIG capable GPU found on this node; falling back to legacy Full GPU support")
 		} else {
 			if state.hasVGPUOnPartitionableGPU() {
-				if err := validateVGPUDynamicMIGSupport(config.ClientSets.Core); err != nil {
+				if err := validateVGPUDynamicMIGSupport(config.Core); err != nil {
 					return nil, err
 				}
 			}
@@ -253,7 +253,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	healthDeviceMap := make(map[string]*manager.GPUDevice)
 	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
 		for _, device := range state.perGPUAllocatable.GetAllDevices().GetVGPUs() {
-			gpuInfo := device.VGpu.GpuDeviceInfo.GpuInfo
+			gpuInfo := device.VGpu.GpuInfo
 			paths, _ := gpuInfo.GetPaths()
 			healthDeviceMap[device.CanonicalName()] = &manager.GPUDevice{
 				GpuInfo:  gpuInfo,

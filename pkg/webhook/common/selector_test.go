@@ -34,6 +34,8 @@ import (
 type selectorDevice struct {
 	productName string
 	uuid        string
+	// memoryRatio is left out of the attributes when zero.
+	memoryRatio int64
 }
 
 func (d selectorDevice) cel() dracel.Device {
@@ -46,6 +48,9 @@ func (d selectorDevice) cel() dracel.Device {
 	}
 	if d.uuid != "" {
 		attrs["uuid"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.uuid)}
+	}
+	if d.memoryRatio != 0 {
+		attrs["memoryRatio"] = resourceapi.DeviceAttribute{IntValue: ptr.To(d.memoryRatio)}
 	}
 	return dracel.Device{Driver: util.DRADriverName, Attributes: attrs}
 }
@@ -70,11 +75,11 @@ func selects(t *testing.T, selectors []resourceapi.DeviceSelector, device select
 
 func TestDeviceSelectorsMatchCaseInsensitiveSubstrings(t *testing.T) {
 	var (
-		a10     = selectorDevice{"NVIDIA A10", "GPU-1d2e3f40-0000-0000-0000-00000000a010"}
-		a100    = selectorDevice{"NVIDIA A100-SXM4-80GB", "GPU-1d2e3f40-0000-0000-0000-00000000a100"}
-		geforce = selectorDevice{"NVIDIA GeForce RTX 4090", "GPU-5e4b0000-0000-0000-0000-000000004090"}
+		a10     = selectorDevice{productName: "NVIDIA A10", uuid: "GPU-1d2e3f40-0000-0000-0000-00000000a010"}
+		a100    = selectorDevice{productName: "NVIDIA A100-SXM4-80GB", uuid: "GPU-1d2e3f40-0000-0000-0000-00000000a100"}
+		geforce = selectorDevice{productName: "NVIDIA GeForce RTX 4090", uuid: "GPU-5e4b0000-0000-0000-0000-000000004090"}
 		// Published by a driver before verbatim UUIDs.
-		legacy  = selectorDevice{"NVIDIA H100 80GB HBM3", "gpu-77770000-0000-0000-0000-00000000h100"}
+		legacy  = selectorDevice{productName: "NVIDIA H100 80GB HBM3", uuid: "gpu-77770000-0000-0000-0000-00000000h100"}
 		unnamed = selectorDevice{}
 	)
 	all := []selectorDevice{a10, a100, geforce, legacy, unnamed}
@@ -104,6 +109,39 @@ func TestDeviceSelectorsMatchCaseInsensitiveSubstrings(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", Annotations: tc.annotations}}
+			request := BuildDeviceRequest(pod, "vgpu-manager", ResourceInfo{})
+			var got []selectorDevice
+			for _, device := range all {
+				if selects(t, request.Exactly.Selectors, device) {
+					got = append(got, device)
+				}
+			}
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestDeviceSelectorsMemoryPolicy(t *testing.T) {
+	var (
+		unmarked   = selectorDevice{productName: "NVIDIA A10"}
+		physical   = selectorDevice{productName: "NVIDIA A10", memoryRatio: 100}
+		oversubbed = selectorDevice{productName: "NVIDIA A10", memoryRatio: 150}
+	)
+	all := []selectorDevice{unmarked, physical, oversubbed}
+
+	for _, tc := range []struct {
+		policy string
+		want   []selectorDevice
+	}{
+		{"", all},
+		{util.VirtualMemoryPolicy.String(), []selectorDevice{oversubbed}},
+		{" Virt ", []selectorDevice{oversubbed}},
+		{util.PhysicalMemoryPolicy.String(), []selectorDevice{unmarked, physical}},
+		{"PHY", []selectorDevice{unmarked, physical}},
+	} {
+		t.Run(tc.policy, func(t *testing.T) {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns",
+				Annotations: map[string]string{util.MemorySchedulerPolicyAnnotation: tc.policy}}}
 			request := BuildDeviceRequest(pod, "vgpu-manager", ResourceInfo{})
 			var got []selectorDevice
 			for _, device := range all {

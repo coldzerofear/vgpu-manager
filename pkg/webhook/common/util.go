@@ -321,13 +321,16 @@ func BuildDeviceRequest(pod *corev1.Pod, deviceClassName string, info ResourceIn
 	case policy == util.VirtualMemoryPolicy.String(), strings.HasPrefix(policy, "virt"):
 		deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
 			CEL: &resourceapi.CELDeviceSelector{
-				Expression: fmt.Sprintf(`device.attributes[%q].memoryRatio > 100`, util.DRADriverName),
+				Expression: fmt.Sprintf(`%q in device.attributes[%q] && device.attributes[%q].%s > 100`,
+					remote.AttrMemoryRatio, util.DRADriverName, util.DRADriverName, remote.AttrMemoryRatio),
 			},
 		})
 	case policy == util.PhysicalMemoryPolicy.String(), strings.HasPrefix(policy, "phy"):
 		deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
 			CEL: &resourceapi.CELDeviceSelector{
-				Expression: fmt.Sprintf(`device.attributes[%q].memoryRatio <= 100`, util.DRADriverName),
+				// A device without the attribute is not oversubscribed.
+				Expression: fmt.Sprintf(`!(%q in device.attributes[%q]) || device.attributes[%q].%s <= 100`,
+					remote.AttrMemoryRatio, util.DRADriverName, util.DRADriverName, remote.AttrMemoryRatio),
 			},
 		})
 	}
