@@ -264,11 +264,6 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 				continue
 			}
 
-			//if m.skippedXids[xid] {
-			//	klog.V(6).Infof("Skipping XID event: Data=%d, Type=%d, GI=%d, CI=%d", xid, eType, gi, ci)
-			//	continue
-			//}
-
 			klog.V(4).Infof("Processing event XID=%d event", xid)
 			// this seems an extreme action.
 			// should we just log the error and proceed anyway.
