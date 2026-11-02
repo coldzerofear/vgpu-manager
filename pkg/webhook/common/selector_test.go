@@ -36,12 +36,29 @@ type selectorDevice struct {
 	uuid        string
 	// memoryRatio is left out of the attributes when zero.
 	memoryRatio int64
+	// accessMode is left out of the attributes when empty.
+	accessMode string
+	// devType defaults to vgpu; "-" leaves the attribute out.
+	devType string
 }
 
 func (d selectorDevice) cel() dracel.Device {
 	attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-		"type":       {StringValue: ptr.To(kubeletplugin.VGpuDeviceType)},
 		"accessMode": {StringValue: ptr.To(util.AccessModeLocal)},
+	}
+	switch d.devType {
+	case "":
+		attrs["type"] = resourceapi.DeviceAttribute{StringValue: ptr.To(kubeletplugin.VGpuDeviceType)}
+	case "-":
+	default:
+		attrs["type"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.devType)}
+	}
+	switch d.accessMode {
+	case "":
+	case "-":
+		delete(attrs, "accessMode")
+	default:
+		attrs["accessMode"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.accessMode)}
 	}
 	if d.productName != "" {
 		attrs["productName"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.productName)}
@@ -145,6 +162,43 @@ func TestDeviceSelectorsMemoryPolicy(t *testing.T) {
 			request := BuildDeviceRequest(pod, "vgpu-manager", ResourceInfo{})
 			var got []selectorDevice
 			for _, device := range all {
+				if selects(t, request.Exactly.Selectors, device) {
+					got = append(got, device)
+				}
+			}
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestDeviceSelectorsAccessMode(t *testing.T) {
+	var (
+		local    = selectorDevice{productName: "local", accessMode: util.AccessModeLocal}
+		remote   = selectorDevice{productName: "remote", accessMode: util.AccessModeRemote}
+		legacy   = selectorDevice{productName: "no accessMode", accessMode: "-"}
+		fullGPU  = selectorDevice{productName: "gpu", devType: kubeletplugin.GpuDeviceType}
+		untyped  = selectorDevice{productName: "no type", devType: "-"}
+		allTypes = []selectorDevice{local, remote, legacy, fullGPU, untyped}
+	)
+
+	for _, tc := range []struct {
+		name       string
+		annotation string
+		want       []selectorDevice
+	}{
+		{"no annotation is local", "", []selectorDevice{local, legacy}},
+		{"local", util.AccessModeLocal, []selectorDevice{local, legacy}},
+		{"remote", " Remote ", []selectorDevice{remote}},
+		{"invalid falls back to local", "elsewhere", []selectorDevice{local, legacy}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+			if tc.annotation != "" {
+				pod.Annotations = map[string]string{util.VGPUAccessModeAnnotation: tc.annotation}
+			}
+			request := BuildDeviceRequest(pod, "vgpu-manager", ResourceInfo{})
+			var got []selectorDevice
+			for _, device := range allTypes {
 				if selects(t, request.Exactly.Selectors, device) {
 					got = append(got, device)
 				}

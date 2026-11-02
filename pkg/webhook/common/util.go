@@ -273,6 +273,22 @@ func upperASCII(s string) string {
 	}, s)
 }
 
+// vgpuAccessModeExpression selects vGPU devices of the given access mode. A
+// device without the accessMode attribute was published by a driver predating
+// remote GPU support, and is local.
+func vgpuAccessModeExpression(accessMode string) string {
+	attributes := fmt.Sprintf("device.attributes[%q]", util.DRADriverName)
+	isVGPU := fmt.Sprintf(`%q in %s && %s.type == %q`, "type", attributes, attributes, kubeletplugin.VGpuDeviceType)
+	hasMode := fmt.Sprintf(`%q in %s`, util.AccessModeAttribute, attributes)
+	modeIs := func(mode string) string {
+		return fmt.Sprintf(`%s.%s == %q`, attributes, util.AccessModeAttribute, mode)
+	}
+	if accessMode == util.AccessModeRemote {
+		return fmt.Sprintf(`%s && %s && %s`, isVGPU, hasMode, modeIs(util.AccessModeRemote))
+	}
+	return fmt.Sprintf(`%s && (!(%s) || %s)`, isVGPU, hasMode, modeIs(util.AccessModeLocal))
+}
+
 func BuildDeviceRequest(pod *corev1.Pod, deviceClassName string, info ResourceInfo) resourceapi.DeviceRequest {
 	var (
 		deviceCount     int64
@@ -295,10 +311,7 @@ func BuildDeviceRequest(pod *corev1.Pod, deviceClassName string, info ResourceIn
 	accessMode, _ := util.PodVGPUAccessMode(pod)
 
 	deviceSelectors := []resourceapi.DeviceSelector{{
-		CEL: &resourceapi.CELDeviceSelector{
-			Expression: fmt.Sprintf(`device.attributes["%s"].type == "%s" && device.attributes["%s"].%s == "%s"`,
-				util.DRADriverName, kubeletplugin.VGpuDeviceType, util.DRADriverName, util.AccessModeAttribute, accessMode),
-		},
+		CEL: &resourceapi.CELDeviceSelector{Expression: vgpuAccessModeExpression(accessMode)},
 	}}
 	for _, filter := range []struct {
 		annotation string
