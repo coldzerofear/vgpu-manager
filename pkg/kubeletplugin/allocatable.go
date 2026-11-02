@@ -408,6 +408,12 @@ func (d *AllocatableDevice) AddOrUpdateTaint(taint *resourceapi.DeviceTaint) boo
 	return true
 }
 
+func (d *AllocatableDevice) hasTaint(key string) bool {
+	return slices.ContainsFunc(d.taints, func(taint resourceapi.DeviceTaint) bool {
+		return taint.Key == key
+	})
+}
+
 // RemoveTaint removes the taint with the specified key. It returns true when a
 // taint was removed.
 func (d *AllocatableDevice) RemoveTaint(key string) (resourceapi.DeviceTaint, bool) {
@@ -420,11 +426,19 @@ func (d *AllocatableDevice) RemoveTaint(key string) (resourceapi.DeviceTaint, bo
 	return resourceapi.DeviceTaint{}, false
 }
 
+// GetGPUDeviceByUUID returns the device announcing the whole physical GPU: a
+// full GPU, or the vGPU device that replaces it under VGPUSupport.
 func (d AllocatableDevices) GetGPUDeviceByUUID(uuid string) *AllocatableDevice {
 	for _, device := range d {
-		if device.Type() == GpuDeviceType &&
-			device.Gpu.UUID == uuid {
-			return device
+		switch device.Type() {
+		case GpuDeviceType:
+			if device.Gpu.UUID == uuid {
+				return device
+			}
+		case VGpuDeviceType:
+			if device.VGpu.UUID == uuid {
+				return device
+			}
 		}
 	}
 

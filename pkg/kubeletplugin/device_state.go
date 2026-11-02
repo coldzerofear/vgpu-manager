@@ -383,6 +383,12 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		return nil, fmt.Errorf("unable to prepare claim %v: %w", claimUID, err)
 	}
 
+	// The scheduler keeps vGPU and MIG apart through shared counters, but only
+	// as far as its view of allocations is current; see validateNoGPUModeConflict.
+	if err := s.validateNoGPUModeConflict(checkpoint, claim); err != nil {
+		return nil, fmt.Errorf("unable to prepare claim %v: %w", claimUID, err)
+	}
+
 	// Relevant for DynamicMIG: a previous preparation attempt for the same
 	// claim might have resulted in complete or partial GI/CI creation. Roll
 	// that back, and retry creation from scratch (that maybe can later be
@@ -1199,6 +1205,13 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 
 			switch allocatableDevice.Type() {
 			case VGpuDeviceType:
+				// A vGPU needs the parent out of MIG mode, and startup cleanup
+				// is only best-effort.
+				if featuregates.Enabled(featuregates.DynamicMIG) {
+					if err := s.nvdevlib.ensureMigDisabled(allocatableDevice.VGpu.GpuDeviceInfo); err != nil {
+						return nil, fmt.Errorf("error preparing vGPU device %s: %w", result.Device, err)
+					}
+				}
 				preparedDevice.containerEdits = s.vgpuManager.GetAllocationEnvContainerEdits(claim, result, allocatableDevice)
 				// In NRI mode the partition directory mounts + register wiring are
 				// applied per-container by the NRI plugin at CreateContainer, not
@@ -1987,6 +2000,43 @@ func (s *DeviceState) validateNoOverlappingPreparedDevices(checkpoint *Checkpoin
 	return nil
 }
 
+// validateNoGPUModeConflict rejects a claim that would use one physical GPU in
+// both vGPU and MIG mode. The name-based overlap check cannot see this, as
+// `vgpu-0` and `gpu-0-mig-*` are different devices on the same card. Allocation
+// normally rules it out; this catches what reaches us anyway, such as a pod
+// force-deleted before its claim was unprepared. Returning an error makes the
+// kubelet retry until the other claim is gone.
+func (s *DeviceState) validateNoGPUModeConflict(checkpoint *Checkpoint, claim *resourceapi.ResourceClaim) error {
+	claimUID := string(claim.UID)
+	for name := range s.requestedNonAdminDevices(claim) {
+		device := s.perGPUAllocatable.GetAllocatableDevice(name)
+		if device == nil {
+			continue
+		}
+		for existingClaimUID, pc := range checkpoint.V2.PreparedClaims {
+			if existingClaimUID == claimUID || pc.CheckpointState != ClaimCheckpointStatePrepareCompleted {
+				continue
+			}
+			for existingName := range pc.GetNonAdminDevices() {
+				existing := s.perGPUAllocatable.GetAllocatableDevice(existingName)
+				if existing != nil && hasGPUModeConflict(device, existing) {
+					return fmt.Errorf("requested device %s shares a physical GPU with device %s of prepared claim %s in a different mode",
+						name, existingName, existingClaimUID)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func hasGPUModeConflict(a, b *AllocatableDevice) bool {
+	if a.GetGPUPCIBusID() != b.GetGPUPCIBusID() {
+		return false
+	}
+	return (a.Type() == VGpuDeviceType && b.Type() == MigDynamicDeviceType) ||
+		(a.Type() == MigDynamicDeviceType && b.Type() == VGpuDeviceType)
+}
+
 func (s *DeviceState) getNormalizedDeviceConfig(allocation *resourceapi.AllocationResult, deviceName string) (configapi.Interface, error) {
 	configResultsMap, err := s.getConfigResultsMap(allocation)
 	if err != nil {
@@ -2185,13 +2235,18 @@ func isGpuUUIDInUseByOtherClaims(checkpoint *Checkpoint, claimUID string, gpuUUI
 		}
 		for _, group := range otherClaim.PreparedDevices {
 			for _, dev := range group.Devices {
-				if dev.Gpu == nil || dev.Gpu.Info == nil || dev.Gpu.Device == nil {
+				var uuid string
+				var device *CheckpointedDevice
+				switch {
+				case dev.Gpu != nil && dev.Gpu.Info != nil:
+					uuid, device = dev.Gpu.Info.UUID, dev.Gpu.Device
+				case dev.VGpu != nil && dev.VGpu.Info != nil && dev.VGpu.Info.GpuDeviceInfo != nil:
+					uuid, device = dev.VGpu.Info.UUID, dev.VGpu.Device
+				}
+				if device == nil || preparedClaimDeviceHasAdminAccess(&otherClaim, device.DeviceName) {
 					continue
 				}
-				if preparedClaimDeviceHasAdminAccess(&otherClaim, dev.Gpu.Device.DeviceName) {
-					continue
-				}
-				if dev.Gpu.Info.UUID == gpuUUID {
+				if uuid == gpuUUID {
 					return true
 				}
 			}
@@ -2295,6 +2350,17 @@ func (s *DeviceState) IsMigCapable() bool {
 	return false
 }
 
+// hasVGPUOnPartitionableGPU reports whether any GPU on this node is announced
+// both as a vGPU and as Dynamic MIG devices, sharing one counter set.
+func (s *DeviceState) hasVGPUOnPartitionableGPU() bool {
+	for _, device := range s.perGPUAllocatable.GetAllDevices().GetVGPUs() {
+		if len(device.VGpu.PartConsumesCounters()) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func isAdminAccess(results []resourceapi.DeviceRequestAllocationResult) bool {
 	for _, r := range results {
 		if r.Driver != util.DRADriverName {
@@ -2317,6 +2383,12 @@ func isAdminAccess(results []resourceapi.DeviceRequestAllocationResult) bool {
 func (s *DeviceState) clearDynamicMIGXIDTaint(name DeviceName) bool {
 	device := s.perGPUAllocatable.GetAllocatableDevice(name)
 	if device == nil || device.Type() != MigDynamicDeviceType {
+		return false
+	}
+	// A full-GPU XID is copied onto the Dynamic MIG devices of that GPU. It
+	// belongs to the card rather than to this incarnation, so it stays.
+	parent := s.perGPUAllocatable.allocatablesMap[device.GetGPUPCIBusID()].GetGPUDeviceByUUID(device.MigDynamic.Parent.UUID)
+	if parent != nil && parent.hasTaint(TaintKeyXID) {
 		return false
 	}
 	if taint, removed := device.RemoveTaint(TaintKeyXID); removed {

@@ -94,6 +94,10 @@ type driver struct {
 	useSplitResourceSlices bool
 }
 
+// minVGPUDynamicMIGKubernetesVersion is the first release that counts shared
+// allocations against shared counters; see validateVGPUDynamicMIGSupport.
+const minVGPUDynamicMIGKubernetesVersion = "1.36.2"
+
 func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	state, err := NewDeviceState(ctx, config)
 	if err != nil {
@@ -106,6 +110,12 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		if !state.IsMigCapable() {
 			klog.Warningf("DynamicMIG enabled but no MIG capable GPU found on this node; falling back to legacy Full GPU support")
 		} else {
+			if state.hasVGPUOnPartitionableGPU() {
+				if err := validateVGPUDynamicMIGSupport(config.ClientSets.Core); err != nil {
+					return nil, err
+				}
+			}
+
 			// Could be done in NewDeviceState, but I want to make sure that the
 			// checkpoint machinery is ready to use -- that's more obvious here.
 			//
@@ -239,22 +249,22 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		driver.healthcheck = healthcheck
 	}
 
+	// Populated before the watcher and the health event loop start, as both use it.
 	healthDeviceMap := make(map[string]*manager.GPUDevice)
 	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
+		for _, device := range state.perGPUAllocatable.GetAllDevices().GetVGPUs() {
+			gpuInfo := device.VGpu.GpuDeviceInfo.GpuInfo
+			paths, _ := gpuInfo.GetPaths()
+			healthDeviceMap[device.CanonicalName()] = &manager.GPUDevice{
+				GpuInfo:  gpuInfo,
+				NumaNode: int(gpuInfo.GetNumaNode()),
+				Paths:    paths,
+				Healthy:  true,
+				Links:    map[int][]links.P2PLinkType{},
+			}
+		}
 		driver.wg.Go(func() {
 			klog.V(4).Info("Starting to extended shared SM utilization watcher")
-			for _, device := range state.perGPUAllocatable.GetAllDevices().GetVGPUs() {
-				gpuInfo := device.VGpu.GpuDeviceInfo.GpuInfo
-				paths, _ := gpuInfo.GetPaths()
-				gpuDevice := &manager.GPUDevice{
-					GpuInfo:  gpuInfo,
-					NumaNode: int(gpuInfo.GetNumaNode()),
-					Paths:    paths,
-					Healthy:  true,
-					Links:    map[int][]links.P2PLinkType{},
-				}
-				healthDeviceMap[device.CanonicalName()] = gpuDevice
-			}
 			filePath := filepath.Join(config.Flags.ContainerManagerDir, util.Watcher, manager.SMUtilFile)
 			manager.SMUtilWatcherStart(ctx, state.nvdevlib.DeviceLib, healthDeviceMap, filePath)
 			klog.V(4).Info("stopping extended shared SM utilization watcher")
@@ -699,6 +709,16 @@ func IsHealthy(taints []resourceapi.DeviceTaint) bool {
 	return true
 }
 
+// updateSMWatcherHealth tells the SM watcher which devices to stop sampling.
+// A NoSchedule taint evicts nothing, so containers keep running on a device with
+// a fatal XID and still depend on the shared samples. Only a lost GPU, which
+// NVML can no longer reach, is skipped.
+func updateSMWatcherHealth(healthDeviceMap map[string]*manager.GPUDevice, dev *AllocatableDevice, eventType DeviceHealthEventType) {
+	if device, ok := healthDeviceMap[dev.CanonicalName()]; ok && eventType == HealthEventGPULost {
+		device.Healthy = false
+	}
+}
+
 func (d *driver) deviceHealthEvents(ctx context.Context, healthDeviceMap map[string]*manager.GPUDevice) {
 	klog.V(4).Info("Starting to watch for device health notifications")
 	for {
@@ -719,9 +739,7 @@ func (d *driver) deviceHealthEvents(ctx context.Context, healthDeviceMap map[str
 				klog.Warningf("Received %s health event for device %s", event.EventType, dev.CanonicalName())
 				if d.state.AddDeviceTaint(dev, taint) {
 					modified = true
-					if device, ok := healthDeviceMap[dev.CanonicalName()]; ok {
-						device.Healthy = IsHealthy(dev.Taints())
-					}
+					updateSMWatcherHealth(healthDeviceMap, dev, event.EventType)
 				}
 			}
 			if !modified {
@@ -774,6 +792,25 @@ func shouldUseSplitResourceSlices(client coreclientset.Interface) (bool, error) 
 
 	klog.V(2).Infof("Detected Kubernetes version %s (>= 1.35), plan to use separate ResourceSlices for SharedCounters and Devices", v)
 	return true, nil
+}
+
+// validateVGPUDynamicMIGSupport refuses Kubernetes versions that cannot keep
+// vGPU and MIG off the same GPU. vGPU devices are allocated with a share ID, and
+// before 1.36.2 the allocator left such allocations out when it computed the
+// available counters, so MIG devices could be allocated on a GPU running vGPU
+// workloads. Patch level is compared on its own so that a vendor suffix such as
+// "1.36.2-gke.1" does not count as a prerelease of 1.36.2.
+func validateVGPUDynamicMIGSupport(client coreclientset.Interface) error {
+	v, err := getAPIServerVersion(client)
+	if err != nil {
+		return fmt.Errorf("API server version detection failed: %w", err)
+	}
+	release := semver.MustParse(fmt.Sprintf("%d.%d.%d", v.Major(), v.Minor(), v.Patch()))
+	if release.LessThan(semver.MustParse(minVGPUDynamicMIGKubernetesVersion)) {
+		return fmt.Errorf("feature gates %s and %s together require Kubernetes %s or later, found %s",
+			featuregates.VGPUSupport, featuregates.DynamicMIG, minVGPUDynamicMIGKubernetesVersion, v)
+	}
+	return nil
 }
 
 func getAPIServerVersion(client coreclientset.Interface) (*semver.Version, error) {

@@ -677,15 +677,15 @@ func TestResolveDeviceByEventAddressUsesGPUUUIDIndex(t *testing.T) {
 		gpuInfosByUUID: map[string]*GpuDeviceInfo{parent.UUID: {GpuInfo: parent}},
 	}
 
-	got, err := monitor.resolveDeviceByEventAddress(parent.UUID, nil, 2, 3)
+	got, err := monitor.resolveDevicesByEventAddress(parent.UUID, nil, 2, 3)
 	require.NoError(t, err)
-	require.Equal(t, staticMIG, got)
+	require.Equal(t, []*AllocatableDevice{staticMIG}, got)
 
-	got, err = monitor.resolveDeviceByEventAddress(parent.UUID, nil, FullGPUInstanceID, 3)
+	got, err = monitor.resolveDevicesByEventAddress(parent.UUID, nil, FullGPUInstanceID, 3)
 	require.Nil(t, got)
 	require.NoError(t, err)
 
-	_, err = monitor.resolveDeviceByEventAddress("GPU-unknown", nil, 2, 3)
+	_, err = monitor.resolveDevicesByEventAddress("GPU-unknown", nil, 2, 3)
 	require.ErrorContains(t, err, "failed to find parent GPU UUID")
 
 }
@@ -734,7 +734,10 @@ func TestHealthMonitorStartRequiresRegisteredEvents(t *testing.T) {
 }
 
 func TestClearDynamicMIGXIDTaint(t *testing.T) {
-	dynamic := &AllocatableDevice{MigDynamic: &MigSpec{}}
+	dynamic := &AllocatableDevice{MigDynamic: &MigSpec{Parent: &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{
+		UUID:     "GPU-1",
+		PciBusID: "0000:01:00.0",
+	}}}}
 	dynamic.AddOrUpdateTaint(&resourceapi.DeviceTaint{
 		Key:   TaintKeyXID,
 		Value: "43",
