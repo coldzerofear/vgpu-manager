@@ -49,6 +49,12 @@ import (
 //     (FindMigDevBySpec), so they identify the instance. A dynamic device has
 //     no uuid attribute because the UUID only exists after creation.
 
+// migDeviceTypeAttr is the published type attribute of every MIG device. The
+// kubelet plugin tells static and dynamic MIG apart internally (Type() returns
+// "migdyn" for the latter) but publishes both as "mig", so a dynamic device is
+// recognised by its missing uuid attribute rather than by its type.
+const migDeviceTypeAttr = kubeletplugin.MigStaticDeviceType
+
 // draMigDevice is a MIG device published in this node's ResourceSlices.
 type draMigDevice struct {
 	name string

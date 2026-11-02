@@ -768,7 +768,7 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 			devInfo.devType = remote.StringAttr(dev, "type")
 			// Static and dynamic MIG devices are both published with type mig.
-			if devInfo.devType == kubeletplugin.MigStaticDeviceType {
+			if devInfo.devType == migDeviceTypeAttr {
 				if migDev, ok := newDRAMigDevice(dev); ok {
 					migDevices[migDev.name] = migDev
 				}

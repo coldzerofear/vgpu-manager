@@ -19,6 +19,7 @@ package collector
 import (
 	"testing"
 
+	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
@@ -131,6 +132,36 @@ func TestNewDRAMigDevice(t *testing.T) {
 	bad := sliceMig("not-a-mig-name", "")
 	_, ok = newDRAMigDevice(&bad)
 	require.False(t, ok)
+}
+
+// The slice device here comes from the kubelet plugin's own publishing code,
+// so a change in how it names or labels dynamic MIG devices breaks this test.
+func TestDynamicMigDevicePublishedByPluginIsRecognised(t *testing.T) {
+	parent := &kubeletplugin.GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{
+		UUID: testParentUUID, Minor: 0, ProductName: "NVIDIA H100", Brand: "NVIDIA", Architecture: "Hopper",
+		CudaComputeCapability: "9.0",
+		DriverVersion:         nvidia.DriverVersion{DriverVersion: "580.0.0", CudaDriverVersion: 13000},
+	}}
+	allocatable := &kubeletplugin.AllocatableDevice{MigDynamic: &kubeletplugin.MigSpec{
+		Parent:            parent,
+		CandidateProfiles: []nvdev.MigProfile{&nvdev.MigProfileInfo{C: 1, G: 1, GB: 10, GIProfileID: 0}},
+		GIProfileInfo:     nvml.GpuInstanceProfileInfo{Id: 19, MemorySizeMB: 10240, MultiprocessorCount: 16},
+		Placement:         nvml.GpuInstancePlacement{Start: 2, Size: 1},
+	}}
+	require.Equal(t, kubeletplugin.MigDynamicDeviceType, allocatable.Type(), "internal type differs from the published one")
+	allocatable.AddOrUpdateTaint(&v1.DeviceTaint{Key: kubeletplugin.TaintKeyXID, Value: "31", Effect: v1.DeviceTaintEffectNoSchedule})
+	published := allocatable.PartGetDevice(&kubeletplugin.Config{})
+
+	require.Equal(t, migDeviceTypeAttr, *published.Attributes["type"].StringValue)
+	require.Equal(t, "gpu-0-mig-1g10gb-19-2", published.Name)
+	dev, ok := newDRAMigDevice(&published)
+	require.True(t, ok)
+	require.Empty(t, dev.uuid, "a dynamic device has no uuid before it is created")
+	require.False(t, dev.healthy)
+
+	mig := newLiveMigIndex(liveMig()).resolve(dev)
+	require.NotNil(t, mig, "the published device matches the instance created for it")
+	require.Equal(t, testMigUUID, mig.UUID)
 }
 
 func TestLiveMigIndexResolve(t *testing.T) {
