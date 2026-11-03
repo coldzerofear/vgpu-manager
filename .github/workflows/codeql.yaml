@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-go@90ad2b35f69faf97585ad74d28fa006d2739b7af # post-v7.0.0, see header
+      - uses: actions/setup-go@b2a9ab24f04885adb52faf6bdccb0bb7dfb3c187 # post-v7.0.0, see header
         if: matrix.language == 'go'
         with:
           go-version-file: go.mod
