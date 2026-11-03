@@ -185,8 +185,18 @@ PyTorch 侧的观察（与本库无关，不加载本库同样发生）：
 - capture 内分配失败后 PyTorch 无法恢复：捕获作废，析构里 `cuMemFreeAsync` 报 INVALIDATED 后 `terminate`。所以 Python 测试不测
   "capture 内超限"（C 测试 [D] 覆盖）。
 - 首次捕获前必须先在捕获外跑一次同样的操作（PyTorch 要求的 warm-up），否则懒初始化发生在捕获内使其作废。
-- cudaMallocAsync 后端 `del` 张量后显存留在 PyTorch 的默认池里，NVML 仍计入，graph 池无法复用：需 `torch.cuda.empty_cache()`。
-  因此"释放后 replay"要先 `empty_cache()`；这是真实占用，拒绝是正确的。
+- cudaMallocAsync 后端 `del` 张量后显存留在 PyTorch 的池里（驱动默认内存池，PyTorch 设为不自动释放），NVML 仍计入；
+  graph 分配来自驱动的 graph 内存池，两池不能互用。所以释放张量后、graph replay 需要新显存时，要先 `torch.cuda.empty_cache()`
+  把显存还给驱动。**这是 PyTorch 在真实硬件上的固有行为，不是本库引入的**——同一段代码（`ec.py`：占满显存 → `del` → replay）：
+
+  | 环境 | `del` 后直接 replay | `empty_cache()` 后 replay |
+  |---|---|---|
+  | 不加载本库，真实 10 GiB GPU（`del` 后设备空闲 1534 MiB，PyTorch 预留 7776 MiB，graph 需 3122 MiB） | OOM | 成功 |
+  | 加载本库，限额 4096 MiB（空闲 595 MiB，预留 3008 MiB，graph 需 1219 MiB） | OOM | 成功 |
+
+  本库让一块 4 GiB 的 vGPU 与一块真实的 4 GiB GPU 表现一致；main 上同样的 replay 会静默越限（实测 1219 MiB）。
+  只涉及显式启用 `cudaMallocAsync` 后端、在捕获内分配临时张量、且首次 replay（或 Trim 后）余量不足的组合；
+  默认的原生缓存分配器在捕获期间分到的是真实 `cudaMalloc` 显存（NVML 立即可见），不产生 graph 分配节点，不受影响。
 - uint8 张量 `.sum()` 先转 int64，会产生 8 倍临时张量。
 
 并发与 fork（`test_alloc_async_accounting.c`）：[M] 8 线程 × 30 次捕获（1/3 作废）账本归零；[N] 同时 80 个捕获（超过登记表 64 槽）
