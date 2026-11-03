@@ -39,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
+	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -261,10 +262,10 @@ func (h *mutateHandle) convertDRARequest(ctx context.Context, pod *corev1.Pod) e
 	logger := log.FromContext(ctx)
 	resourceName := pod.Name
 	if pod.GenerateName != "" {
-		resourceName = fmt.Sprintf("%s-%s", strings.TrimSuffix(pod.GenerateName, "-"),
-			common.GenerateRandomString(5))
+		resourceName = fmt.Sprintf("%s-%s",
+			strings.TrimSuffix(pod.GenerateName, "-"), utilrand.String(5))
 	} else if h.options.CombinedResourceClaim {
-		resourceName = fmt.Sprintf("%s-%s", pod.Name, common.GenerateRandomString(5))
+		resourceName = fmt.Sprintf("%s-%s", pod.Name, utilrand.String(5))
 	}
 
 	resourceInfos := make(common.ResourceInfos, 0)

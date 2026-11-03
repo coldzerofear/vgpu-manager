@@ -1,8 +1,6 @@
 # CUDA Graph 显存记账（library）
 
 本文记录 `libvgpu-control.so` 对 CUDA Graph 相关显存的限额检查与记账：设计依据、真机实测的驱动行为、测试结果与已知边界。
-起因是对照 HAMi-core [#387](https://github.com/Project-HAMi/HAMi-core/issues/387) / [#388](https://github.com/Project-HAMi/HAMi-core/pull/388)
-（graph 分配不计入限额、捕获中 `cuMemPoolGetAttribute` 打断捕获）与 [#389](https://github.com/Project-HAMi/HAMi-core/pull/389)（`cuDeviceTotalMem`）。
 
 ## 1. 记账口径回顾
 
