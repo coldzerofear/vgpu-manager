@@ -3664,14 +3664,6 @@ CUresult cuFlushGPUDirectRDMAWrites(CUflushGPUDirectRDMAWritesTarget target,
                          target, scope);
 }
 
-CUresult cuGraphAddMemAllocNode(CUgraphNode *phGraphNode, CUgraph hGraph,
-                                const CUgraphNode *dependencies,
-                                size_t numDependencies,
-                                CUDA_MEM_ALLOC_NODE_PARAMS *nodeParams) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddMemAllocNode, phGraphNode,
-                         hGraph, dependencies, numDependencies, nodeParams);
-}
-
 CUresult cuGraphAddMemFreeNode(CUgraphNode *phGraphNode, CUgraph hGraph,
                                const CUgraphNode *dependencies,
                                size_t numDependencies, CUdeviceptr dptr) {

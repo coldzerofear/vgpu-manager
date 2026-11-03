@@ -556,6 +556,9 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
                                  CUmemoryPool pool, CUstream hStream);
 CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
                                  CUmemoryPool pool, CUstream hStream);
+CUresult cuGraphAddMemAllocNode(CUgraphNode *phGraphNode, CUgraph hGraph,
+                                const CUgraphNode *dependencies, size_t numDependencies,
+                                CUDA_MEM_ALLOC_NODE_PARAMS *nodeParams);
 CUresult cuMemFree_v2(CUdeviceptr dptr);
 CUresult cuMemFree(CUdeviceptr dptr);
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream);
@@ -612,6 +615,7 @@ entry_t cuda_hooks_entry[] = {
     {.name = "cuMemCreate", .fn_ptr = cuMemCreate},
     {.name = "cuMemAllocFromPoolAsync", .fn_ptr = cuMemAllocFromPoolAsync},
     {.name = "cuMemAllocFromPoolAsync_ptsz", .fn_ptr = cuMemAllocFromPoolAsync_ptsz},
+    {.name = "cuGraphAddMemAllocNode", .fn_ptr = cuGraphAddMemAllocNode},
     {.name = "cuMemFree_v2", .fn_ptr = cuMemFree_v2},
     {.name = "cuMemFree", .fn_ptr = cuMemFree},
     {.name = "cuMemFreeAsync", .fn_ptr = cuMemFreeAsync},
@@ -4383,13 +4387,23 @@ extern CUresult _cuGraphInstantiate(CUgraphExec *phGraphExec, CUgraph hGraph,
                                     CUgraphNode *phErrorNode, char *logBuffer,
                                     size_t bufferSize);
 
+/* After a successful instantiate: record the exec's launch cost, and retire
+ * the graph's alloc-node charges (cuGraphAddMemAllocNode) -- instantiation
+ * ends the graph's construction as cuStreamEndCapture ends a capture's, and
+ * past it the memory is the driver's to map and NVML's to report. A no-op for
+ * a captured graph, whose charges came off at the end of capture. */
+static void graph_instantiated(CUgraphExec exec, CUgraph hGraph) {
+  capture_graph_cost(exec, hGraph);
+  free_gpu_virt_memory_by_graph(hGraph);
+}
+
 static CUresult instantiate_and_capture(CUgraphExec *phGraphExec, CUgraph hGraph,
                                         CUgraphNode *phErrorNode, char *logBuffer,
                                         size_t bufferSize) {
   CUresult ret = _cuGraphInstantiate(phGraphExec, hGraph, phErrorNode,
                                      logBuffer, bufferSize);
   if (ret == CUDA_SUCCESS && phGraphExec) {
-    capture_graph_cost(*phGraphExec, hGraph);
+    graph_instantiated(*phGraphExec, hGraph);
   }
   return ret;
 }
@@ -4413,7 +4427,7 @@ CUresult cuGraphInstantiateWithFlags(CUgraphExec *phGraphExec, CUgraph hGraph,
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphInstantiateWithFlags,
                                   phGraphExec, hGraph, flags);
   if (ret == CUDA_SUCCESS && phGraphExec) {
-    capture_graph_cost(*phGraphExec, hGraph);
+    graph_instantiated(*phGraphExec, hGraph);
   }
   return ret;
 }
@@ -4424,7 +4438,7 @@ CUresult cuGraphInstantiateWithParams(CUgraphExec *phGraphExec, CUgraph hGraph,
                                   __CUDA_API_PTSZ(cuGraphInstantiateWithParams),
                                   phGraphExec, hGraph, instantiateParams);
   if (ret == CUDA_SUCCESS && phGraphExec) {
-    capture_graph_cost(*phGraphExec, hGraph);
+    graph_instantiated(*phGraphExec, hGraph);
   }
   return ret;
 }
@@ -4434,7 +4448,7 @@ CUresult cuGraphInstantiateWithParams_ptsz(CUgraphExec *phGraphExec, CUgraph hGr
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphInstantiateWithParams_ptsz,
                                   phGraphExec, hGraph, instantiateParams);
   if (ret == CUDA_SUCCESS && phGraphExec) {
-    capture_graph_cost(*phGraphExec, hGraph);
+    graph_instantiated(*phGraphExec, hGraph);
   }
   return ret;
 }
@@ -4644,6 +4658,47 @@ CALL:
         malloc_gpu_virt_memory_captured(*dptr, bytesize, graph, host_index);
       }
     }
+  } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+    metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
+  }
+DONE:
+  unlock_gpu_device(lock_fd);
+  return ret;
+}
+
+/* An explicit graph allocation: the same memory a captured cuMemAllocAsync
+ * becomes, built node by node instead. Nothing is allocated here -- the
+ * driver maps it from the device's graph pool at launch -- so, as for a
+ * capture, the node is checked against the limit and charged to its graph,
+ * so several alloc nodes in one graph accumulate. The charge comes off when
+ * the graph is instantiated (the explicit counterpart of cuStreamEndCapture;
+ * once launched NVML reports the memory) or destroyed. Device location only:
+ * the pool's location names the device, not the current context. */
+CUresult cuGraphAddMemAllocNode(CUgraphNode *phGraphNode, CUgraph hGraph,
+                                const CUgraphNode *dependencies, size_t numDependencies,
+                                CUDA_MEM_ALLOC_NODE_PARAMS *nodeParams) {
+  CUresult ret;
+  int lock_fd = -1;
+  memory_path_t path;
+  /* Declared before `goto CALL`; see _cuArrayCreate. */
+  int host_index = -1;
+  /* NULL-arg fast path; the driver reports its own error. */
+  if (unlikely(nodeParams == NULL ||
+               nodeParams->poolProps.location.type != CU_MEM_LOCATION_TYPE_DEVICE)) {
+    goto CALL;
+  }
+  CUdevice device = (CUdevice)nodeParams->poolProps.location.id;
+  path = prepare_memory_allocation(device, nodeParams->bytesize, 0, &host_index, &lock_fd);
+  if (path == MEMORY_PATH_OOM) {
+    metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
+    ret = CUDA_ERROR_OUT_OF_MEMORY;
+    goto DONE;
+  }
+CALL:
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddMemAllocNode, phGraphNode, hGraph,
+                         dependencies, numDependencies, nodeParams);
+  if (ret == CUDA_SUCCESS && lock_fd >= 0) {
+    malloc_gpu_virt_memory_captured(nodeParams->dptr, nodeParams->bytesize, hGraph, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
