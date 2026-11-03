@@ -270,8 +270,12 @@ static unsigned int g_share_log_tick[MAX_DEVICE_COUNT] = {0};
  * Deliberately does NOT reset loader.c's g_atfork_init: the pthread_atfork
  * registration itself survives fork via glibc's own atfork handler list, so
  * resetting it would just multiply-register on every fork generation. */
+static void capture_reg_reset_after_fork(void);
+
 void child_after_fork(void) {
   g_init_set = (pthread_once_t)PTHREAD_ONCE_INIT;
+  /* Captures do not cross fork, and the registry lock may be held mid-update. */
+  capture_reg_reset_after_fork();
   /* Drop the inherited sampling-lock descriptor. An OFD lock belongs to the
    * open file description, which fork SHARES -- so keeping this fd would
    * either make parent and child both think they own sampling (once
@@ -566,6 +570,18 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream);
 CUresult cuStreamEndCapture(CUstream hStream, CUgraph *phGraph);
 CUresult cuStreamEndCapture_ptsz(CUstream hStream, CUgraph *phGraph);
 CUresult cuGraphDestroy(CUgraph hGraph);
+CUresult cuStreamBeginCapture(CUstream hStream);
+CUresult cuStreamBeginCapture_v2(CUstream hStream, CUstreamCaptureMode mode);
+CUresult cuStreamBeginCapture_ptsz(CUstream hStream);
+CUresult cuStreamBeginCapture_v2_ptsz(CUstream hStream, CUstreamCaptureMode mode);
+CUresult cuStreamBeginCaptureToGraph(CUstream hStream, CUgraph hGraph,
+                                     const CUgraphNode *dependencies,
+                                     const CUgraphEdgeData *dependencyData,
+                                     size_t numDependencies, CUstreamCaptureMode mode);
+CUresult cuStreamBeginCaptureToGraph_ptsz(CUstream hStream, CUgraph hGraph,
+                                          const CUgraphNode *dependencies,
+                                          const CUgraphEdgeData *dependencyData,
+                                          size_t numDependencies, CUstreamCaptureMode mode);
 CUresult cuCtxDestroy_v2(CUcontext ctx);
 CUresult cuCtxDestroy(CUcontext ctx);
 CUresult cuDevicePrimaryCtxRelease_v2(CUdevice dev);
@@ -629,6 +645,12 @@ entry_t cuda_hooks_entry[] = {
     {.name = "cuStreamEndCapture", .fn_ptr = cuStreamEndCapture},
     {.name = "cuStreamEndCapture_ptsz", .fn_ptr = cuStreamEndCapture_ptsz},
     {.name = "cuGraphDestroy", .fn_ptr = cuGraphDestroy},
+    {.name = "cuStreamBeginCapture", .fn_ptr = cuStreamBeginCapture},
+    {.name = "cuStreamBeginCapture_v2", .fn_ptr = cuStreamBeginCapture_v2},
+    {.name = "cuStreamBeginCapture_ptsz", .fn_ptr = cuStreamBeginCapture_ptsz},
+    {.name = "cuStreamBeginCapture_v2_ptsz", .fn_ptr = cuStreamBeginCapture_v2_ptsz},
+    {.name = "cuStreamBeginCaptureToGraph", .fn_ptr = cuStreamBeginCaptureToGraph},
+    {.name = "cuStreamBeginCaptureToGraph_ptsz", .fn_ptr = cuStreamBeginCaptureToGraph_ptsz},
     {.name = "cuCtxDestroy_v2", .fn_ptr = cuCtxDestroy_v2},
     {.name = "cuCtxDestroy", .fn_ptr = cuCtxDestroy},
     {.name = "cuDevicePrimaryCtxRelease_v2", .fn_ptr = cuDevicePrimaryCtxRelease_v2},
@@ -1869,6 +1891,102 @@ static CUgraph stream_capture_graph(CUstream stream, int ptsz) {
     }
   }
   return NULL;
+}
+
+/* Captures in progress: origin stream -> graph, recorded when the capture
+ * begins. cuStreamEndCapture cannot look the graph up itself once a capture is
+ * invalidated -- the driver then reports the status but leaves the graph
+ * unwritten, and ends the capture with no graph either (RTX 3080, driver 595)
+ * -- so the charges such a capture made would have no key to be retired by.
+ * Also how cuGraphAddMemAllocNode tells a graph under capture from one built
+ * by hand. A full table only loses that bookkeeping for the overflowing
+ * capture; it falls back to the lookup at end of capture.
+ *
+ * The default per-thread stream is one handle shared by every thread, so it
+ * is keyed by thread too. */
+#define CAPTURE_REG_SLOTS 64
+typedef struct {
+  CUstream stream;
+  pthread_t thread;      /* only for the per-thread default stream */
+  CUgraph graph;
+  CUcontext ctx;
+} capture_reg_t;
+static capture_reg_t g_capture_reg[CAPTURE_REG_SLOTS];
+static int g_capture_reg_used;
+static pthread_mutex_t g_capture_reg_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int capture_reg_match(const capture_reg_t *e, CUstream stream, int ptsz) {
+  if (e->graph == NULL || e->stream != stream) return 0;
+  int per_thread = stream == CU_STREAM_PER_THREAD || (stream == NULL && ptsz);
+  return !per_thread || pthread_equal(e->thread, pthread_self());
+}
+
+static void capture_reg_begin(CUstream stream, int ptsz, CUgraph graph) {
+  if (graph == NULL) return;
+  CUcontext ctx = NULL;
+  if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetCurrent, &ctx) != CUDA_SUCCESS) {
+    ctx = NULL;
+  }
+  pthread_mutex_lock(&g_capture_reg_lock);
+  capture_reg_t *slot = NULL;
+  for (int i = 0; i < CAPTURE_REG_SLOTS; i++) {
+    if (capture_reg_match(&g_capture_reg[i], stream, ptsz)) { slot = &g_capture_reg[i]; break; }
+    if (slot == NULL && g_capture_reg[i].graph == NULL) slot = &g_capture_reg[i];
+  }
+  if (slot != NULL) {
+    if (slot->graph == NULL) g_capture_reg_used++;
+    slot->stream = stream;
+    slot->thread = pthread_self();
+    slot->graph = graph;
+    slot->ctx = ctx;
+  } else {
+    LOGGER(VERBOSE, "capture registry full, graph %p falls back to lookup at end of capture",
+           (void *)graph);
+  }
+  pthread_mutex_unlock(&g_capture_reg_lock);
+}
+
+/* The graph stream's capture began with, or NULL if it was not recorded. */
+static CUgraph capture_reg_graph(CUstream stream, int ptsz) {
+  CUgraph graph = NULL;
+  pthread_mutex_lock(&g_capture_reg_lock);
+  for (int i = 0; g_capture_reg_used > 0 && i < CAPTURE_REG_SLOTS; i++) {
+    if (capture_reg_match(&g_capture_reg[i], stream, ptsz)) { graph = g_capture_reg[i].graph; break; }
+  }
+  pthread_mutex_unlock(&g_capture_reg_lock);
+  return graph;
+}
+
+/* Is graph the target of a capture in progress? */
+static int capture_reg_has_graph(CUgraph graph) {
+  int found = 0;
+  if (graph == NULL || __atomic_load_n(&g_capture_reg_used, __ATOMIC_RELAXED) == 0) return 0;
+  pthread_mutex_lock(&g_capture_reg_lock);
+  for (int i = 0; i < CAPTURE_REG_SLOTS; i++) {
+    if (g_capture_reg[i].graph == graph) { found = 1; break; }
+  }
+  pthread_mutex_unlock(&g_capture_reg_lock);
+  return found;
+}
+
+static void capture_reg_reset_after_fork(void) {
+  memset(g_capture_reg, 0, sizeof(g_capture_reg));
+  g_capture_reg_used = 0;
+  pthread_mutex_init(&g_capture_reg_lock, NULL);
+}
+
+/* Forget captures by graph (ended) or, with graph NULL, by context (torn down). */
+static void capture_reg_forget(CUgraph graph, CUcontext ctx) {
+  if (graph == NULL && ctx == NULL) return;
+  pthread_mutex_lock(&g_capture_reg_lock);
+  for (int i = 0; g_capture_reg_used > 0 && i < CAPTURE_REG_SLOTS; i++) {
+    capture_reg_t *e = &g_capture_reg[i];
+    if (e->graph != NULL && (graph != NULL ? e->graph == graph : e->ctx == ctx)) {
+      memset(e, 0, sizeof(*e));
+      g_capture_reg_used--;
+    }
+  }
+  pthread_mutex_unlock(&g_capture_reg_lock);
 }
 
 /* Returns 1 if this launch enters the GAP path -- the caller MUST then call
@@ -4668,14 +4786,15 @@ DONE:
   return ret;
 }
 
-/* An explicit graph allocation. Only checked against the limit, never
- * charged: the node fixes a virtual address, and the driver maps physical
- * memory from the device's graph pool at launch (or cuGraphUpload), where NVML
- * reports it. A charge would need a retirement point, and a graph built node
- * by node has none that is guaranteed -- it may be moved into a parent as a
- * child graph and never instantiated or destroyed on its own. Charges stay
- * with stream capture, retired at cuStreamEndCapture. Device location only:
- * the pool's location names the device, not the current context. */
+/* An explicit graph allocation, checked against the limit like
+ * cuMemAllocFromPoolAsync. Charged only into a graph under capture, with that
+ * capture's charges: retired at its end like them. A graph built by hand is
+ * not charged -- the node only fixes a virtual address, physical memory is
+ * mapped from the device's graph pool at cuGraphUpload or cuGraphLaunch
+ * (RTX 3080: not at the node, nor at instantiation), and such a graph has no
+ * guaranteed point to retire a charge by: moved into a parent as a child, it
+ * is never instantiated or destroyed on its own. Device location only: the
+ * pool's location names the device, not the current context. */
 CUresult cuGraphAddMemAllocNode(CUgraphNode *phGraphNode, CUgraph hGraph,
                                 const CUgraphNode *dependencies, size_t numDependencies,
                                 CUDA_MEM_ALLOC_NODE_PARAMS *nodeParams) {
@@ -4699,7 +4818,13 @@ CUresult cuGraphAddMemAllocNode(CUgraphNode *phGraphNode, CUgraph hGraph,
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddMemAllocNode, phGraphNode, hGraph,
                          dependencies, numDependencies, nodeParams);
-  if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+  if (ret == CUDA_SUCCESS && lock_fd >= 0) {
+    if (capture_reg_has_graph(hGraph)) {
+      /* Added to a graph a capture is building: charged like the capture's own
+       * allocations, so they accumulate and come off together at its end. */
+      malloc_gpu_virt_memory_captured(nodeParams->dptr, nodeParams->bytesize, hGraph, host_index);
+    }
+  } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
 DONE:
@@ -4807,22 +4932,95 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
   return ret;
 }
 
+/* Beginning a capture records its graph (capture_reg_begin), which is the
+ * only point the graph is certain to be known: see the registry. One wrapper
+ * per ABI, each reaching the entry of its own name -- cuda.h declares
+ * cuStreamBeginCapture(CUstream) and cuStreamBeginCapture_v2(CUstream,
+ * CUstreamCaptureMode) in its __CUDA_API_VERSION_INTERNAL block, and crossing
+ * them loses the caller's capture mode in one direction and reads it from an
+ * unset register in the other. */
+CUresult cuStreamBeginCapture(CUstream hStream) {
+  CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture), hStream);
+  if (ret == CUDA_SUCCESS) {
+    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ));
+  }
+  return ret;
+}
+
+CUresult cuStreamBeginCapture_v2(CUstream hStream, CUstreamCaptureMode mode) {
+  CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture_v2), hStream, mode);
+  if (ret == CUDA_SUCCESS) {
+    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ));
+  }
+  return ret;
+}
+
+CUresult cuStreamBeginCapture_ptsz(CUstream hStream) {
+  CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamBeginCapture_ptsz, hStream);
+  if (ret == CUDA_SUCCESS) {
+    capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1));
+  }
+  return ret;
+}
+
+CUresult cuStreamBeginCapture_v2_ptsz(CUstream hStream, CUstreamCaptureMode mode) {
+  CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamBeginCapture_v2_ptsz, hStream, mode);
+  if (ret == CUDA_SUCCESS) {
+    capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1));
+  }
+  return ret;
+}
+
+CUresult cuStreamBeginCaptureToGraph(CUstream hStream, CUgraph hGraph,
+                                     const CUgraphNode *dependencies,
+                                     const CUgraphEdgeData *dependencyData,
+                                     size_t numDependencies, CUstreamCaptureMode mode) {
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCaptureToGraph),
+                                  hStream, hGraph, dependencies, dependencyData,
+                                  numDependencies, mode);
+  if (ret == CUDA_SUCCESS) {
+    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, hGraph);
+  }
+  return ret;
+}
+
+CUresult cuStreamBeginCaptureToGraph_ptsz(CUstream hStream, CUgraph hGraph,
+                                          const CUgraphNode *dependencies,
+                                          const CUgraphEdgeData *dependencyData,
+                                          size_t numDependencies, CUstreamCaptureMode mode) {
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamBeginCaptureToGraph_ptsz,
+                                  hStream, hGraph, dependencies, dependencyData,
+                                  numDependencies, mode);
+  if (ret == CUDA_SUCCESS) {
+    capture_reg_begin(hStream, 1, hGraph);
+  }
+  return ret;
+}
+
 /* End of capture is where a capture charge is retired: past this point the
  * allocations belong to the graph, and once launched NVML reports them.
- * The graph is resolved BEFORE ending the capture, since an invalidated
- * capture makes cuStreamEndCapture fail and leave *phGraph NULL while the
- * charge still needs to come off. The discharge itself ignores the driver's
- * verdict -- whether the graph was built or thrown away, no memory is held
- * on its behalf, and skipping the discharge would strand the charge in the
- * shared counter for the life of the process (a false OOM waiting to
- * happen, worse than briefly under-counting memory that doesn't exist yet). */
+ *
+ * The graph comes from the registry, falling back to a lookup for a capture
+ * the registry missed: once a capture is invalidated the driver no longer
+ * reports its graph and ends the capture with none, yet the charges made
+ * before the invalidation still need to come off -- the driver has thrown the
+ * graph away, and the application, holding no handle, can never destroy it.
+ *
+ * Retired when the capture is over: ended (SUCCESS) or abandoned by the driver
+ * (CUDA_ERROR_STREAM_CAPTURE_INVALIDATED). Any other failure -- the wrong
+ * thread ending a global-mode capture, say -- leaves the capture running, and
+ * its charges with it. */
 static CUresult end_capture_and_discharge(CUstream hStream, CUgraph *phGraph, int ptsz) {
-  CUgraph capturing = stream_capture_graph(hStream, ptsz);
+  CUgraph capturing = capture_reg_graph(hStream, ptsz);
+  if (capturing == NULL) {
+    capturing = stream_capture_graph(hStream, ptsz);
+  }
   CUresult ret = ptsz
       ? CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamEndCapture_ptsz, hStream, phGraph)
       : CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamEndCapture, hStream, phGraph);
-  if (ret == CUDA_SUCCESS) {
+  if (ret == CUDA_SUCCESS || ret == CUDA_ERROR_STREAM_CAPTURE_INVALIDATED) {
     free_gpu_virt_memory_by_graph(capturing);
+    capture_reg_forget(capturing, NULL);
   }
   return ret;
 }
@@ -4856,32 +5054,12 @@ CUresult cuGraphDestroy(CUgraph hGraph) {
  * until the process exits, failing other allocations in the container on
  * memory that does not exist. Records carry the context they were charged
  * under; once it is gone every capture in it is over, so its records go. */
-static CUresult real_ctx_destroy(CUcontext ctx) {
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy_v2))) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDestroy_v2, ctx);
-  }
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy))) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDestroy, ctx);
-  }
-  return CUDA_ERROR_NOT_FOUND;
-}
-
 static CUresult real_primary_ctx_release(CUdevice dev) {
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxRelease_v2))) {
     return CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRelease_v2, dev);
   }
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxRelease))) {
     return CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRelease, dev);
-  }
-  return CUDA_ERROR_NOT_FOUND;
-}
-
-static CUresult real_primary_ctx_reset(CUdevice dev) {
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset_v2))) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset_v2, dev);
-  }
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset))) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset, dev);
   }
   return CUDA_ERROR_NOT_FOUND;
 }
@@ -4917,6 +5095,7 @@ CUresult _cuCtxDestroy(CUcontext ctx) {
   }
   if (ret == CUDA_SUCCESS) {
     free_gpu_virt_memory_by_ctx(ctx);
+    capture_reg_forget(NULL, ctx);
   }
   return ret;
 }
@@ -4929,18 +5108,20 @@ CUresult cuCtxDestroy(CUcontext ctx) {
   return _cuCtxDestroy(ctx);
 }
 
+/* The handle is looked up BEFORE the call: the primary context reads as
+ * inactive right after a reset or the last release (RTX 3080, driver 595),
+ * and an inactive one is never looked up -- retaining it would create it. */
 CUresult _cuDevicePrimaryCtxRelease(CUdevice dev) {
+  CUcontext ctx = primary_ctx_handle(dev);
   CUresult ret = CUDA_ERROR_NOT_FOUND;
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxRelease_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRelease_v2, dev);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxRelease))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRelease, dev);
   }
-  if (ret == CUDA_SUCCESS) {
-    CUcontext ctx = primary_ctx_handle(dev);
-    if (ctx != NULL && !primary_ctx_active(dev)) {
-      free_gpu_virt_memory_by_ctx(ctx);
-    }
+  if (ret == CUDA_SUCCESS && ctx != NULL && !primary_ctx_active(dev)) {
+    free_gpu_virt_memory_by_ctx(ctx);
+    capture_reg_forget(NULL, ctx);
   }
   return ret;
 }
@@ -4957,17 +5138,16 @@ CUresult cuDevicePrimaryCtxRelease(CUdevice dev) {
 }
 
 CUresult _cuDevicePrimaryCtxReset(CUdevice dev) {
+  CUcontext ctx = primary_ctx_handle(dev);
   CUresult ret = CUDA_ERROR_NOT_FOUND;
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset_v2, dev);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset, dev);
   }
-  if (ret == CUDA_SUCCESS) {
-    CUcontext ctx = primary_ctx_handle(dev);
-    if (ctx != NULL) {
-      free_gpu_virt_memory_by_ctx(ctx);
-    }
+  if (ret == CUDA_SUCCESS && ctx != NULL) {
+    free_gpu_virt_memory_by_ctx(ctx);
+    capture_reg_forget(NULL, ctx);
   }
   return ret;
 }

@@ -40,10 +40,26 @@
  *       being written down: while a capture holds a charge, a plain allocation
  *       that would have fitted before must now be refused.
  *
+ *   [E] cuGraphAddMemAllocNode on a hand-built graph: checked against the
+ *       limit (an oversized node is refused) but not charged -- nothing would
+ *       retire a charge on a graph built by hand.
+ *
+ *   [F] an alloc node added to the graph a capture is building IS charged,
+ *       with the capture, and comes off at its end (capture_reg_has_graph).
+ *
+ *   [G] an invalidated capture: the driver stops reporting its graph and ends
+ *       it with an error and no graph, so its charges are only retired if the
+ *       graph was recorded when the capture began (capture_reg_begin) and the
+ *       end-of-capture hook discharges on CUDA_ERROR_STREAM_CAPTURE_INVALIDATED.
+ *
+ *   [H] [I] [J] a capture left open when its context goes -- cuCtxDestroy, a
+ *       primary-context reset, the release of its last reference. The driver
+ *       destroys the graphs with no cuGraphDestroy; the teardown hooks retire
+ *       the charges. [I]/[J] fail if the primary context is looked up after
+ *       the call: it reads as inactive by then.
+ *
  * Honest limitation: none of these prove the cuGraphDestroy discharge does any
- * work, because cuStreamEndCapture has already retired the charge by then. That
- * second discharge exists for a capture whose graph could no longer be
- * identified at end-of-capture, a state a test cannot force.
+ * work, because cuStreamEndCapture has already retired the charge by then.
  *
  * Built twice: the _ptsz variant compiles this same source with
  * CUDA_API_PER_THREAD_DEFAULT_STREAM so the _ptsz copies of the hooks -- which
@@ -66,112 +82,7 @@
 
 #include "test_utils.h"
 
-/* ------------------------------------------------------------------ ledger --
- *
- * Mirror of the shared virtual-memory ledger (include/hook.h: process_used_t /
- * device_vmem_used_t / device_vmemory_t). Reading it is what makes these cases
- * able to see a charge instead of guessing at one from an allocation result.
- * Keep in step with hook.h; a layout change here shows up as a charge that
- * never appears, and the cases say so rather than passing quietly. */
-#define LEDGER_PATH        "/tmp/.vmem_node/vmem_node.config"
-#define LEDGER_MAX_PIDS    1024
-#define LEDGER_MAX_DEVICES 16
-/* Must track hook.h. The region carries a 16-byte frozen header padded to one
- * cache line, which shifts devices[] -- and every field read below -- down by
- * CACHELINE_SIZE. The file size is a separate permanent constant, deliberately
- * decoupled from sizeof(): the library never resizes the file, so a mapping
- * held across a container restart can never extend past EOF. */
-#define LEDGER_HEADER_SIZE 128                 /* CACHELINE_SIZE            */
-#define LEDGER_FILE_SIZE   (320 * 1024)        /* VMEM_NODE_FILE_SIZE       */
-#define LEDGER_MAGIC       0x564D4E44U         /* VMEM_NODE_MAGIC, "VMND"   */
-#define LEDGER_VERSION     1U                  /* VMEM_NODE_LAYOUT_VERSION  */
-
-typedef struct { int pid; size_t used; } ledger_proc_t;
-typedef struct {
-  ledger_proc_t processes[LEDGER_MAX_PIDS];
-  unsigned int  processes_size;
-  unsigned char lock_byte;
-} ledger_dev_t;
-typedef struct {
-  unsigned int  magic;
-  unsigned int  layout_version;
-  unsigned int  region_size;
-  unsigned int  device_count;
-  unsigned char _pad[LEDGER_HEADER_SIZE - 16];
-  ledger_dev_t  devices[LEDGER_MAX_DEVICES];
-} ledger_t;
-
-static const volatile ledger_t *g_ledger;
-/* Set when the ledger EXISTS but this test cannot interpret it. Kept separate
- * from "g_ledger == NULL" on purpose: the two states look identical to a
- * reader of g_ledger but mean opposite things. Absent is a legitimate
- * configuration (VMEMORY_NODE_ENABLED=0) and skipping is right. Present but
- * unreadable means this mirror has drifted from hook.h -- a real breakage that
- * must fail, or an ABI change silently converts every assertion below into a
- * skip and the suite still looks green. That is exactly what happened when the
- * frozen header was added. */
-static int g_ledger_broken;
-
-static void ledger_open(void) {
-  int fd = open(LEDGER_PATH, O_RDONLY);
-  if (fd < 0) return;
-  struct stat sb;
-  if (fstat(fd, &sb) != 0) { close(fd); return; }
-  /* Against the file's own permanent size, not sizeof(ledger_t): the two are
-   * decoupled by design (see LEDGER_FILE_SIZE). A mismatch means the mirror
-   * above has drifted from hook.h, so every field read here would land at the
-   * wrong offset -- report it as broken rather than mapping it and asserting
-   * on garbage. */
-  if ((size_t)sb.st_size != LEDGER_FILE_SIZE) {
-    printf("  [warn] " LEDGER_PATH " is %lld bytes, expected %d --\n"
-           "         the ledger mirror in this test no longer matches hook.h\n",
-           (long long)sb.st_size, LEDGER_FILE_SIZE);
-    g_ledger_broken = 1;
-    close(fd);
-    return;
-  }
-  void *p = mmap(NULL, sizeof(ledger_t), PROT_READ, MAP_SHARED, fd, 0);
-  close(fd);
-  if (p == MAP_FAILED) return;
-
-  /* The header catches what a size check cannot: a layout that changed without
-   * changing the file size. It is also how a region caught mid-rebuild is
-   * recognised -- the library publishes magic last, so an incomplete rebuild
-   * reads as "not this layout" rather than as valid data. */
-  const volatile ledger_t *l = (const volatile ledger_t *)p;
-  if (l->magic != LEDGER_MAGIC || l->layout_version != LEDGER_VERSION ||
-      l->region_size != (unsigned int)sizeof(ledger_t) ||
-      l->device_count != (unsigned int)LEDGER_MAX_DEVICES) {
-    printf("  [warn] " LEDGER_PATH " header is magic=%#x ver=%u size=%u count=%u,\n"
-           "         expected magic=%#x ver=%u size=%zu count=%d --\n"
-           "         the ledger mirror in this test no longer matches hook.h\n",
-           l->magic, l->layout_version, l->region_size, l->device_count,
-           LEDGER_MAGIC, LEDGER_VERSION, sizeof(ledger_t), LEDGER_MAX_DEVICES);
-    g_ledger_broken = 1;
-    return;
-  }
-  g_ledger = l;
-}
-
-/* Bytes currently charged to this process, summed over devices, or -1 if the
- * ledger is not available. Read without the record lock: every field consulted
- * is a naturally aligned scalar, and a charge that is momentarily stale only
- * makes the assertions below more conservative, never less. */
-static long long ledger_used_self(void) {
-  if (g_ledger == NULL) return -1;
-  int self = getpid();
-  long long total = 0;
-  for (int d = 0; d < LEDGER_MAX_DEVICES; d++) {
-    unsigned int n = g_ledger->devices[d].processes_size;
-    if (n > LEDGER_MAX_PIDS) continue;   /* torn/garbage read, skip this device */
-    for (unsigned int i = 0; i < n; i++) {
-      if (g_ledger->devices[d].processes[i].pid == self) {
-        total += (long long)g_ledger->devices[d].processes[i].used;
-      }
-    }
-  }
-  return total;
-}
+#include "test_ledger.h"
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -499,6 +410,385 @@ static int capture_charge_is_enforced(CUstream stream) {
   return failed;
 }
 
+/* ------------------------------------------------------------ graph memory --
+ *
+ * Helpers for the graph-allocation and capture-retirement cases below. */
+
+static CUDA_MEM_ALLOC_NODE_PARAMS alloc_node_params(CUdevice dev, size_t bytes) {
+  CUDA_MEM_ALLOC_NODE_PARAMS p;
+  memset(&p, 0, sizeof(p));
+  p.poolProps.allocType = CU_MEM_ALLOCATION_TYPE_PINNED;
+  p.poolProps.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  p.poolProps.location.id = dev;
+  p.bytesize = bytes;
+  return p;
+}
+
+/* The graph a capture on stream is building. CUDA 13 folded the edge-data
+ * form into the plain name; earlier toolkits spell it _v2 without edges. */
+static CUgraph capture_graph_of(CUstream stream) {
+  CUstreamCaptureStatus st = CU_STREAM_CAPTURE_STATUS_NONE;
+  cuuint64_t id = 0;
+  CUgraph graph = NULL;
+  const CUgraphNode *deps = NULL;
+  size_t ndeps = 0;
+#if CUDA_VERSION >= 13000
+  if (cuStreamGetCaptureInfo(stream, &st, &id, &graph, &deps, NULL, &ndeps) != CUDA_SUCCESS) return NULL;
+#else
+  if (cuStreamGetCaptureInfo_v2(stream, &st, &id, &graph, &deps, &ndeps) != CUDA_SUCCESS) return NULL;
+#endif
+  return st == CU_STREAM_CAPTURE_STATUS_ACTIVE ? graph : NULL;
+}
+
+/* Trim the graph pool so one case's launched graph memory does not count
+ * against the next case's headroom. */
+static void trim_graph_pool(CUdevice dev) {
+  cuCtxSynchronize();
+  cuDeviceGraphMemTrim(dev);
+}
+
+/* --------------------------------------------------------------------- [E] --
+ * A graph built by hand: its alloc node is checked against the limit, and is
+ * not charged -- nothing retires a charge on a hand-built graph, and the
+ * memory only becomes real (and visible to NVML) at upload or launch. */
+static int alloc_node_is_checked_not_charged(CUdevice dev) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  size_t chunk = freeb / 4;
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
+
+  int failed = 0;
+  CUgraph graph = NULL;
+  CHECK_DRV_API(cuGraphCreate(&graph, 0));
+
+  CUDA_MEM_ALLOC_NODE_PARAMS over = alloc_node_params(dev, freeb + chunk);
+  CUgraphNode node = NULL;
+  CUresult r = cuGraphAddMemAllocNode(&node, graph, NULL, 0, &over);
+  describe("cuGraphAddMemAllocNode (over the limit)", r);
+  if (r != CUDA_ERROR_OUT_OF_MEMORY) {
+    printf("  FAIL: an alloc node larger than the headroom was accepted -- the\n"
+           "  graph would map it at launch past the limit\n");
+    failed = 1;
+  }
+
+  long long before = ledger_used_self();
+  CUDA_MEM_ALLOC_NODE_PARAMS fit = alloc_node_params(dev, chunk);
+  r = cuGraphAddMemAllocNode(&node, graph, NULL, 0, &fit);
+  long long after = ledger_used_self();
+  describe("cuGraphAddMemAllocNode (within the limit)", r);
+  if (r != CUDA_SUCCESS) {
+    failed = 1;
+  } else if (after != before) {
+    printf("  FAIL: a hand-built alloc node charged %.0f MiB -- nothing would\n"
+           "  ever retire it\n", MIB(after - before));
+    failed = 1;
+  }
+  cuGraphDestroy(graph);
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [F] --
+ * An alloc node added to the graph a capture is building is charged with the
+ * capture, and comes off when the capture ends. */
+static int alloc_node_in_capture_is_charged(CUdevice dev, CUstream stream) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  size_t chunk = freeb / 4;
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
+
+  long long before = ledger_used_self();
+  CHECK_DRV_API(cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_RELAXED));
+  CUgraph cap = capture_graph_of(stream);
+  CUresult r = CUDA_ERROR_INVALID_VALUE;
+  if (cap != NULL) {
+    CUDA_MEM_ALLOC_NODE_PARAMS p = alloc_node_params(dev, chunk);
+    CUgraphNode node = NULL;
+    r = cuGraphAddMemAllocNode(&node, cap, NULL, 0, &p);
+  }
+  long long during = ledger_used_self();
+  CUgraph graph = NULL;
+  CUresult e = cuStreamEndCapture(stream, &graph);
+  long long after = ledger_used_self();
+  if (graph != NULL) cuGraphDestroy(graph);
+
+  describe("cuGraphAddMemAllocNode (into the capture graph)", r);
+  if (e != CUDA_SUCCESS) describe("cuStreamEndCapture", e);
+  printf("  ledger: %.0f MiB before, %.0f MiB during capture, %.0f MiB after\n",
+         MIB(before), MIB(during), MIB(after));
+  if (cap == NULL) { printf("  FAIL: could not read the capture graph\n"); return 1; }
+  if (r != CUDA_SUCCESS) return 1;
+  int failed = 0;
+  if (during - before < (long long)chunk) {
+    printf("  FAIL: the node added to the capture was not charged\n");
+    failed = 1;
+  }
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged after the capture ended\n", MIB(after - before));
+    failed = 1;
+  }
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [G] --
+ * A capture the driver invalidates ends with an error and no graph -- the
+ * application gets no handle to destroy -- and the driver stops reporting the
+ * graph as soon as it is invalidated. Its charges must come off all the same. */
+static int invalidated_capture_is_retired(CUstream stream) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  size_t chunk = freeb / 4;
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
+
+  long long before = ledger_used_self();
+  /* Global mode: a synchronize on the capturing stream is illegal and
+   * invalidates the capture. */
+  CHECK_DRV_API(cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_GLOBAL));
+  CUdeviceptr dptr = 0;
+  CUresult a = cuMemAllocAsync(&dptr, chunk, stream);
+  long long during = ledger_used_self();
+  CUresult s = cuStreamSynchronize(stream);
+  CUgraph graph = NULL;
+  CUresult e = cuStreamEndCapture(stream, &graph);
+  long long after = ledger_used_self();
+  if (graph != NULL) cuGraphDestroy(graph);
+
+  describe("cuMemAllocAsync (in capture)", a);
+  describe("cuStreamSynchronize (invalidates)", s);
+  describe("cuStreamEndCapture (want INVALIDATED)", e);
+  printf("  ledger: %.0f MiB before, %.0f MiB during capture, %.0f MiB after\n",
+         MIB(before), MIB(during), MIB(after));
+  if (a != CUDA_SUCCESS) return 1;
+  if (e != CUDA_ERROR_STREAM_CAPTURE_INVALIDATED) {
+    printf("  SKIP (the capture was not invalidated; nothing to prove)\n");
+    return -1;
+  }
+  int failed = 0;
+  if (during - before < (long long)chunk) {
+    printf("  FAIL: the allocation in capture was not charged\n");
+    failed = 1;
+  }
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged by an invalidated capture -- no graph\n"
+           "  handle exists to destroy, so nothing else would ever retire it\n",
+           MIB(after - before));
+    failed = 1;
+  }
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [H] --
+ * A capture abandoned without cuStreamEndCapture, in a context that is then
+ * destroyed: the driver destroys the context's graphs with no cuGraphDestroy
+ * for the hooks to see. The context teardown must retire the charges. */
+static int abandoned_capture_retired_by_ctx_destroy(CUdevice dev, CUcontext back) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  size_t chunk = freeb / 4;
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
+
+  long long before = ledger_used_self();
+  CUcontext ctx = NULL;
+  CHECK_DRV_API(CUCTX_CREATE(&ctx, 0, dev));
+  CUstream s = NULL;
+  CHECK_DRV_API(cuStreamCreate(&s, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuStreamBeginCapture(s, CU_STREAM_CAPTURE_MODE_RELAXED));
+  CUdeviceptr dptr = 0;
+  CUresult a = cuMemAllocAsync(&dptr, chunk, s);
+  long long during = ledger_used_self();
+  CUresult d = cuCtxDestroy(ctx);
+  long long after = ledger_used_self();
+  cuCtxSetCurrent(back);
+
+  describe("cuMemAllocAsync (in capture)", a);
+  describe("cuCtxDestroy (capture still open)", d);
+  printf("  ledger: %.0f MiB before, %.0f MiB during capture, %.0f MiB after\n",
+         MIB(before), MIB(during), MIB(after));
+  if (a != CUDA_SUCCESS || d != CUDA_SUCCESS) return 1;
+  int failed = 0;
+  if (during - before < (long long)chunk) {
+    printf("  FAIL: the allocation in capture was not charged\n");
+    failed = 1;
+  }
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged after the context was destroyed\n",
+           MIB(after - before));
+    failed = 1;
+  }
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [I] --
+ * The primary-context forms: a reset, and the release that drops the last
+ * reference (which resets it), each with a capture left open. The primary
+ * context reads as inactive right after either, so the hooks must find it
+ * before the call. */
+static int abandoned_capture_retired_by_primary(CUdevice dev, CUcontext back, int reset) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+
+  unsigned int flags = 0;
+  int active = 0;
+  CHECK_DRV_API(cuDevicePrimaryCtxGetState(dev, &flags, &active));
+  if (active) {
+    printf("  SKIP (the primary context is already in use; tearing it down would\n"
+           "        not be this case's to do)\n");
+    return -1;
+  }
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  size_t chunk = freeb / 4;
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
+
+  long long before = ledger_used_self();
+  CUcontext pctx = NULL;
+  CHECK_DRV_API(cuDevicePrimaryCtxRetain(&pctx, dev));
+  CHECK_DRV_API(cuCtxSetCurrent(pctx));
+  CUstream s = NULL;
+  CHECK_DRV_API(cuStreamCreate(&s, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuStreamBeginCapture(s, CU_STREAM_CAPTURE_MODE_RELAXED));
+  CUdeviceptr dptr = 0;
+  CUresult a = cuMemAllocAsync(&dptr, chunk, s);
+  long long during = ledger_used_self();
+  CUresult t = reset ? cuDevicePrimaryCtxReset(dev) : cuDevicePrimaryCtxRelease(dev);
+  long long after = ledger_used_self();
+  if (reset) cuDevicePrimaryCtxRelease(dev);
+  cuCtxSetCurrent(back);
+
+  describe("cuMemAllocAsync (in capture)", a);
+  describe(reset ? "cuDevicePrimaryCtxReset (capture still open)"
+                 : "cuDevicePrimaryCtxRelease (last reference)", t);
+  printf("  ledger: %.0f MiB before, %.0f MiB during capture, %.0f MiB after\n",
+         MIB(before), MIB(during), MIB(after));
+  if (a != CUDA_SUCCESS || t != CUDA_SUCCESS) return 1;
+  int failed = 0;
+  if (during - before < (long long)chunk) {
+    printf("  FAIL: the allocation in capture was not charged\n");
+    failed = 1;
+  }
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged after the primary context went away\n",
+           MIB(after - before));
+    failed = 1;
+  }
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [K] --
+ * The allocation is made on a stream joined into the capture by an event, and
+ * the capture is invalidated there. The capture still ends on its origin
+ * stream, whose graph is the one the joined stream's charge is keyed by. */
+static int joined_stream_invalidation_is_retired(CUstream origin) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  size_t chunk = freeb / 4;
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
+
+  CUstream joined = NULL;
+  CUevent fork_ev = NULL;
+  CHECK_DRV_API(cuStreamCreate(&joined, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuEventCreate(&fork_ev, CU_EVENT_DISABLE_TIMING));
+
+  long long before = ledger_used_self();
+  CHECK_DRV_API(cuStreamBeginCapture(origin, CU_STREAM_CAPTURE_MODE_GLOBAL));
+  CHECK_DRV_API(cuEventRecord(fork_ev, origin));
+  CHECK_DRV_API(cuStreamWaitEvent(joined, fork_ev, 0));
+  CUdeviceptr dptr = 0;
+  CUresult a = cuMemAllocAsync(&dptr, chunk, joined);
+  long long during = ledger_used_self();
+  CUresult s = cuStreamSynchronize(joined);
+  CUgraph graph = NULL;
+  CUresult e = cuStreamEndCapture(origin, &graph);
+  long long after = ledger_used_self();
+  if (graph != NULL) cuGraphDestroy(graph);
+  cuEventDestroy(fork_ev);
+  cuStreamDestroy(joined);
+
+  describe("cuMemAllocAsync (on the joined stream)", a);
+  describe("cuStreamSynchronize (joined, invalidates)", s);
+  describe("cuStreamEndCapture (origin, want INVALIDATED)", e);
+  printf("  ledger: %.0f MiB before, %.0f MiB during capture, %.0f MiB after\n",
+         MIB(before), MIB(during), MIB(after));
+  if (a != CUDA_SUCCESS) return 1;
+  if (e != CUDA_ERROR_STREAM_CAPTURE_INVALIDATED) {
+    printf("  SKIP (the capture was not invalidated; nothing to prove)\n");
+    return -1;
+  }
+  int failed = 0;
+  if (during - before < (long long)chunk) {
+    printf("  FAIL: the allocation on the joined stream was not charged\n");
+    failed = 1;
+  }
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged by the invalidated capture\n", MIB(after - before));
+    failed = 1;
+  }
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [L] --
+ * cuStreamBeginCaptureToGraph: capture into a graph the application owns, then
+ * invalidate it. Needs the BeginCaptureToGraph hook to record the graph. */
+static int capture_to_graph_invalidation_is_retired(CUstream stream) {
+#if CUDA_VERSION >= 12030
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  size_t chunk = freeb / 4;
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
+
+  CUgraph owned = NULL;
+  CHECK_DRV_API(cuGraphCreate(&owned, 0));
+  long long before = ledger_used_self();
+  CHECK_DRV_API(cuStreamBeginCaptureToGraph(stream, owned, NULL, NULL, 0, CU_STREAM_CAPTURE_MODE_GLOBAL));
+  CUdeviceptr dptr = 0;
+  CUresult a = cuMemAllocAsync(&dptr, chunk, stream);
+  long long during = ledger_used_self();
+  CUresult s = cuStreamSynchronize(stream);
+  CUgraph graph = NULL;
+  CUresult e = cuStreamEndCapture(stream, &graph);
+  long long after = ledger_used_self();
+  /* An invalidated capture takes the application's own graph with it (the
+   * driver answers a later cuGraphDestroy with CUDA_ERROR_INVALID_VALUE, and
+   * in a long-running process, once the handle's memory is reused, hangs). */
+  if (e != CUDA_ERROR_STREAM_CAPTURE_INVALIDATED) cuGraphDestroy(owned);
+
+  describe("cuMemAllocAsync (capture to graph)", a);
+  describe("cuStreamSynchronize (invalidates)", s);
+  describe("cuStreamEndCapture (want INVALIDATED)", e);
+  printf("  ledger: %.0f MiB before, %.0f MiB during capture, %.0f MiB after\n",
+         MIB(before), MIB(during), MIB(after));
+  if (a != CUDA_SUCCESS) return 1;
+  if (e != CUDA_ERROR_STREAM_CAPTURE_INVALIDATED) {
+    printf("  SKIP (the capture was not invalidated; nothing to prove)\n");
+    return -1;
+  }
+  int failed = 0;
+  if (during - before < (long long)chunk) {
+    printf("  FAIL: the allocation in capture was not charged\n");
+    failed = 1;
+  }
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged by the invalidated capture\n", MIB(after - before));
+    failed = 1;
+  }
+  return failed;
+#else
+  (void)stream;
+  printf("  SKIP (cuStreamBeginCaptureToGraph needs CUDA 12.3)\n");
+  return -1;
+#endif
+}
+
 int main(void) {
   ledger_open();
 
@@ -531,6 +821,23 @@ int main(void) {
            repeated_captures_do_not_accumulate(stream));
   RUN_CASE("[D] a capture's charge is enforced, not just recorded",
            capture_charge_is_enforced(stream));
+  RUN_CASE("[E] a hand-built graph's alloc node is checked, not charged",
+           alloc_node_is_checked_not_charged(device));
+  RUN_CASE("[F] an alloc node added to a capture is charged and released at end",
+           alloc_node_in_capture_is_charged(device, stream));
+  RUN_CASE("[G] an invalidated capture's charges are released",
+           invalidated_capture_is_retired(stream));
+  RUN_CASE("[K] an invalidated capture's charges on a joined stream are released",
+           joined_stream_invalidation_is_retired(stream));
+  RUN_CASE("[L] an invalidated capture into an owned graph is released",
+           capture_to_graph_invalidation_is_retired(stream));
+  RUN_CASE("[H] a capture abandoned in a destroyed context is released",
+           abandoned_capture_retired_by_ctx_destroy(device, ctx));
+  RUN_CASE("[I] a capture abandoned in a reset primary context is released",
+           abandoned_capture_retired_by_primary(device, ctx, 1));
+  RUN_CASE("[J] a capture abandoned when the primary context's last reference goes",
+           abandoned_capture_retired_by_primary(device, ctx, 0));
+  trim_graph_pool(device);
   #undef RUN_CASE
 
   int verdict = vgpu_test_verdict(failures, skipped);
