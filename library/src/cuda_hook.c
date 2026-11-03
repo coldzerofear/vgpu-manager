@@ -566,6 +566,12 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream);
 CUresult cuStreamEndCapture(CUstream hStream, CUgraph *phGraph);
 CUresult cuStreamEndCapture_ptsz(CUstream hStream, CUgraph *phGraph);
 CUresult cuGraphDestroy(CUgraph hGraph);
+CUresult cuCtxDestroy_v2(CUcontext ctx);
+CUresult cuCtxDestroy(CUcontext ctx);
+CUresult cuDevicePrimaryCtxRelease_v2(CUdevice dev);
+CUresult cuDevicePrimaryCtxRelease(CUdevice dev);
+CUresult cuDevicePrimaryCtxReset_v2(CUdevice dev);
+CUresult cuDevicePrimaryCtxReset(CUdevice dev);
 CUresult cuMemHostRegister(void *p, size_t bytesize, unsigned int Flags);
 CUresult cuMemHostRegister_v2(void *p, size_t bytesize, unsigned int Flags);
 CUresult cuMemHostAlloc(void **pp, size_t bytesize, unsigned int Flags);
@@ -623,6 +629,12 @@ entry_t cuda_hooks_entry[] = {
     {.name = "cuStreamEndCapture", .fn_ptr = cuStreamEndCapture},
     {.name = "cuStreamEndCapture_ptsz", .fn_ptr = cuStreamEndCapture_ptsz},
     {.name = "cuGraphDestroy", .fn_ptr = cuGraphDestroy},
+    {.name = "cuCtxDestroy_v2", .fn_ptr = cuCtxDestroy_v2},
+    {.name = "cuCtxDestroy", .fn_ptr = cuCtxDestroy},
+    {.name = "cuDevicePrimaryCtxRelease_v2", .fn_ptr = cuDevicePrimaryCtxRelease_v2},
+    {.name = "cuDevicePrimaryCtxRelease", .fn_ptr = cuDevicePrimaryCtxRelease},
+    {.name = "cuDevicePrimaryCtxReset_v2", .fn_ptr = cuDevicePrimaryCtxReset_v2},
+    {.name = "cuDevicePrimaryCtxReset", .fn_ptr = cuDevicePrimaryCtxReset},
     {.name = "cuMemHostRegister", .fn_ptr = cuMemHostRegister},
     {.name = "cuMemHostRegister_v2", .fn_ptr = cuMemHostRegister_v2},
     {.name = "cuMemHostAlloc", .fn_ptr = cuMemHostAlloc},
@@ -4831,6 +4843,106 @@ CUresult cuGraphDestroy(CUgraph hGraph) {
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphDestroy, hGraph);
   free_gpu_virt_memory_by_graph(hGraph);
   return ret;
+}
+
+/* Third discharge point: context teardown. Destroying or resetting a context
+ * destroys its streams and graphs with no cuStreamEndCapture or cuGraphDestroy
+ * for us to see, so a capture abandoned mid-way (an error path that never
+ * ended it, a thread that exited during it) would otherwise hold its charge
+ * until the process exits, failing other allocations in the container on
+ * memory that does not exist. Records carry the context they were charged
+ * under; once it is gone every capture in it is over, so its records go. */
+static CUresult real_ctx_destroy(CUcontext ctx) {
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy_v2))) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDestroy_v2, ctx);
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy))) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDestroy, ctx);
+  }
+  return CUDA_ERROR_NOT_FOUND;
+}
+
+static CUresult real_primary_ctx_release(CUdevice dev) {
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxRelease_v2))) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRelease_v2, dev);
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxRelease))) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRelease, dev);
+  }
+  return CUDA_ERROR_NOT_FOUND;
+}
+
+static CUresult real_primary_ctx_reset(CUdevice dev) {
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset_v2))) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset_v2, dev);
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset))) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset, dev);
+  }
+  return CUDA_ERROR_NOT_FOUND;
+}
+
+static int primary_ctx_active(CUdevice dev) {
+  unsigned int flags = 0;
+  int active = 0;
+  if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuDevicePrimaryCtxGetState, dev, &flags, &active) != CUDA_SUCCESS) {
+    return 0;
+  }
+  return active;
+}
+
+/* The primary context's handle, or NULL when it is not active. Only an active
+ * one is looked up: retaining an inactive primary context would create it.
+ * The retain is undone at once, so the reference count is unchanged. */
+static CUcontext primary_ctx_handle(CUdevice dev) {
+  CUcontext ctx = NULL;
+  if (!primary_ctx_active(dev) ||
+      CUDA_INTERNAL_CHECK(cuda_library_entry, cuDevicePrimaryCtxRetain, &ctx, dev) != CUDA_SUCCESS) {
+    return NULL;
+  }
+  real_primary_ctx_release(dev);
+  return ctx;
+}
+
+CUresult cuCtxDestroy_v2(CUcontext ctx) {
+  CUresult ret = real_ctx_destroy(ctx);
+  if (ret == CUDA_SUCCESS) {
+    free_gpu_virt_memory_by_ctx(ctx);
+  }
+  return ret;
+}
+
+CUresult cuCtxDestroy(CUcontext ctx) {
+  return cuCtxDestroy_v2(ctx);
+}
+
+/* Releasing the last reference resets the primary context ("The context is
+ * automatically reset once the last reference to it is released"); any other
+ * release leaves it, and its captures, alive. */
+CUresult cuDevicePrimaryCtxRelease_v2(CUdevice dev) {
+  CUcontext ctx = primary_ctx_handle(dev);
+  CUresult ret = real_primary_ctx_release(dev);
+  if (ret == CUDA_SUCCESS && ctx != NULL && !primary_ctx_active(dev)) {
+    free_gpu_virt_memory_by_ctx(ctx);
+  }
+  return ret;
+}
+
+CUresult cuDevicePrimaryCtxRelease(CUdevice dev) {
+  return cuDevicePrimaryCtxRelease_v2(dev);
+}
+
+CUresult cuDevicePrimaryCtxReset_v2(CUdevice dev) {
+  CUcontext ctx = primary_ctx_handle(dev);
+  CUresult ret = real_primary_ctx_reset(dev);
+  if (ret == CUDA_SUCCESS && ctx != NULL) {
+    free_gpu_virt_memory_by_ctx(ctx);
+  }
+  return ret;
+}
+
+CUresult cuDevicePrimaryCtxReset(CUdevice dev) {
+  return cuDevicePrimaryCtxReset_v2(dev);
 }
 
 CUresult _cuMemHostRegister(void *p, size_t bytesize, unsigned int Flags) {

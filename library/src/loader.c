@@ -2369,7 +2369,7 @@ void reset_cuda_index_mapping() {
 }
 
 static void malloc_gpu_virt_memory_graph(CUdeviceptr dptr, size_t bytes, int type,
-                                         CUgraph graph, int host_index) {
+                                         CUgraph graph, CUcontext ctx, int host_index) {
   int found = 0;
   size_t old_bytes = 0;
 
@@ -2385,6 +2385,7 @@ static void malloc_gpu_virt_memory_graph(CUdeviceptr dptr, size_t bytes, int typ
     entry_tmp->bytes = bytes;
     entry_tmp->type = type;
     entry_tmp->graph = graph;
+    entry_tmp->ctx = ctx;
     entry_tmp->host_index = charged;
     found = 1;
   } else {
@@ -2406,6 +2407,7 @@ static void malloc_gpu_virt_memory_graph(CUdeviceptr dptr, size_t bytes, int typ
     new_node->bytes = bytes;
     new_node->type = type;
     new_node->graph = graph;
+    new_node->ctx = ctx;
     new_node->host_index = charged;
     new_node->hnext = NULL;
     vmem_table_insert(&g_vmem_table, new_node);
@@ -2455,20 +2457,29 @@ static void malloc_gpu_virt_memory_graph(CUdeviceptr dptr, size_t bytes, int typ
 }
 
 void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int host_index) {
-  malloc_gpu_virt_memory_graph(dptr, bytes, type, NULL, host_index);
+  malloc_gpu_virt_memory_graph(dptr, bytes, type, NULL, NULL, host_index);
 }
 
 void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes,
                                      CUgraph graph, int host_index) {
-  malloc_gpu_virt_memory_graph(dptr, bytes, MEMORY_TYPE_CAPTURE, graph, host_index);
+  /* The context the capture runs in, for free_gpu_virt_memory_by_ctx(). A
+   * failed lookup leaves NULL, which no context teardown matches: the record
+   * is still retired by graph. */
+  CUcontext ctx = NULL;
+  if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetCurrent, &ctx) != CUDA_SUCCESS) {
+    ctx = NULL;
+  }
+  malloc_gpu_virt_memory_graph(dptr, bytes, MEMORY_TYPE_CAPTURE, graph, ctx, host_index);
 }
 
-/* Predicate + accumulator for free_gpu_virt_memory_by_graph(). Selecting by
- * graph is not a dptr lookup, so this is a full sweep -- see the note on
- * vmem_table_retire_if(). A record whose host_index is out of range is still
- * retired, just not discharged: it was never charged to begin with. */
+/* Predicate + accumulator for the capture sweeps below: by graph, or by
+ * context when graph is NULL. Selecting by either is not a dptr lookup, so
+ * this is a full sweep -- see the note on vmem_table_retire_if(). A record
+ * whose host_index is out of range is still retired, just not discharged: it
+ * was never charged to begin with. */
 struct capture_sweep_ctx {
   CUgraph graph;
+  CUcontext ctx;
   size_t totals[MAX_DEVICE_COUNT];
   int any;
 };
@@ -2477,7 +2488,8 @@ static int retire_capture_of_graph(const memory_node_t *node, void *ctx) {
   struct capture_sweep_ctx *sweep = (struct capture_sweep_ctx *)ctx;
   int idx;
 
-  if (node->type != MEMORY_TYPE_CAPTURE || node->graph != sweep->graph) {
+  if (node->type != MEMORY_TYPE_CAPTURE ||
+      (sweep->graph != NULL ? node->graph != sweep->graph : node->ctx != sweep->ctx)) {
     return 0;
   }
   idx = node->host_index;
@@ -2488,30 +2500,25 @@ static int retire_capture_of_graph(const memory_node_t *node, void *ctx) {
   return 1;
 }
 
-/* Discharge every capture record owned by graph, against whichever device
+/* Discharge every capture record the sweep selects, against whichever device
  * each record was originally charged to -- not a device looked up here,
  * since the context may already be unusable by the time this runs. Records
  * are retired under the table mutex first, then the shared counter is
  * updated separately (it takes the cross-process vmem lock and must not
  * nest inside the table mutex; free_gpu_virt_memory() uses the same order). */
-void free_gpu_virt_memory_by_graph(CUgraph graph) {
-  struct capture_sweep_ctx sweep = {.graph = graph, .totals = {0}, .any = 0};
-  size_t *totals = sweep.totals;
-  int any;
-
-  if (graph == NULL) return;
+static void retire_capture_records(struct capture_sweep_ctx *sweep) {
+  size_t *totals = sweep->totals;
 
   pthread_mutex_lock(&g_memory_node_lock);
-  vmem_table_retire_if(&g_vmem_table, retire_capture_of_graph, &sweep);
+  vmem_table_retire_if(&g_vmem_table, retire_capture_of_graph, sweep);
   pthread_mutex_unlock(&g_memory_node_lock);
-  any = sweep.any;
 
-  if (!any || g_device_vmem == NULL) return;
+  if (!sweep->any || g_device_vmem == NULL) return;
 
   for (int dev = 0; dev < MAX_DEVICE_COUNT; dev++) {
     if (totals[dev] == 0) continue;
-    LOGGER(VERBOSE, "free captured virt memory to host device %d, graph %p, size %zu",
-           dev, (void *)graph, totals[dev]);
+    LOGGER(VERBOSE, "free captured virt memory to host device %d, graph %p, ctx %p, size %zu",
+           dev, (void *)sweep->graph, (void *)sweep->ctx, totals[dev]);
     int fd = device_vmem_write_lock(dev);
     if (fd < 0) continue;
     int pid = getpid();
@@ -2525,6 +2532,18 @@ void free_gpu_virt_memory_by_graph(CUgraph graph) {
     }
     device_vmem_unlock(fd, dev);
   }
+}
+
+void free_gpu_virt_memory_by_graph(CUgraph graph) {
+  struct capture_sweep_ctx sweep = {.graph = graph, .ctx = NULL, .totals = {0}, .any = 0};
+  if (graph == NULL) return;
+  retire_capture_records(&sweep);
+}
+
+void free_gpu_virt_memory_by_ctx(CUcontext ctx) {
+  struct capture_sweep_ctx sweep = {.graph = NULL, .ctx = ctx, .totals = {0}, .any = 0};
+  if (ctx == NULL) return;
+  retire_capture_records(&sweep);
 }
 
 int get_gpu_virt_memory_type(CUdeviceptr dptr) {

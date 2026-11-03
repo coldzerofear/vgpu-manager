@@ -58,26 +58,6 @@ CUresult cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev) {
                          dev);
 }
 
-CUresult _cuDevicePrimaryCtxRelease(CUdevice dev) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxRelease_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRelease_v2, dev);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxRelease))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRelease, dev);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
-}
-
-CUresult cuDevicePrimaryCtxRelease_v2(CUdevice dev) {
-  return _cuDevicePrimaryCtxRelease(dev);
-}
-
-CUresult cuDevicePrimaryCtxRelease(CUdevice dev) {
-  return _cuDevicePrimaryCtxRelease(dev);
-}
-
 CUresult _cuDevicePrimaryCtxSetFlags(CUdevice dev, unsigned int flags) {
   CUresult ret;
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxSetFlags_v2))) {
@@ -104,26 +84,6 @@ CUresult cuDevicePrimaryCtxGetState(CUdevice dev, unsigned int *flags,
                                     int *active) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxGetState, dev,
                          flags, active);
-}
-
-CUresult _cuDevicePrimaryCtxReset(CUdevice dev) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset_v2, dev);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset, dev);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
-}
-
-CUresult cuDevicePrimaryCtxReset_v2(CUdevice dev) {
-  return _cuDevicePrimaryCtxReset(dev);
-}
-
-CUresult cuDevicePrimaryCtxReset(CUdevice dev) {
-  return _cuDevicePrimaryCtxReset(dev);
 }
 
 CUresult cuCtxCreate_v3(CUcontext *pctx, CUexecAffinityParam *paramsArray,
@@ -1815,26 +1775,6 @@ CUresult cuGetErrorName(CUresult error, const char **pStr) {
 
 CUresult cuCtxAttach(CUcontext *pctx, unsigned int flags) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxAttach, pctx, flags);
-}
-
-CUresult _cuCtxDestroy(CUcontext ctx) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDestroy_v2, ctx);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDestroy, ctx);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
-}
-
-CUresult cuCtxDestroy_v2(CUcontext ctx) {
-  return _cuCtxDestroy(ctx);
-}
-
-CUresult cuCtxDestroy(CUcontext ctx) {
-  return _cuCtxDestroy(ctx);
 }
 
 CUresult _cuCtxPopCurrent(CUcontext *pctx) {
