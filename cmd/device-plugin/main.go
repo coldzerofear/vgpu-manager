@@ -136,8 +136,10 @@ func runApp(ctx context.Context, opt *options.Options) (exitCode int) {
 	}
 	defer func() { _ = watcher.Close() }()
 
-	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	manager, err := CreateClusterManager(kubeConfig, opt)
+	clusterCtx, cancelFunc := context.WithCancel(ctx)
+	defer cancelFunc()
+
+	manager, err := CreateClusterManager(clusterCtx, kubeConfig, opt)
 	if err != nil {
 		klog.Errorf("Create cluster manager failed: %v", err)
 		return exitCode
@@ -149,8 +151,6 @@ func runApp(ctx context.Context, opt *options.Options) (exitCode int) {
 		klog.Errorf("Register controller to manager failed: %v", err)
 		return exitCode
 	}
-	clusterCtx, cancelFunc := context.WithCancel(ctx)
-	defer cancelFunc()
 
 	plugins, err := deviceplugin.GetDevicePlugins(clusterCtx, opt, deviceManager, manager, kubeClient)
 	if err != nil {
@@ -171,7 +171,7 @@ func runApp(ctx context.Context, opt *options.Options) (exitCode int) {
 	}()
 
 	deviceManager.Start()
-
+	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 restart:
 	started := 0
 	// Loop through all plugins, idempotently stopping them, and then starting
@@ -244,8 +244,18 @@ exit:
 	return exitCode
 }
 
-func CreateClusterManager(kubeConfig *rest.Config, opt *options.Options) (ctrm.Manager, error) {
-	return ctrm.New(kubeConfig, ctrm.Options{
+func CreateClusterManager(ctx context.Context, kubeConfig *rest.Config, opt *options.Options) (ctrm.Manager, error) {
+	byObject := map[rtclient.Object]rtcache.ByObject{
+		&corev1.Pod{}: {
+			Field:     fields.OneTermEqualSelector("spec.nodeName", opt.NodeName),
+			Transform: rtcache.TransformStripManagedFields(),
+		},
+		&corev1.Node{}: {
+			Field:     fields.OneTermEqualSelector("metadata.name", opt.NodeName),
+			Transform: rtcache.TransformStripManagedFields(),
+		},
+	}
+	manager, err := ctrm.New(kubeConfig, ctrm.Options{
 		LeaderElection:         false,
 		HealthProbeBindAddress: "0", // Disable manager health probe service
 		PprofBindAddress: func() string {
@@ -254,26 +264,27 @@ func CreateClusterManager(kubeConfig *rest.Config, opt *options.Options) (ctrm.M
 			}
 			return "0"
 		}(),
+		BaseContext: func() context.Context { return ctx },
 		Cache: rtcache.Options{
 			// Trim managedFields to reduce cache memory usage.
 			DefaultTransform:         rtcache.TransformStripManagedFields(),
 			DefaultWatchErrorHandler: toolscache.DefaultWatchErrorHandler,
 			// Enable bookmark event adaptation WatchListClient feature.
 			DefaultEnableWatchBookmarks: ptr.To[bool](true),
-			ByObject: map[rtclient.Object]rtcache.ByObject{
-				// Preheat cache in advance.
-				&corev1.Pod{}: {
-					Field:     fields.OneTermEqualSelector("spec.nodeName", opt.NodeName),
-					Transform: rtcache.TransformStripManagedFields(),
-				},
-				&corev1.Node{}: {
-					Field:     fields.OneTermEqualSelector("metadata.name", opt.NodeName),
-					Transform: rtcache.TransformStripManagedFields(),
-				},
-			},
+			ByObject:                    byObject,
 		},
 		Metrics: metrics.Options{BindAddress: "0"}, // Disable manager metrics service
 	})
+	if err != nil {
+		return nil, err
+	}
+	// Start the informers with the manager instead of lazily on first request.
+	for object := range byObject {
+		if _, err := manager.GetCache().GetInformer(ctx, object); err != nil {
+			return nil, err
+		}
+	}
+	return manager, nil
 }
 
 func main() {
