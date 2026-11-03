@@ -102,13 +102,13 @@ T2 也是 6.1 节"不能把记账持有到首次 launch"的实证：持有的话
 
 ## 5. 已知边界
 
-- **空窗 B**：捕获结束（或手工 graph 加完节点）到第一次 upload/launch 之间，graph 的显存既不在记账里也不在 NVML 里，
-  这段时间里的普通分配加上随后 launch 映射的显存可能超限。见第 6 节。
-- 手工 graph 内多个 alloc node 各自检查、不累加。
+- **空窗 B**（捕获结束/手工加完节点到首次 upload/launch 之间 graph 显存不在记账也不在 NVML）：由 upload/launch 时的准入检查覆盖（第 6 节），
+  多 stream 并发 launch 与分配不释放的 graph 会低估，作为已知边界。
+- 手工 graph 的 alloc node 在创建时各自检查、不累加；upload/launch 时按整个 graph 的总量（扣除池已预留）再检查一次。
 - 登记表满（同时超过 64 个进行中的捕获）时退回到结束时查询，此时被作废的捕获仍会遗留记账，直到 context 拆除或进程退出。
 - `cuDevicePrimaryCtxRelease` 的"查状态 → retain"之间若另一线程释放了最后一个引用，retain 会重新创建 primary context，随即被撤销的 release 销毁；记账结果不受影响。
 
-## 6. 空窗 B 的修复研究
+## 6. 空窗 B：研究与实现
 
 ### 6.1 原方案（用 event 把记账交接给 NVML）被实测否定
 
@@ -150,9 +150,60 @@ RTX 3080 实测（不加载本库，`bprobe`）否定了它的两个前提：
 
 驱动的 `CU_GRAPH_MEM_ATTR_USED_MEM_CURRENT` 始终等于预留量，不能用来区分池里哪些显存还被占着，所以后两种低估无法靠属性修正。
 
-### 6.3 结论与待决事项
+### 6.3 实现（2026-11-03，已采纳："超限时 launch 返回 OOM"语义；两种低估作为已知边界）
 
-- 这个方案能覆盖空窗 B 的主场景（捕获后首次 launch、单 stream 顺序回放），不会误报 OOM，稳态零额外检查；
-  多 stream 并发 launch 和"分配不释放的 graph"仍可能超出限额，只是超出量受 NVML 事后计入约束（之后的分配会被拒）。
-- 它把超限从"静默超出"变成"launch 返回 OOM"，应用会看到错误（与 `cuMemAlloc` 超限同等语义）。
-- 尚未实现，待评审：是否接受 launch 返回 OOM 的语义；并发/不释放两种低估是否需要再引入自维护的"活跃 graph 分配"表。
+- graph 成本缓存（按 exec，instantiate / `cuGraphExecUpdate` 时遍历节点填充，`cuGraphExecDestroy` 与 fork 子进程清空）
+  新增每设备的 alloc node 总量 `mem_need`；遍历时识别 `CU_GRAPH_NODE_TYPE_MEM_ALLOC`（含子 graph）。
+- `graph_mem_admit()`：对 `need > 0` 的设备查 `CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT`，增长 `need − reserved > 0` 时
+  用 `prepare_memory_allocation` 在设备锁下检查，超限返回 `CUDA_ERROR_OUT_OF_MEMORY`；多设备按序号加锁。
+- 调用点：`cuGraphLaunch(_ptsz)`、`cuGraphUpload(_ptsz)`（新 hook）、带 `CUDA_GRAPH_INSTANTIATE_FLAG_UPLOAD` 的
+  `cuGraphInstantiateWithParams(_ptsz)`（实例化前对源 graph 遍历；拒绝时 `result_out = CUDA_GRAPH_INSTANTIATE_ERROR`）。
+- 顺序：launch 先限流（`rate_limiter` 可能睡眠），再加锁检查，launch 返回后立即放锁，再走 `gap_end`（可能同步、睡眠）。
+- 不写任何账本记录：捕获期间记账、捕获结束释放的原有语义不变；稳态 replay 估算增长为 0 直接跳过。
+- 已知边界：多 stream 并发 launch、分配不释放的 graph（见 6.2 表）；成本缓存满（256 个存活 exec）时新 exec 不检查。
+
+### 6.4 测试数据
+
+`library/test/test_graph_mem_admission.c`（同源 `_ptsz` 变体），RTX 3080，限额 4096 MiB：
+
+| 用例 | 7b36d05（无准入） | 本次 |
+|---|---|---|
+| [A] 捕获后普通分配占掉余量，launch | 成功，越限映射 1220 MiB | 返回 OOM、池未增长；释放后成功 |
+| [B] 已映射 graph 在余量耗尽时连续 replay 50 次 | 通过 | 通过（无误拒） |
+| [C] `cuGraphUpload` 同上 | 越限（池 1248 MiB） | OOM / 释放后成功 |
+| [D] `InstantiateWithParams` + UPLOAD | 越限 | OOM 且 `result_out=ERROR` / 释放后成功 |
+| [E] 手工 alloc node graph 的 launch | 越限 | OOM / 释放后成功 |
+| [F] 池已有 small，再 launch 2×small 的 graph | 增长放得下与放不下都成功 | 放得下成功、放不下 OOM（只按增长检查） |
+
+PyTorch（`library/test/python/limit_pytorch_graph.py`，`backend:cudaMallocAsync`，每项独立子进程）：
+
+| 项 | 7b36d05 | 本次 |
+|---|---|---|
+| T1 capture + replay | 通过 | 通过 |
+| T2 24 个 graph（临时张量合计 6144 MiB，限额 4096 MiB）先捕获后 replay | 通过 | 通过（无误报） |
+| T4 捕获后其他分配占掉余量再 replay | **越限映射 1219 MiB** | replay 被拒；`empty_cache()` 后 replay 成功 |
+
+PyTorch 侧的观察（与本库无关，不加载本库同样发生）：
+- capture 内分配失败后 PyTorch 无法恢复：捕获作废，析构里 `cuMemFreeAsync` 报 INVALIDATED 后 `terminate`。所以 Python 测试不测
+  "capture 内超限"（C 测试 [D] 覆盖）。
+- 首次捕获前必须先在捕获外跑一次同样的操作（PyTorch 要求的 warm-up），否则懒初始化发生在捕获内使其作废。
+- cudaMallocAsync 后端 `del` 张量后显存留在 PyTorch 的默认池里，NVML 仍计入，graph 池无法复用：需 `torch.cuda.empty_cache()`。
+  因此"释放后 replay"要先 `empty_cache()`；这是真实占用，拒绝是正确的。
+- uint8 张量 `.sum()` 先转 int64，会产生 8 倍临时张量。
+
+并发与 fork（`test_alloc_async_accounting.c`）：[M] 8 线程 × 30 次捕获（1/3 作废）账本归零；[N] 同时 80 个捕获（超过登记表 64 槽）
+全部释放；[O] 两线程同时在 per-thread 默认 stream 上捕获（一个作废）各自释放；[P] 后台线程持续捕获时 fork 40 次，子进程全部 10 s 内退出。
+
+内存安全：ASan + UBSan 构建（因 ASan 初始化走 `dlsym`，测试构建不导出本库 `dlsym`；runtime 测试因此不经过本库，只作冒烟）跑全部 GPU 测试
+零报告；`make test-sanitize`（无 GPU）20/20 通过。另发现 `VGPU_SANITIZE` CMake 选项不作用于 `libvgpu-control.so` 本身
+（`add_compile_options` 位于目标定义之后），既有问题，未改。
+
+热路径开销（`lbench`：带 1 MiB alloc+free 的 graph 稳态 replay 20000 次，10 轮中位数）：不加载本库 2.61 µs/次，
+7b36d05 2.59 µs，本次 2.59 µs，准入检查无可测开销。
+
+既有用例 [A]（在途异步分配必须记账）在 8 核满载下偶发失败：观察线程在 stream 被卡住后固定 sleep 50 ms 读一次账本，
+而分配线程此时可能还在 hook 里记账之前（NVML 查询、设备锁）。交替对比 14e9131 与本次各 30 次：4/30 与 3/30，同为既有时序问题。
+改为在 stream 被卡住期间轮询账本（最长 2 s）直到记账出现；满载下普通与 `_ptsz` 各 30 次 0 失败。
+
+测试环境：`run_tests_with_env.sh` 限额 2048m → 4096m；框架脚本默认 4 GiB 张量加上 context 自身约 216 MiB 在 4096 MiB 下必然 OOM，
+`run_all_tests.sh` 改为传 `--tensor_shape 512,1024,1024`（2 GiB，可用 `VGPU_TEST_TENSOR_SHAPE` 覆盖）。

@@ -106,6 +106,7 @@ if [[ "${SKIP_PYTHON:-0}" == "0" && -d "${PY_DIR}" ]]; then
     # Probe: if the framework isn't installed, skip.
     case "$(basename "${py}")" in
       limit_pytorch.py)      mod=torch ;;
+      limit_pytorch_graph.py) mod=torch ;;
       limit_tensorflow.py)   mod=tensorflow ;;
       limit_tensorflow2.py)  mod=tensorflow ;;
       limit_mxnet.py)        mod=mxnet ;;
@@ -117,8 +118,13 @@ if [[ "${SKIP_PYTHON:-0}" == "0" && -d "${PY_DIR}" ]]; then
       SKIPPED_NAMES+=("${name} (no ${mod})")
       continue
     fi
+    # Half of run_tests_with_env.sh's 4096 MiB limit: the scripts' own default
+    # (1024^3 float32 = 4 GiB) plus the context the process already holds
+    # cannot fit the limit, and an OOM there is the limit working, not a
+    # framework failure. VGPU_TEST_TENSOR_SHAPE overrides.
     run_one "${name}" env LD_PRELOAD="${VGPU_SO}" python3 "${py}" \
-                              --device "${TEST_DEVICE_ID}"
+                              --device "${TEST_DEVICE_ID}" \
+                              --tensor_shape "${VGPU_TEST_TENSOR_SHAPE:-512,1024,1024}"
   done
 fi
 

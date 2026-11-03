@@ -67,7 +67,7 @@
  * cuMemAllocAsync_ptsz passes every test in the suite.
  *
  * Run:
- *   LD_PRELOAD=<build>/libvgpu-control.so CUDA_MEM_LIMIT=2048m \
+ *   LD_PRELOAD=<build>/libvgpu-control.so CUDA_MEM_LIMIT=4096m \
  *     VMEMORY_NODE_ENABLED=1 ./test_alloc_async_accounting
  */
 #include <cuda.h>
@@ -75,6 +75,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -155,6 +157,7 @@ typedef struct {
   int       release;      /* let it go */
   long long charged;      /* ledger reading taken while the alloc was in flight */
   long long baseline;     /* ledger reading taken before it started */
+  long long want;         /* the allocation's size: the charge to wait for */
 } stream_gate_t;
 
 static void CUDA_CB gate_hold(void *user) {
@@ -178,11 +181,17 @@ static void *gate_observer(void *user) {
     if (in) break;
     usleep(1000);
   }
-  /* The allocating thread is now blocked in its post-allocation synchronize
-   * (or, if that synchronize was removed, has already returned). Either way
-   * this is the moment the charge has to be visible. */
-  usleep(50 * 1000);
-  g->charged = ledger_used_self();
+  /* The stream reaching the gate says nothing about how far the allocating
+   * thread has got: it may still be inside the hook ahead of the charge (the
+   * NVML query, the device lock), and on a loaded machine that took longer than
+   * a fixed 50 ms -- a flaky FAIL with the charge simply not made yet. The
+   * allocation cannot complete while the gate holds, so poll, for up to 2 s,
+   * until the charge shows: seen here, it was made while in flight. */
+  for (int i = 0; i < 2000; i++) {
+    g->charged = ledger_used_self();
+    if (g->charged < 0 || g->charged - g->baseline >= g->want) break;
+    usleep(1000);
+  }
 
   pthread_mutex_lock(&g->m);
   g->release = 1;
@@ -207,6 +216,7 @@ static int inflight_allocation_is_charged(CUstream stream) {
   gate.entered = gate.release = 0;
   gate.charged = -1;
   gate.baseline = ledger_used_self();
+  gate.want = (long long)chunk;
 
   CUresult g = cuLaunchHostFunc(stream, gate_hold, &gate);
   if (g != CUDA_SUCCESS) {
@@ -789,6 +799,224 @@ static int capture_to_graph_invalidation_is_retired(CUstream stream) {
 #endif
 }
 
+/* ------------------------------------------------------------ concurrency --
+ * [M] Threads capturing concurrently on their own streams, every third capture
+ * invalidated: every charge comes off. Thread-local mode, so one thread's
+ * illegal synchronize invalidates only its own capture. */
+typedef struct {
+  CUcontext ctx;
+  size_t chunk;
+  int iters;
+  int errors;
+} capture_worker_t;
+
+static void *capture_worker(void *arg) {
+  capture_worker_t *w = (capture_worker_t *)arg;
+  cuCtxSetCurrent(w->ctx);
+  CUstream s = NULL;
+  if (cuStreamCreate(&s, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS) { w->errors++; return NULL; }
+  for (int i = 0; i < w->iters; i++) {
+    if (cuStreamBeginCapture(s, CU_STREAM_CAPTURE_MODE_THREAD_LOCAL) != CUDA_SUCCESS) { w->errors++; continue; }
+    CUdeviceptr d = 0;
+    if (cuMemAllocAsync(&d, w->chunk, s) != CUDA_SUCCESS) w->errors++;
+    if (i % 3 == 2) cuStreamSynchronize(s);   /* invalidates */
+    CUgraph g = NULL;
+    CUresult e = cuStreamEndCapture(s, &g);
+    if (e != CUDA_SUCCESS && e != CUDA_ERROR_STREAM_CAPTURE_INVALIDATED) w->errors++;
+    if (g != NULL) cuGraphDestroy(g);
+  }
+  cuStreamDestroy(s);
+  return NULL;
+}
+
+static int concurrent_captures_retire(CUcontext ctx) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  enum { THREADS = 8, ITERS = 30 };
+  size_t chunk = freeb / (THREADS * 4);
+  long long before = ledger_used_self();
+  pthread_t t[THREADS];
+  capture_worker_t w[THREADS];
+  for (int i = 0; i < THREADS; i++) {
+    w[i].ctx = ctx; w[i].chunk = chunk; w[i].iters = ITERS; w[i].errors = 0;
+    pthread_create(&t[i], NULL, capture_worker, &w[i]);
+  }
+  int errors = 0;
+  for (int i = 0; i < THREADS; i++) { pthread_join(t[i], NULL); errors += w[i].errors; }
+  long long after = ledger_used_self();
+  printf("  %d threads x %d captures (a third invalidated), %d errors; ledger %.0f -> %.0f MiB\n",
+         THREADS, ITERS, errors, MIB(before), MIB(after));
+  int failed = errors != 0;
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged\n", MIB(after - before));
+    failed = 1;
+  }
+  return failed;
+}
+
+/* [N] More captures open at once than the registry has slots (64): the
+ * overflow falls back to the lookup at end of capture, and every capture that
+ * ends normally still gives its charge back. */
+static int registry_overflow_retires(void) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  enum { OPEN = 80 };
+  size_t chunk = freeb / (OPEN * 2);
+  CUstream s[OPEN];
+  long long before = ledger_used_self();
+  int errors = 0;
+  for (int i = 0; i < OPEN; i++) {
+    CHECK_DRV_API(cuStreamCreate(&s[i], CU_STREAM_NON_BLOCKING));
+    if (cuStreamBeginCapture(s[i], CU_STREAM_CAPTURE_MODE_RELAXED) != CUDA_SUCCESS) errors++;
+    CUdeviceptr d = 0;
+    if (cuMemAllocAsync(&d, chunk, s[i]) != CUDA_SUCCESS) errors++;
+  }
+  long long during = ledger_used_self();
+  for (int i = 0; i < OPEN; i++) {
+    CUgraph g = NULL;
+    if (cuStreamEndCapture(s[i], &g) != CUDA_SUCCESS) errors++;
+    if (g != NULL) cuGraphDestroy(g);
+    cuStreamDestroy(s[i]);
+  }
+  long long after = ledger_used_self();
+  printf("  %d captures open at once, %d errors; ledger %.0f -> %.0f -> %.0f MiB\n",
+         OPEN, errors, MIB(before), MIB(during), MIB(after));
+  int failed = errors != 0;
+  if (during - before < (long long)(chunk * OPEN)) {
+    printf("  FAIL: not every open capture was charged\n");
+    failed = 1;
+  }
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged\n", MIB(after - before));
+    failed = 1;
+  }
+  return failed;
+}
+
+/* [O] The per-thread default stream is one handle for every thread. Two
+ * threads capture on it at once; one invalidates its capture, the other ends
+ * normally: each must retire its own capture, not the other's. */
+typedef struct { CUcontext ctx; size_t chunk; int invalidate; CUresult end; CUresult alloc; } ptds_worker_t;
+
+static void *ptds_worker(void *arg) {
+  ptds_worker_t *w = (ptds_worker_t *)arg;
+  cuCtxSetCurrent(w->ctx);
+  w->end = CUDA_ERROR_UNKNOWN;
+  if (cuStreamBeginCapture(CU_STREAM_PER_THREAD, CU_STREAM_CAPTURE_MODE_THREAD_LOCAL) != CUDA_SUCCESS) return NULL;
+  CUdeviceptr d = 0;
+  w->alloc = cuMemAllocAsync(&d, w->chunk, CU_STREAM_PER_THREAD);
+  usleep(20 * 1000);   /* both captures open at once */
+  if (w->invalidate) cuStreamSynchronize(CU_STREAM_PER_THREAD);
+  CUgraph g = NULL;
+  w->end = cuStreamEndCapture(CU_STREAM_PER_THREAD, &g);
+  if (g != NULL) cuGraphDestroy(g);
+  return NULL;
+}
+
+static int per_thread_stream_captures_retire(CUcontext ctx) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  long long before = ledger_used_self();
+  ptds_worker_t w[2] = {{ctx, freeb / 8, 1, CUDA_SUCCESS, CUDA_SUCCESS},
+                        {ctx, freeb / 8, 0, CUDA_SUCCESS, CUDA_SUCCESS}};
+  pthread_t t[2];
+  for (int i = 0; i < 2; i++) pthread_create(&t[i], NULL, ptds_worker, &w[i]);
+  for (int i = 0; i < 2; i++) pthread_join(t[i], NULL);
+  long long after = ledger_used_self();
+  describe("thread 1 cuStreamEndCapture (invalidated)", w[0].end);
+  describe("thread 2 cuStreamEndCapture", w[1].end);
+  printf("  ledger %.0f -> %.0f MiB\n", MIB(before), MIB(after));
+  if (w[0].alloc != CUDA_SUCCESS || w[1].alloc != CUDA_SUCCESS) {
+    printf("  FAIL: allocation in capture on the per-thread stream failed\n");
+    return 1;
+  }
+  if (w[0].end != CUDA_ERROR_STREAM_CAPTURE_INVALIDATED || w[1].end != CUDA_SUCCESS) {
+    printf("  SKIP (captures did not end as arranged)\n");
+    return -1;
+  }
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged\n", MIB(after - before));
+    return 1;
+  }
+  return 0;
+}
+
+/* [P] Fork while another thread keeps taking the capture registry's lock. The
+ * child inherits whatever state the lock was in; it must still get through the
+ * capture hooks (its CUDA calls fail -- the context did not survive fork --
+ * but the hooks run first) instead of deadlocking. */
+static volatile int g_hammer_stop;
+
+static void *registry_hammer(void *arg) {
+  capture_worker_t *w = (capture_worker_t *)arg;
+  cuCtxSetCurrent(w->ctx);
+  CUstream s = NULL;
+  if (cuStreamCreate(&s, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS) return NULL;
+  while (!g_hammer_stop) {
+    if (cuStreamBeginCapture(s, CU_STREAM_CAPTURE_MODE_RELAXED) != CUDA_SUCCESS) continue;
+    CUdeviceptr d = 0;
+    cuMemAllocAsync(&d, w->chunk, s);
+    CUgraph g = NULL;
+    cuStreamEndCapture(s, &g);
+    if (g != NULL) cuGraphDestroy(g);
+  }
+  cuStreamDestroy(s);
+  return NULL;
+}
+
+static int fork_during_capture_traffic(CUcontext ctx) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  capture_worker_t w = {ctx, freeb / 64, 0, 0};
+  g_hammer_stop = 0;
+  pthread_t t;
+  pthread_create(&t, NULL, registry_hammer, &w);
+  usleep(50 * 1000);
+  int failed = 0, forks = 40;
+  for (int i = 0; i < forks && !failed; i++) {
+    pid_t pid = fork();
+    if (pid == 0) {
+      CUstream s = (CUstream)0x1;   /* any handle: the hooks take the lock before the driver says no */
+      CUgraph g = NULL;
+      cuStreamBeginCapture(s, CU_STREAM_CAPTURE_MODE_RELAXED);
+      cuStreamEndCapture(s, &g);
+      CUgraph mine = NULL;
+      cuGraphCreate(&mine, 0);
+      CUDA_MEM_ALLOC_NODE_PARAMS p;
+      memset(&p, 0, sizeof(p));
+      p.poolProps.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+      p.bytesize = 1 << 20;
+      CUgraphNode n = NULL;
+      cuGraphAddMemAllocNode(&n, mine, NULL, 0, &p);
+      _exit(0);
+    }
+    if (pid < 0) { printf("  FAIL: fork failed\n"); failed = 1; break; }
+    int status = 0, waited = 0;
+    for (int ms = 0; ms < 10000; ms += 10) {
+      if (waitpid(pid, &status, WNOHANG) == pid) { waited = 1; break; }
+      usleep(10 * 1000);
+    }
+    if (!waited) {
+      printf("  FAIL: child %d of %d did not finish in 10 s -- deadlocked on an\n"
+             "  inherited lock\n", i + 1, forks);
+      kill(pid, SIGKILL);
+      waitpid(pid, &status, 0);
+      failed = 1;
+    } else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+      printf("  FAIL: child %d exited abnormally (status %#x)\n", i + 1, status);
+      failed = 1;
+    }
+  }
+  g_hammer_stop = 1;
+  pthread_join(t, NULL);
+  if (!failed) printf("  %d forks during capture traffic: every child finished\n", forks);
+  return failed;
+}
+
 int main(void) {
   ledger_open();
 
@@ -831,6 +1059,14 @@ int main(void) {
            joined_stream_invalidation_is_retired(stream));
   RUN_CASE("[L] an invalidated capture into an owned graph is released",
            capture_to_graph_invalidation_is_retired(stream));
+  RUN_CASE("[M] concurrent captures across threads, some invalidated, all released",
+           concurrent_captures_retire(ctx));
+  RUN_CASE("[N] more captures open at once than the registry holds are released",
+           registry_overflow_retires());
+  RUN_CASE("[O] per-thread default stream captured by two threads at once",
+           per_thread_stream_captures_retire(ctx));
+  RUN_CASE("[P] fork during capture traffic: the child never deadlocks",
+           fork_during_capture_traffic(ctx));
   RUN_CASE("[H] a capture abandoned in a destroyed context is released",
            abandoned_capture_retired_by_ctx_destroy(device, ctx));
   RUN_CASE("[I] a capture abandoned in a reset primary context is released",

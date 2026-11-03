@@ -3465,16 +3465,6 @@ CUresult cuGraphExternalSemaphoresWaitNodeSetParams(CUgraphNode hNode,
                          nodeParams);
 }
 
-CUresult cuGraphUpload(CUgraphExec hGraphExec, CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuGraphUpload), hGraphExec,
-                         hStream);
-}
-
-CUresult cuGraphUpload_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphUpload_ptsz, hGraphExec,
-                         hStream);
-}
-
 CUresult cuMemMapArrayAsync_ptsz(CUarrayMapInfo *mapInfoList,
                                  unsigned int count, CUstream hStream) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemMapArrayAsync_ptsz,

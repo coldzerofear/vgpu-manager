@@ -15,7 +15,7 @@
  *   [R3] cudaDeviceReset with a capture open releases its charge
  *
  * Run:
- *   LD_PRELOAD=<build>/libvgpu-control.so CUDA_MEM_LIMIT=2048m \
+ *   LD_PRELOAD=<build>/libvgpu-control.so CUDA_MEM_LIMIT=4096m \
  *     VMEMORY_NODE_ENABLED=1 ./test_runtime_capture_accounting
  */
 #include <cuda.h>
