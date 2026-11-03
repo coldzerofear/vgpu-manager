@@ -4821,7 +4821,9 @@ static CUresult end_capture_and_discharge(CUstream hStream, CUgraph *phGraph, in
   CUresult ret = ptsz
       ? CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamEndCapture_ptsz, hStream, phGraph)
       : CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamEndCapture, hStream, phGraph);
-  free_gpu_virt_memory_by_graph(capturing);
+  if (ret == CUDA_SUCCESS) {
+    free_gpu_virt_memory_by_graph(capturing);
+  }
   return ret;
 }
 
@@ -4841,7 +4843,9 @@ CUresult cuStreamEndCapture_ptsz(CUstream hStream, CUgraph *phGraph) {
  * idempotent, so this only ever fires for charges nothing else claimed. */
 CUresult cuGraphDestroy(CUgraph hGraph) {
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphDestroy, hGraph);
-  free_gpu_virt_memory_by_graph(hGraph);
+  if (ret == CUDA_SUCCESS) {
+    free_gpu_virt_memory_by_graph(hGraph);
+  }
   return ret;
 }
 
@@ -4904,45 +4908,76 @@ static CUcontext primary_ctx_handle(CUdevice dev) {
   return ctx;
 }
 
-CUresult cuCtxDestroy_v2(CUcontext ctx) {
-  CUresult ret = real_ctx_destroy(ctx);
+CUresult _cuCtxDestroy(CUcontext ctx) {
+  CUresult ret = CUDA_ERROR_NOT_FOUND;
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDestroy_v2, ctx);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDestroy, ctx);
+  }
   if (ret == CUDA_SUCCESS) {
     free_gpu_virt_memory_by_ctx(ctx);
   }
   return ret;
 }
 
+CUresult cuCtxDestroy_v2(CUcontext ctx) {
+  return _cuCtxDestroy(ctx);
+}
+
 CUresult cuCtxDestroy(CUcontext ctx) {
-  return cuCtxDestroy_v2(ctx);
+  return _cuCtxDestroy(ctx);
+}
+
+CUresult _cuDevicePrimaryCtxRelease(CUdevice dev) {
+  CUresult ret = CUDA_ERROR_NOT_FOUND;
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxRelease_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRelease_v2, dev);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxRelease))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRelease, dev);
+  }
+  if (ret == CUDA_SUCCESS) {
+    CUcontext ctx = primary_ctx_handle(dev);
+    if (ctx != NULL && !primary_ctx_active(dev)) {
+      free_gpu_virt_memory_by_ctx(ctx);
+    }
+  }
+  return ret;
 }
 
 /* Releasing the last reference resets the primary context ("The context is
  * automatically reset once the last reference to it is released"); any other
  * release leaves it, and its captures, alive. */
 CUresult cuDevicePrimaryCtxRelease_v2(CUdevice dev) {
-  CUcontext ctx = primary_ctx_handle(dev);
-  CUresult ret = real_primary_ctx_release(dev);
-  if (ret == CUDA_SUCCESS && ctx != NULL && !primary_ctx_active(dev)) {
-    free_gpu_virt_memory_by_ctx(ctx);
-  }
-  return ret;
+  return _cuDevicePrimaryCtxRelease(dev);
 }
 
 CUresult cuDevicePrimaryCtxRelease(CUdevice dev) {
-  return cuDevicePrimaryCtxRelease_v2(dev);
+  return _cuDevicePrimaryCtxRelease(dev);
 }
 
-CUresult cuDevicePrimaryCtxReset_v2(CUdevice dev) {
-  CUcontext ctx = primary_ctx_handle(dev);
-  CUresult ret = real_primary_ctx_reset(dev);
-  if (ret == CUDA_SUCCESS && ctx != NULL) {
-    free_gpu_virt_memory_by_ctx(ctx);
+CUresult _cuDevicePrimaryCtxReset(CUdevice dev) {
+  CUresult ret = CUDA_ERROR_NOT_FOUND;
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset_v2, dev);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset, dev);
+  }
+  if (ret == CUDA_SUCCESS) {
+    CUcontext ctx = primary_ctx_handle(dev);
+    if (ctx != NULL) {
+      free_gpu_virt_memory_by_ctx(ctx);
+    }
   }
   return ret;
 }
 
+CUresult cuDevicePrimaryCtxReset_v2(CUdevice dev) {
+  return _cuDevicePrimaryCtxReset(dev);
+}
+
 CUresult cuDevicePrimaryCtxReset(CUdevice dev) {
-  return cuDevicePrimaryCtxReset_v2(dev);
+  return _cuDevicePrimaryCtxReset(dev);
 }
 
 CUresult _cuMemHostRegister(void *p, size_t bytesize, unsigned int Flags) {
