@@ -35,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
+	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -83,10 +84,9 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, job *vcv1alpha1.Job, dr
 			resourceName := job.Name
 			if job.GenerateName != "" {
 				resourceName = fmt.Sprintf("%s-%s-%s", strings.TrimSuffix(job.GenerateName, "-"),
-					task.Name, common.GenerateRandomString(5))
+					task.Name, utilrand.String(5))
 			} else if h.options.CombinedResourceClaim {
-				resourceName = fmt.Sprintf("%s-%s-%s", resourceName,
-					task.Name, common.GenerateRandomString(5))
+				resourceName = fmt.Sprintf("%s-%s-%s", resourceName, task.Name, utilrand.String(5))
 			}
 
 			subLogger := logger.WithValues("taskName", task.Name)

@@ -146,8 +146,11 @@ const (
 	maxInFlightResolves = 256
 	// maxPerCallerResolves caps the concurrent register requests from a single
 	// caller (keyed by its real pod UID, or PID when that can't be derived) so
-	// one hijacked container cannot monopolise the global budget.
-	maxPerCallerResolves = 8
+	// one hijacked container cannot monopolise the global budget. Each process
+	// in the container registers on its first CUDA/NVML use, and a rejected one
+	// exits, so the cap leaves room for a burst of workers starting together
+	// (tensor-parallel ranks plus their helpers).
+	maxPerCallerResolves = 16
 
 	// gRPC server hardening: the request body is tiny (a few identifiers), and
 	// each container legitimately opens a single short-lived stream.

@@ -130,6 +130,12 @@ R5_ALLOWLIST: set = {
     # entry of their own name, and substitution picks between them by the
     # pointer the driver returned.
     "cuGetProcAddress",
+    # cuStreamBeginCapture and _v2 (and their _ptsz forms) are all hooked:
+    # beginning a capture is where its graph is recorded, the only point it is
+    # certain to be known -- an invalidated capture no longer reports it, and
+    # its charges would have no key to be retired by. The one-argument and
+    # two-argument wrappers each call the entry of their own name.
+    "cuStreamBeginCapture",
 }
 
 # Families upstream gave two ABIs where this library deliberately implements

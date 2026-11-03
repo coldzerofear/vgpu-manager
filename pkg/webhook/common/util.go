@@ -18,7 +18,6 @@ package common
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"slices"
 	"strconv"
@@ -166,30 +165,6 @@ func DeviceRequestLooksLikeVGPU(ctx context.Context, reader resourcereader.Resou
 	default:
 		return false
 	}
-}
-
-func GenerateRandomString(length int) string {
-	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
-	const letterLen = len(letters)
-
-	maxValid := byte(255 - (255 % letterLen))
-	b := make([]byte, length)
-	buffer := make([]byte, length*4)
-	idx := 0
-	for idx < length {
-		n, err := rand.Read(buffer)
-		if err != nil {
-			panic("crypto/rand: " + err.Error())
-		}
-		for i := 0; i < n && idx < length; i++ {
-			v := buffer[i]
-			if v < maxValid {
-				b[idx] = letters[int(v)%letterLen]
-				idx++
-			}
-		}
-	}
-	return string(b)
 }
 
 func ConvertDRAContainerRequest(ctx context.Context, resourceName string, container *corev1.Container, options *options.Options) *ResourceInfo {

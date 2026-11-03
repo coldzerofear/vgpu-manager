@@ -51,6 +51,7 @@ static memory_node_t *make(CUdeviceptr dptr, size_t bytes, int type, CUgraph gra
   node->bytes = bytes;
   node->type = type;
   node->graph = graph;
+  node->ctx = NULL;
   node->host_index = host_index;
   node->hnext = NULL;
   return node;

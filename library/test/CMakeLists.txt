@@ -114,6 +114,16 @@ if(EXISTS ${_ASYNC_ACCT_SRC})
     vgpu_configure_c_test(test_alloc_async_accounting_ptsz)
 endif()
 
+# Same again for the graph upload / launch / instantiate-with-params hooks,
+# which have _ptsz twins of their own.
+set(_GRAPH_ADMIT_SRC ${TEST_SRC_DIR}/test_graph_mem_admission.c)
+if(EXISTS ${_GRAPH_ADMIT_SRC})
+    add_executable(test_graph_mem_admission_ptsz ${_GRAPH_ADMIT_SRC})
+    target_compile_definitions(test_graph_mem_admission_ptsz
+                               PRIVATE CUDA_API_PER_THREAD_DEFAULT_STREAM)
+    vgpu_configure_c_test(test_graph_mem_admission_ptsz)
+endif()
+
 # ---- CUDA tests (kernel launches) -----------------------------------------
 file(GLOB CU_TESTS "${TEST_SRC_DIR}/test_*.cu")
 if(CU_TESTS)

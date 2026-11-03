@@ -19,6 +19,7 @@ LD_PRELOAD=/path/to/libvgpu-control.so python3 limit_pytorch.py \
 | File                   | Framework                                    | Install                                      |
 |------------------------|----------------------------------------------|----------------------------------------------|
 | `limit_pytorch.py`     | PyTorch (eager)                              | `pip install torch`                          |
+| `limit_pytorch_graph.py` | PyTorch CUDA graphs, `cudaMallocAsync` backend (graph memory under the limit) | `pip install torch` |
 | `limit_tensorflow.py`  | TensorFlow 1.x (Session API, graph mode)     | `pip install 'tensorflow<2'`                 |
 | `limit_tensorflow2.py` | TensorFlow 2.x (eager)                       | `pip install tensorflow`                     |
 | `limit_mxnet.py`       | Apache MXNet                                 | `pip install mxnet-cu112` (or matching CUDA) |

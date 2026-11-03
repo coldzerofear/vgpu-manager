@@ -58,26 +58,6 @@ CUresult cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev) {
                          dev);
 }
 
-CUresult _cuDevicePrimaryCtxRelease(CUdevice dev) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxRelease_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRelease_v2, dev);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxRelease))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRelease, dev);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
-}
-
-CUresult cuDevicePrimaryCtxRelease_v2(CUdevice dev) {
-  return _cuDevicePrimaryCtxRelease(dev);
-}
-
-CUresult cuDevicePrimaryCtxRelease(CUdevice dev) {
-  return _cuDevicePrimaryCtxRelease(dev);
-}
-
 CUresult _cuDevicePrimaryCtxSetFlags(CUdevice dev, unsigned int flags) {
   CUresult ret;
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxSetFlags_v2))) {
@@ -104,26 +84,6 @@ CUresult cuDevicePrimaryCtxGetState(CUdevice dev, unsigned int *flags,
                                     int *active) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxGetState, dev,
                          flags, active);
-}
-
-CUresult _cuDevicePrimaryCtxReset(CUdevice dev) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset_v2, dev);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset, dev);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
-}
-
-CUresult cuDevicePrimaryCtxReset_v2(CUdevice dev) {
-  return _cuDevicePrimaryCtxReset(dev);
-}
-
-CUresult cuDevicePrimaryCtxReset(CUdevice dev) {
-  return _cuDevicePrimaryCtxReset(dev);
 }
 
 CUresult cuCtxCreate_v3(CUcontext *pctx, CUexecAffinityParam *paramsArray,
@@ -1817,26 +1777,6 @@ CUresult cuCtxAttach(CUcontext *pctx, unsigned int flags) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxAttach, pctx, flags);
 }
 
-CUresult _cuCtxDestroy(CUcontext ctx) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDestroy_v2, ctx);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDestroy, ctx);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
-}
-
-CUresult cuCtxDestroy_v2(CUcontext ctx) {
-  return _cuCtxDestroy(ctx);
-}
-
-CUresult cuCtxDestroy(CUcontext ctx) {
-  return _cuCtxDestroy(ctx);
-}
-
 CUresult _cuCtxPopCurrent(CUcontext *pctx) {
   CUresult ret;
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxPopCurrent_v2))) {
@@ -3192,27 +3132,6 @@ CUresult cuGraphExecKernelNodeSetParams(CUgraphExec hGraphExec,
                          hGraphExec, hNode, nodeParams);
 }
 
-/* One argument against two, so each wrapper must reach the entry of its own
- * name: cuda.h declares cuStreamBeginCapture(CUstream) and
- * cuStreamBeginCapture_v2(CUstream, CUstreamCaptureMode) in its
- * __CUDA_API_VERSION_INTERNAL block. Crossing them loses the caller's capture
- * mode in one direction and reads it from an unset register in the other. */
-CUresult cuStreamBeginCapture(CUstream hStream) {
-  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture), hStream);
-}
-
-CUresult cuStreamBeginCapture_v2(CUstream hStream, CUstreamCaptureMode mode) {
-  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture_v2), hStream, mode);
-}
-
-CUresult cuStreamBeginCapture_ptsz(CUstream hStream) {
-  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamBeginCapture_ptsz, hStream);
-}
-
-CUresult cuStreamBeginCapture_v2_ptsz(CUstream hStream, CUstreamCaptureMode mode) {
-  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamBeginCapture_v2_ptsz, hStream, mode);
-}
-
 CUresult cuStreamGetCaptureInfo(CUstream hStream,
                                 CUstreamCaptureStatus *captureStatus,
                                 cuuint64_t *id) {
@@ -3546,16 +3465,6 @@ CUresult cuGraphExternalSemaphoresWaitNodeSetParams(CUgraphNode hNode,
                          nodeParams);
 }
 
-CUresult cuGraphUpload(CUgraphExec hGraphExec, CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuGraphUpload), hGraphExec,
-                         hStream);
-}
-
-CUresult cuGraphUpload_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphUpload_ptsz, hGraphExec,
-                         hStream);
-}
-
 CUresult cuMemMapArrayAsync_ptsz(CUarrayMapInfo *mapInfoList,
                                  unsigned int count, CUstream hStream) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemMapArrayAsync_ptsz,
@@ -3662,14 +3571,6 @@ CUresult cuFlushGPUDirectRDMAWrites(CUflushGPUDirectRDMAWritesTarget target,
                                     CUflushGPUDirectRDMAWritesScope scope) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuFlushGPUDirectRDMAWrites,
                          target, scope);
-}
-
-CUresult cuGraphAddMemAllocNode(CUgraphNode *phGraphNode, CUgraph hGraph,
-                                const CUgraphNode *dependencies,
-                                size_t numDependencies,
-                                CUDA_MEM_ALLOC_NODE_PARAMS *nodeParams) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddMemAllocNode, phGraphNode,
-                         hGraph, dependencies, numDependencies, nodeParams);
 }
 
 CUresult cuGraphAddMemFreeNode(CUgraphNode *phGraphNode, CUgraph hGraph,

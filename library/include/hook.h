@@ -536,6 +536,11 @@ typedef struct memory_node_s {
    * only ever charged when this is known, so every charge can be retired at
    * cuStreamEndCapture. */
   CUgraph graph;
+  /* Context current when a MEMORY_TYPE_CAPTURE record was charged; NULL
+   * otherwise. The fallback retirement point: destroying or resetting the
+   * context destroys its graphs without a cuGraphDestroy, so a capture that
+   * never ended would otherwise hold its charge until the process exits. */
+  CUcontext ctx;
   /* Device the record was charged against, or -1 if it was never charged.
    * Retiring a capture charge must not depend on being able to ask the driver
    * which device is current -- by then the context may be gone, and failing to
@@ -1016,6 +1021,13 @@ void free_gpu_virt_memory(CUdeviceptr dptr);
  * device argument and cannot be defeated by a missing current context.
  */
 void free_gpu_virt_memory_by_graph(CUgraph graph);
+
+/**
+ * Retire every capture record charged under ctx. The fallback for a capture
+ * that never reached cuStreamEndCapture: destroying or resetting a context
+ * destroys its graphs with no cuGraphDestroy to retire them by.
+ */
+void free_gpu_virt_memory_by_ctx(CUcontext ctx);
 
 int get_gpu_virt_memory_type(CUdeviceptr dptr);
 
