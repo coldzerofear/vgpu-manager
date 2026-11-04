@@ -103,7 +103,7 @@ T2 也是 6.1 节"不能把记账持有到首次 launch"的实证：持有的话
 - **空窗 B**（捕获结束/手工加完节点到首次 upload/launch 之间 graph 显存不在记账也不在 NVML）：由 upload/launch 时的准入检查覆盖（第 6 节），
   多 stream 并发 launch 与分配不释放的 graph 会低估，作为已知边界。
 - 手工 graph 的 alloc node 在创建时各自检查、不累加；upload/launch 时按整个 graph 的总量（扣除池已预留）再检查一次。
-- alloc node 跨多个设备的 graph 在 upload/launch 时不检查（6.5），每进程告警一次。
+- alloc node 跨多个设备的 graph 逐卡检查、每张卡检查完立即放锁（6.5）：检查到 launch 之间别的进程若在已检查的卡上分配，会低估（仅多卡 graph 的首次映射）。
 - 登记表满（同时超过 64 个进行中的捕获）时退回到结束时查询，此时被作废的捕获仍会遗留记账，直到 context 拆除或进程退出。
 - `cuDevicePrimaryCtxRelease` 的"查状态 → retain"之间若另一线程释放了最后一个引用，retain 会重新创建 primary context，随即被撤销的 release 销毁；记账结果不受影响。
 
@@ -309,3 +309,22 @@ CGROUP 模式在裸机 session scope 下识别不到本进程（占用为 0）�
 
   采纳 flag 变体（先判 `memory_limit` 再查池预留）。采纳后复测：`make test` 29/29、准入与记账测试（普通与 `_ptsz`）全部通过，
   隐式回收复现仍拒绝 relaunch（A 占用 4032 MiB），限额关闭时 `bench2` 正常运行（plain 2015 / alloc 2245 ns）。
+
+#### 多卡 graph：按实际用到的卡逐卡检查（2026-11-04）
+
+graph 可以跨卡（编程指南：单设备约束只针对条件节点 body 与设备端 launch 的 graph；alloc node 用 `poolProps.location.id` 指定驻留卡，
+`accessDescs` 可映射给其他卡，§4.2.5.6；graph 内存池按设备，`cuDeviceGraphMemTrim` / `cuDeviceGetGraphMemAttribute` 都以设备为参数）。
+所以把"多卡就不检查"改为：
+
+- walk 时只登记实际分配到的卡：`graph_mem_t { n; d[n] = {CUDA 序号, 字节数} }`，同卡合并、饱和累加，序号超出 `MAX_DEVICE_COUNT` 的忽略
+  （与 `cuMemAlloc` 一致，这些卡本来就不受限）。缓存查询只拷贝前 n 项：无 alloc node 的 graph 拷 0 项，单卡 graph 拷 1 项，热路径不变。
+- 准入：`n == 0` 直接返回；`n == 1` 走原单卡路径（超限检查通过时持这一把锁到 launch 返回）；`n > 1` 逐卡"加锁 → 检查 → 立即放锁"，
+  任一卡超限即返回 OOM。**任何时刻最多持有一把设备锁**，不存在加锁顺序，不可能死锁。
+- 判断用分配所在的卡，不用 `cuCtxGetDevice`：限流用的当前 context 设备与分配驻留卡可以不同（手工 graph 的 `location.id` 指向别的卡，
+  或在另一张卡的 stream 上 launch），按当前卡判断会完全漏检。
+- 曾考虑多卡时按 host index 升序同时持锁到 launch 返回（更严格）：同容器内进程可设不同 `CUDA_VISIBLE_DEVICES` 顺序，按 CUDA 序号加锁会
+  交叉等待（设备锁 10 s 超时后无锁继续，不会永久卡死）；为彻底排除死锁，采用"用完立即释放"，代价是上面 §5 的窄竞态。
+
+验证（RTX 2080 Ti 单卡）：`make test` 29/29；准入与记账测试（普通与 `_ptsz`）通过；隐式回收复现仍拒绝 relaunch（4032 MiB）。
+[H] 改为断言"当前卡余量被占、另一张卡余量被占时 launch 都返回 OOM，释放后成功"，单卡机 SKIP，**待双卡机器验证**
+（另需确认：不配 `accessDescs` 时能否在设备 0 的 context 里向设备 1 加 alloc node）。

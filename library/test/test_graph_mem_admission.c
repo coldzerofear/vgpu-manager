@@ -17,7 +17,7 @@
  *   [E] a hand-built graph's alloc node: launch refused / accepted
  *   [F] a larger graph after a smaller one: only the pool's growth is checked
  *   [G] after a trim returns the pool's pages, a launched exec is checked again
- *   [H] a graph allocating on two devices is not checked (known boundary)
+ *   [H] a graph allocating on two devices is checked on each (needs 2 GPUs)
  *
  * Each case trims the graph pool first so it starts with nothing reserved.
  * Built twice (_ptsz variant) so the per-thread-default-stream hooks are
@@ -335,15 +335,26 @@ static int trim_rechecks(void) {
 }
 
 /* --------------------------------------------------------------------- [H] */
-/* A graph allocating on two devices is not checked (a known boundary): its
- * launch must neither fail nor hang. Needs two devices. */
-static int multi_device_not_checked(void) {
+/* A graph allocating on two devices is checked on each of them: its launch is
+ * refused while either device's headroom is taken -- including the device
+ * that is not the current context's -- and accepted once freed. Never more
+ * than one device lock is held, so it cannot deadlock. Needs two devices. */
+static CUresult launch_and_wait(CUgraphExec ex) {
+  CUresult r = cuGraphLaunch(ex, g_stream);
+  cuStreamSynchronize(g_stream);
+  return r;
+}
+
+static int multi_device_checked(void) {
   int count = 0;
   cuDeviceGetCount(&count);
   if (count < 2) { printf("  SKIP (needs 2 devices, have %d)\n", count); return -1; }
-  trim_pool();
   CUdevice other;
   CHECK_DRV_API(cuDeviceGet(&other, g_dev == 0 ? 1 : 0));
+  CUcontext octx = NULL;
+  CHECK_DRV_API(cuDevicePrimaryCtxRetain(&octx, other));
+  trim_pool();
+  cuDeviceGraphMemTrim(other);
   size_t need = headroom() / 3;
   CUgraph g = NULL;
   CHECK_DRV_API(cuGraphCreate(&g, 0));
@@ -364,15 +375,35 @@ static int multi_device_not_checked(void) {
   CUgraphExec ex = NULL;
   CHECK_DRV_API(cuGraphInstantiateWithFlags(&ex, g, 0));
   cuGraphDestroy(g);
+
+  int failed = 0;
+  /* Current device full. */
   CUdeviceptr filler = fill_leaving(need / 2);
-  CUresult r = cuGraphLaunch(ex, g_stream);
-  CUresult s = cuStreamSynchronize(g_stream);
-  describe("cuGraphLaunch (two devices, headroom taken)", r);
-  int failed = r != CUDA_SUCCESS || s != CUDA_SUCCESS;
+  CUresult r = launch_and_wait(ex);
+  describe("cuGraphLaunch (current device's headroom taken)", r);
+  if (r != CUDA_ERROR_OUT_OF_MEMORY) failed = 1;
   if (filler) cuMemFree(filler);
+  /* The other device full: checked by the allocations' location, not by the
+   * current context. */
+  CHECK_DRV_API(cuCtxPushCurrent(octx));
+  filler = fill_leaving(need / 2);
+  CUcontext popped = NULL;
+  CHECK_DRV_API(cuCtxPopCurrent(&popped));
+  r = launch_and_wait(ex);
+  describe("cuGraphLaunch (other device's headroom taken)", r);
+  if (r != CUDA_ERROR_OUT_OF_MEMORY) failed = 1;
+  if (filler) {
+    CHECK_DRV_API(cuCtxPushCurrent(octx));
+    cuMemFree(filler);
+    CHECK_DRV_API(cuCtxPopCurrent(&popped));
+  }
+  r = launch_and_wait(ex);
+  describe("cuGraphLaunch (both freed)", r);
+  if (r != CUDA_SUCCESS) failed = 1;
   cuGraphExecDestroy(ex);
   cuCtxSynchronize();
   cuDeviceGraphMemTrim(other);
+  cuDevicePrimaryCtxRelease(other);
   return failed;
 }
 
@@ -396,7 +427,7 @@ int main(void) {
   RUN_CASE("[E] a hand-built alloc-node graph's launch refused / accepted", hand_built_admission());
   RUN_CASE("[F] only the pool's growth is checked", growth_only());
   RUN_CASE("[G] a trim makes the next launch checked again", trim_rechecks());
-  RUN_CASE("[H] a graph allocating on two devices is not checked", multi_device_not_checked());
+  RUN_CASE("[H] a graph allocating on two devices is checked on each", multi_device_checked());
 #undef RUN_CASE
   trim_pool();
   cuStreamDestroy(g_stream);

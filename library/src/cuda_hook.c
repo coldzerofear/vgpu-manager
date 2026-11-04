@@ -4361,15 +4361,41 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
 
 /* A graph's allocations (alloc nodes), which the driver maps from the graph
  * pool of the device they reside on at upload or launch: see graph_mem_admit().
+ * Only the devices the graph actually allocates on are listed, so a graph
+ * without alloc nodes has n == 0 and the usual single-device graph n == 1.
  * dev is the CUDA ordinal of poolProps.location.id, the same ordinal
  * cuMemAlloc's device is. */
-#define GRAPH_MEM_NONE  (-1)   /* no alloc nodes */
-#define GRAPH_MEM_MULTI (-2)   /* alloc nodes on more than one device: not checked */
 typedef struct {
-  int dev;          /* resident device, or GRAPH_MEM_NONE / GRAPH_MEM_MULTI */
-  size_t need;      /* bytes of all alloc nodes, saturating */
+  int dev;          /* CUDA ordinal, 0 <= dev < MAX_DEVICE_COUNT */
+  size_t need;      /* bytes of its alloc nodes, saturating */
+} graph_mem_dev_t;
+typedef struct {
+  int n;                                  /* entries in use in d[] */
+  graph_mem_dev_t d[MAX_DEVICE_COUNT];    /* one per device, distinct dev */
 } graph_mem_t;
-#define GRAPH_MEM_INIT {GRAPH_MEM_NONE, 0}
+
+/* Copies only the entries in use: the hot path for a graph without alloc
+ * nodes copies nothing, a single-device graph one entry. */
+static inline void graph_mem_copy(graph_mem_t *dst, const graph_mem_t *src) {
+  dst->n = src->n;
+  for (int i = 0; i < src->n; i++) dst->d[i] = src->d[i];
+}
+
+/* Adds bytes on dev, merging with the device's entry. Devices outside the
+ * library's range are ignored, as cuMemAlloc on them is not limited either. */
+static void graph_mem_add(graph_mem_t *mem, int dev, size_t bytes) {
+  if (dev < 0 || dev >= MAX_DEVICE_COUNT) return;
+  int i = 0;
+  while (i < mem->n && mem->d[i].dev != dev) i++;
+  if (i == mem->n) {
+    if (mem->n >= MAX_DEVICE_COUNT) return;   /* unreachable: dev values are distinct */
+    mem->d[i].dev = dev;
+    mem->d[i].need = 0;
+    mem->n++;
+  }
+  size_t *need = &mem->d[i].need;
+  *need = *need > SIZE_MAX - bytes ? SIZE_MAX : *need + bytes;
+}
 
 typedef struct {
   CUgraphExec exec;       /* NULL = unused slot */
@@ -4379,7 +4405,6 @@ typedef struct {
 static graph_cost_entry_t g_graph_cost_cache[GRAPH_COST_CACHE_SIZE];
 static pthread_mutex_t g_graph_cost_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_graph_cost_full_warned = 0;
-static int g_graph_mem_multi_warned = 0;
 
 /* Called from child_after_fork. Reinit the lock (POSIX leaves inherited
  * mutex state undefined) and wipe the cache -- parent CUgraphExec handles
@@ -4388,7 +4413,6 @@ static void graph_cost_after_fork(void) {
   pthread_mutex_init(&g_graph_cost_lock, NULL);
   memset(g_graph_cost_cache, 0, sizeof(g_graph_cost_cache));
   g_graph_cost_full_warned = 0;
-  g_graph_mem_multi_warned = 0;
 }
 
 extern CUresult _cuGraphKernelNodeGetParams(CUgraphNode hNode, CUDA_KERNEL_NODE_PARAMS *nodeParams);
@@ -4445,14 +4469,8 @@ static void walk_graph_cost(CUgraph graph, int64_t *tokens, graph_mem_t *mem) {
                                 nodes[i], &params) != CUDA_SUCCESS) {
           continue;
         }
-        int dev = params.poolProps.location.id;
-        if (params.poolProps.location.type == CU_MEM_LOCATION_TYPE_DEVICE && dev >= 0) {
-          if (mem->dev == GRAPH_MEM_NONE) {
-            mem->dev = dev;
-          } else if (mem->dev != dev) {
-            mem->dev = GRAPH_MEM_MULTI;
-          }
-          mem->need = mem->need > SIZE_MAX - params.bytesize ? SIZE_MAX : mem->need + params.bytesize;
+        if (params.poolProps.location.type == CU_MEM_LOCATION_TYPE_DEVICE) {
+          graph_mem_add(mem, params.poolProps.location.id, params.bytesize);
         }
       }
     }
@@ -4462,7 +4480,7 @@ static void walk_graph_cost(CUgraph graph, int64_t *tokens, graph_mem_t *mem) {
 
 /* tokens <= 0 (no kernel work, but alloc nodes) is stored as 1, the cost an
  * exec not in the cache is launched at, so caching it changes nothing there. */
-static void graph_cost_remember(CUgraphExec exec, int64_t tokens, graph_mem_t mem) {
+static void graph_cost_remember(CUgraphExec exec, int64_t tokens, const graph_mem_t *mem) {
   if (unlikely(!exec)) return;
   if (tokens <= 0) tokens = 1;
   pthread_mutex_lock(&g_graph_cost_lock);
@@ -4477,7 +4495,7 @@ static void graph_cost_remember(CUgraphExec exec, int64_t tokens, graph_mem_t me
   if (slot >= 0) {
     g_graph_cost_cache[slot].exec   = exec;
     g_graph_cost_cache[slot].tokens = tokens;
-    g_graph_cost_cache[slot].mem    = mem;
+    graph_mem_copy(&g_graph_cost_cache[slot].mem, mem);
   } else if (!g_graph_cost_full_warned) {
     g_graph_cost_full_warned = 1;
     LOGGER(WARNING, "graph cost cache full (%d entries); newly-instantiated "
@@ -4494,7 +4512,7 @@ static int graph_cost_lookup(CUgraphExec exec, int64_t *tokens, graph_mem_t *mem
   for (int i = 0; i < GRAPH_COST_CACHE_SIZE; i++) {
     if (g_graph_cost_cache[i].exec == exec) {
       *tokens = g_graph_cost_cache[i].tokens;
-      if (mem != NULL) *mem = g_graph_cost_cache[i].mem;
+      if (mem != NULL) graph_mem_copy(mem, &g_graph_cost_cache[i].mem);
       pthread_mutex_unlock(&g_graph_cost_lock);
       return 1;
     }
@@ -4515,24 +4533,14 @@ static void graph_cost_forget(CUgraphExec exec) {
   pthread_mutex_unlock(&g_graph_cost_lock);
 }
 
-/* Logs, once per process, a graph whose allocations span devices. */
-static void graph_mem_note_multi(const graph_mem_t *mem) {
-  if (mem->dev == GRAPH_MEM_MULTI &&
-      !__atomic_exchange_n(&g_graph_mem_multi_warned, 1, __ATOMIC_RELAXED)) {
-    LOGGER(WARNING, "graph allocates memory on more than one device; its "
-                    "allocations are not checked against the memory limit "
-                    "at upload/launch");
-  }
-}
-
 static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph) {
   if (unlikely(!exec || !src_graph)) return;
   int64_t total = 0;
-  graph_mem_t mem = GRAPH_MEM_INIT;
+  graph_mem_t mem;
+  mem.n = 0;
   walk_graph_cost(src_graph, &total, &mem);
-  if (total > 0 || mem.dev != GRAPH_MEM_NONE) {
-    graph_mem_note_multi(&mem);
-    graph_cost_remember(exec, total, mem);
+  if (total > 0 || mem.n > 0) {
+    graph_cost_remember(exec, total, &mem);
     return;
   }
   /* Walk found no kernel work in this graph. For cuGraphInstantiate this
@@ -4557,48 +4565,68 @@ static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph) {
  * total when replayed in sequence, and holding a charge per graph until its
  * first launch would refuse a vLLM-style capture of dozens of graphs.
  *
- * So the check happens at the mapping itself, on the device the allocations
- * reside on (their pool location, not the current context), like cuMemAlloc:
- * one device, one device lock. The pool grows by about need - reserved
- * (CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT): exact for a first launch, a launch
- * after a trim, and graphs replayed in sequence on one stream; it
- * under-estimates graphs launched concurrently on several streams and graphs
- * whose allocations are left unfreed, which keep their pages (a known
- * boundary: NVML counts the overshoot afterwards). A positive estimate is
- * checked against the limit under the device lock, which the caller holds
- * across the upload/launch so a concurrent allocator sees the mapping in NVML.
+ * So the check happens at the mapping itself, on each device the allocations
+ * reside on (their pool location, not the current context), like cuMemAlloc.
+ * The pool grows by about need - reserved (CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT):
+ * exact for a first launch, a launch after a trim, and graphs replayed in
+ * sequence on one stream; it under-estimates graphs launched concurrently on
+ * several streams and graphs whose allocations are left unfreed, which keep
+ * their pages (a known boundary: NVML counts the overshoot afterwards).
  *
  * The pool is queried on every upload/launch (~10 ns, RTX 2080 Ti) rather than
  * trusting an earlier one: besides cuDeviceGraphMemTrim, the driver itself
  * hands idle pool pages back when a cuMemAlloc outgrows the free device
  * memory, without any notification, and the next launch maps them again.
- * A steady-state replay estimates zero growth and takes no lock. Graphs
- * without alloc nodes, and devices whose memory limit is off, return before
- * the query (the flag is read per call, so a limit switched on by a config
- * update applies from the next launch); graphs whose allocations span devices
- * (GRAPH_MEM_MULTI) are not checked.
+ * A steady-state replay estimates zero growth and takes no lock. Devices whose
+ * memory limit is off return before the query (the flag is read per call, so
+ * a limit switched on by a config update applies from the next launch).
  *
- * Sets *lock_fd (-1 = not held) and returns CUDA_SUCCESS, or returns
- * CUDA_ERROR_OUT_OF_MEMORY holding nothing. */
-static CUresult graph_mem_admit(const graph_mem_t *mem, int *lock_fd) {
+ * At most ONE device lock is held at any time, so no lock order exists to get
+ * wrong and no deadlock is possible:
+ *  - a single-device graph (the usual case) keeps the lock of a positive check
+ *    across the upload/launch, so a concurrent allocator sees the mapping in
+ *    NVML -- the cuMemAlloc pattern;
+ *  - a graph allocating on several devices checks them one by one, releasing
+ *    each lock right after its check. Another process may then allocate on a
+ *    checked device before the launch maps it (a known boundary, narrow: only
+ *    the first mapping of a multi-device graph). */
+
+/* One device: *lock_fd is set (-1 = not held) on CUDA_SUCCESS; on
+ * CUDA_ERROR_OUT_OF_MEMORY nothing is held. */
+static CUresult graph_mem_admit_dev(const graph_mem_dev_t *d, int *lock_fd) {
   *lock_fd = -1;
-  if (mem->dev < 0 || mem->need == 0) return CUDA_SUCCESS;
-  int host_index = get_host_device_index_by_cuda_device((CUdevice)mem->dev);
+  if (d->need == 0) return CUDA_SUCCESS;
+  int host_index = get_host_device_index_by_cuda_device((CUdevice)d->dev);
   if (!get_device_flag(host_index, memory_limit)) return CUDA_SUCCESS;
   cuuint64_t reserved = 0;
-  if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuDeviceGetGraphMemAttribute, (CUdevice)mem->dev,
+  if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuDeviceGetGraphMemAttribute, (CUdevice)d->dev,
                           CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT, &reserved) != CUDA_SUCCESS) {
     reserved = 0;   /* unknown: assume the whole need is new */
   }
-  size_t growth = mem->need > reserved ? mem->need - (size_t)reserved : 0;
+  size_t growth = d->need > reserved ? d->need - (size_t)reserved : 0;
   if (growth == 0) return CUDA_SUCCESS;
-  if (prepare_memory_allocation((CUdevice)mem->dev, growth, 0, &host_index, lock_fd) == MEMORY_PATH_OOM) {
+  if (prepare_memory_allocation((CUdevice)d->dev, growth, 0, &host_index, lock_fd) == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     LOGGER(VERBOSE, "graph upload/launch refused: device %d pool would grow by %zu bytes",
-           mem->dev, growth);
+           d->dev, growth);
     unlock_gpu_device(*lock_fd);
     *lock_fd = -1;
     return CUDA_ERROR_OUT_OF_MEMORY;
+  }
+  return CUDA_SUCCESS;
+}
+
+/* Sets *lock_fd (-1 = not held; only ever set for a single-device graph) and
+ * returns CUDA_SUCCESS, or returns CUDA_ERROR_OUT_OF_MEMORY holding nothing. */
+static CUresult graph_mem_admit(const graph_mem_t *mem, int *lock_fd) {
+  *lock_fd = -1;
+  if (likely(mem->n == 0)) return CUDA_SUCCESS;
+  if (likely(mem->n == 1)) return graph_mem_admit_dev(&mem->d[0], lock_fd);
+  for (int i = 0; i < mem->n; i++) {
+    int fd = -1;
+    CUresult r = graph_mem_admit_dev(&mem->d[i], &fd);
+    unlock_gpu_device(fd);   /* released at once: never two locks held */
+    if (r != CUDA_SUCCESS) return r;
   }
   return CUDA_SUCCESS;
 }
@@ -4657,7 +4685,8 @@ static CUresult instantiate_with_params(CUgraphExec *phGraphExec, CUgraph hGraph
   int lock_fd = -1;
   if (instantiateParams != NULL && (instantiateParams->flags & CUDA_GRAPH_INSTANTIATE_FLAG_UPLOAD)) {
     int64_t tokens = 0;
-    graph_mem_t mem = GRAPH_MEM_INIT;
+    graph_mem_t mem;
+    mem.n = 0;   /* only n needs initialising: entries past it are never read */
     walk_graph_cost(hGraph, &tokens, &mem);
     CUresult admit = graph_mem_admit(&mem, &lock_fd);
     if (unlikely(admit != CUDA_SUCCESS)) {
@@ -4694,7 +4723,8 @@ CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
   if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
   int host_index = get_host_device_index_by_cuda_device(device);
   int64_t tokens = 1;
-  graph_mem_t mem = GRAPH_MEM_INIT;
+  graph_mem_t mem;
+  mem.n = 0;   /* only n needs initialising: entries past it are never read */
   graph_cost_lookup(hGraphExec, &tokens, &mem);
   /* Throttle first: rate_limiter may sleep, and must not do so while
    * graph_mem_admit holds the cross-process device lock -- nor can the check
@@ -4722,7 +4752,8 @@ CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
   if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
   int host_index = get_host_device_index_by_cuda_device(device);
   int64_t tokens = 1;
-  graph_mem_t mem = GRAPH_MEM_INIT;
+  graph_mem_t mem;
+  mem.n = 0;   /* only n needs initialising: entries past it are never read */
   graph_cost_lookup(hGraphExec, &tokens, &mem);
   /* Throttle first: rate_limiter may sleep, and must not do so while
    * graph_mem_admit holds the cross-process device lock -- nor can the check
@@ -4746,7 +4777,8 @@ DONE:
 /* An upload maps the graph's allocations as a launch does (graph_mem_admit). */
 static CUresult graph_upload_admitted(CUgraphExec hGraphExec, CUstream hStream, int ptsz) {
   int64_t tokens = 1;
-  graph_mem_t mem = GRAPH_MEM_INIT;
+  graph_mem_t mem;
+  mem.n = 0;   /* only n needs initialising: entries past it are never read */
   graph_cost_lookup(hGraphExec, &tokens, &mem);
   int lock_fd = -1;
   CUresult ret = graph_mem_admit(&mem, &lock_fd);
