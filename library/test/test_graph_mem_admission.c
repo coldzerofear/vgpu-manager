@@ -16,7 +16,7 @@
  *   [D] cuGraphInstantiateWithParams with the UPLOAD flag: refused / accepted
  *   [E] a hand-built graph's alloc node: launch refused / accepted
  *   [F] a larger graph after a smaller one: only the pool's growth is checked
- *   [G] a launched exec is not checked again until a trim returns its pages
+ *   [G] after a trim returns the pool's pages, a launched exec is checked again
  *   [H] a graph allocating on two devices is not checked (known boundary)
  *
  * Each case trims the graph pool first so it starts with nothing reserved.
@@ -299,9 +299,8 @@ static int growth_only(void) {
 }
 
 /* --------------------------------------------------------------------- [G] */
-/* After a launch the exec is not checked again (its pages stay in the pool),
- * until cuDeviceGraphMemTrim returns them: then its next launch maps anew and
- * has to be checked again. */
+/* Once a trim has returned the pool's pages, the next launch of an exec that
+ * already ran maps them anew, so it has to pass the check again. */
 static int trim_rechecks(void) {
   trim_pool();
   size_t need = headroom() / 3;
