@@ -10,7 +10,7 @@
 | 类型 | 何时记 | 何时释放 |
 |---|---|---|
 | `MEMORY_TYPE_ASYNC_BRIDGE` | 非捕获的 `cuMemAllocAsync` / `cuMemAllocFromPoolAsync` 调用后 | 同步该 stream 后（NVML 已可见） |
-| `MEMORY_TYPE_CAPTURE` | 捕获期间的异步分配，以及加入捕获中 graph 的 alloc node | 捕获结束（成功或被作废）、graph 销毁、按指针释放、所属 context 销毁/重置、fork 子进程作废、进程退出清理 |
+| `MEMORY_TYPE_CAPTURE` | 捕获期间的异步分配 | 捕获结束（成功或被作废）、graph 销毁、按指针释放、所属 context 销毁/重置、fork 子进程作废、进程退出清理 |
 
 launch 之后显存由 NVML 计入，记账若继续持有会重复计数（误报 OOM），所以记账只覆盖"NVML 还看不到"的那段时间。
 
@@ -40,7 +40,7 @@ launch 之后显存由 NVML 计入，记账若继续持有会重复计数（误�
 ## 3. 实现
 
 - **`cuGraphAddMemAllocNode`**（新 hook）：按 `poolProps.location`（device 类型）取设备，像 `cuMemAllocFromPoolAsync` 一样先做限额检查，超限返回 OOM。
-  目标 graph 正处于捕获中时，按捕获记账（随捕获结束释放）；手工构建的 graph 不记账。
+  不记账（含加入捕获中 graph 的 alloc node，2026-11-04 起；见 6.5）：物理显存在 upload/launch 时映射，由那里的准入检查按整个 graph 检查。
 - **捕获登记表**：hook `cuStreamBeginCapture` / `_v2` / `_ptsz` / `_v2_ptsz` / `cuStreamBeginCaptureToGraph` / `_ptsz`，开始捕获成功后记下
   "发起 stream → graph"（默认 per-thread stream 再按线程区分），64 个槽位，满了退回到结束时查询。`cuStreamBeginCaptureToGraph(_ptsz)` 原先不在驱动函数表里，现已加入。
   `cuStreamBeginCapture` 属 ABI 冲突族，已按先例加入 `R5_ALLOWLIST`（每个包装都调用自己同名的入口）。
@@ -58,7 +58,7 @@ GPU 用例在 `library/test/test_alloc_async_accounting.c`（同源编译出 `_p
 | 用例 | 内容 |
 |---|---|
 | [E] | 手工 graph：超限 alloc node 返回 OOM；限额内成功且不记账 |
-| [F] | 加入捕获中 graph 的 alloc node 记账，捕获结束后释放 |
+| [F] | 加入捕获中 graph 的 alloc node：超限返回 OOM（捕获不受影响），限额内成功且不记账（2026-11-04 前为"记账、捕获结束释放"，见 6.5） |
 | [G] | 捕获被作废：记账在 `EndCapture` 返回 INVALIDATED 后释放 |
 | [H] | 捕获未结束即 `cuCtxDestroy`：记账释放 |
 | [I] | 捕获未结束即 `cuDevicePrimaryCtxReset`：记账释放 |
@@ -103,6 +103,8 @@ T2 也是 6.1 节"不能把记账持有到首次 launch"的实证：持有的话
 - **空窗 B**（捕获结束/手工加完节点到首次 upload/launch 之间 graph 显存不在记账也不在 NVML）：由 upload/launch 时的准入检查覆盖（第 6 节），
   多 stream 并发 launch 与分配不释放的 graph 会低估，作为已知边界。
 - 手工 graph 的 alloc node 在创建时各自检查、不累加；upload/launch 时按整个 graph 的总量（扣除池已预留）再检查一次。
+- alloc node 跨多个设备的 graph 在 upload/launch 时不检查（6.5），每进程告警一次。
+- 方案 B（首次映射后跳过检查）在同卡其他租户耗尽物理显存、驱动隐式回收空闲 graph 池时会漏检（6.5 实测越限 1152 MiB），待定。
 - 登记表满（同时超过 64 个进行中的捕获）时退回到结束时查询，此时被作废的捕获仍会遗留记账，直到 context 拆除或进程退出。
 - `cuDevicePrimaryCtxRelease` 的"查状态 → retain"之间若另一线程释放了最后一个引用，retain 会重新创建 primary context，随即被撤销的 release 销毁；记账结果不受影响。
 
@@ -215,3 +217,52 @@ PyTorch 侧的观察（与本库无关，不加载本库同样发生）：
 
 测试环境：`run_tests_with_env.sh` 限额 2048m → 4096m；框架脚本默认 4 GiB 张量加上 context 自身约 216 MiB 在 4096 MiB 下必然 OOM，
 `run_all_tests.sh` 改为传 `--tensor_shape 512,1024,1024`（2 GiB，可用 `VGPU_TEST_TENSOR_SHAPE` 覆盖）。
+
+### 6.5 简化：单设备准入 + 首次映射检查（2026-11-04，分支 fix/graph-mem-admit-simplify）
+
+起因：6.3 的实现对每个 exec 维护 `mem_need[16]`，launch 时遍历 16 个设备、按序号加多把设备锁，复杂度和多卡出错面都偏大。
+核对官方文档：`The graph's nodes must all reside on a single device` 只约束条件节点的 body graph（§4.2.4.2）和设备端 launch 的
+graph（§4.2.6.1.1），普通 graph 可以跨设备（kernel/memcpy 节点各带 context、跨设备 event、对端驻留的分配 §4.2.5.6），
+所以不能假设单设备，也不能用 `cuCtxGetDevice` 代替分配所在设备。改为：
+
+1. 每个 exec 只记**一个驻留设备 + 字节数**（来自 alloc node 的 `poolProps.location.id`，即 CUDA 序号，与 `cuMemAlloc` 的设备同一编号空间，
+   无漂移）。alloc node 跨了多个设备时标记"多设备、不检查"，进程内只告警一次——已知边界，退回 main 之前的行为：不报错不卡死，之后 NVML 计入超出部分。
+2. 准入只检查这一张卡、只拿一把设备锁（与 `cuMemAlloc` 经 `prepare_memory_allocation` 的模式相同）。
+3. （方案 B）只在首次 launch/upload 时检查：成功后在缓存项上置"已映射"，之后的 launch 只判一个布尔值；hook `cuDeviceGraphMemTrim`
+   （原为透传）成功后清除该设备上所有 exec 的已映射标记；带 UPLOAD 的 instantiate 成功即已映射；`cuGraphExecUpdate` 重写缓存项时复位。
+   一个全局 trim 代数防止"launch 与 trim 并发"时把刚被 trim 的 exec 误标为已映射。
+4. `cuGraphAddMemAllocNode` 去掉捕获期记账分支（只检查不记账），删除 `capture_reg_has_graph`；捕获登记表保留（作废捕获的泄漏修复依赖它）。
+
+#### 测试数据（RTX 2080 Ti 11 GiB，驱动 595.84，CUDA 13.0 工具链，限额 4096 MiB）
+
+- 静态检查：hook 一致性 PASS（604 项，hook 70 个，比 main 多 `cuDeviceGraphMemTrim`）、ABI 签名 PASS、session 路径 PASS、导出符号 PASS；
+  结构体布局检查在 13.0 头文件下有 4 处已知差异（`cuda-subset.h` 对齐 13.4），与本改动无关。`make test-nogpu` 全部通过。
+- `test_graph_mem_admission`（普通与 `_ptsz`）：[A]–[G] 全部通过，[H]（两卡）本机单卡 SKIP。
+  新增 [G]"trim 后再次 launch 要重新检查"：把 trim hook 去掉做变异构建，[G] 失败（trim 后 launch 越限映射 1312 MiB），说明用例确实覆盖 trim hook。
+- `test_alloc_async_accounting`（普通与 `_ptsz`）[A]–[P] 全部通过，[F] 改为"加入捕获中 graph 的 alloc node 超限返回 OOM、限额内不记账"
+  （账本 0→0→0 MiB）；`test_runtime_capture_accounting` [R1]–[R3] 通过。
+- 开销：`cuDeviceGetGraphMemAttribute` 单次 9.8 ns（`cuCtxGetDevice` 12.7 ns），一次 graph launch 约 2 µs；方案 B 省下的就是带 alloc node
+  的 graph 每次 launch 这 ~10 ns（约 0.5%）。不带 alloc node 的 graph 两种实现都不查询。
+
+#### 新发现：驱动会在物理显存不足时自行回收空闲的 graph 池（不经 trim）
+
+不加载本库的探针（`probe_pool`）：graph launch 后池预留 3552 MiB、设备空闲 7104 MiB，再 `cuMemAlloc(7104 + 1776)` **成功**，池预留随即变为 0；
+之后再 launch 该 graph 驱动重新映射（显存不够时返回 OOM，并残留 1760 MiB 的部分映射）。`cuMemAllocAsync` 同样超出时不回收（返回 OOM）。
+即"池里的页一直保留到 trim"只在没有物理显存压力时成立。
+
+端到端复现（本库 SESSION 记账，只统计 A 自己的进程；另一个不加载本库的进程 B 占满物理显存只留 600 MiB）：
+
+| 步骤 | 方案 B（本分支） | main（每次 launch 查池预留） |
+|---|---|---|
+| A1 graph launch，池预留 | 1216 MiB | 1216 MiB |
+| A2 物理显存紧张时 `cuMemAlloc(1200 MiB)` | 成功，驱动回收池 → 0 | 同左 |
+| A3 B 释放后 A 分配到限额 | 剩余 64 MiB | 剩余 64 MiB |
+| A4 再 launch 该 exec | **跳过检查，成功并重新映射 1216 MiB** | 返回 OOM |
+| A 的实际占用（限额 4096） | **5248 MiB，越限 1152 MiB** | 4032 MiB |
+
+触发条件是同卡其他租户把物理显存用满（或超卖），单租户且限额 ≤ 物理显存时不会发生（物理显存先于限额耗尽）。
+驱动的隐式回收没有任何可 hook 的通知，所以"已映射就跳过"无法得知页已被收走。待定：是否放弃方案 B 第 3 条（回到每次 launch 查一次池预留，
+~10 ns），保留 1、2、4。
+
+复现注意：裸机上 `/etc/vgpu-manager/config/vgpu.config` 存在时优先于环境变量；HOST 模式会把同卡所有进程（含 B）计入；
+CGROUP 模式在裸机 session scope 下识别不到本进程（占用为 0），都不能用来做这类多租户实验，要用 SESSION 模式 + `pids.config`。

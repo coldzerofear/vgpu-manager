@@ -16,6 +16,8 @@
  *   [D] cuGraphInstantiateWithParams with the UPLOAD flag: refused / accepted
  *   [E] a hand-built graph's alloc node: launch refused / accepted
  *   [F] a larger graph after a smaller one: only the pool's growth is checked
+ *   [G] a launched exec is not checked again until a trim returns its pages
+ *   [H] a graph allocating on two devices is not checked (known boundary)
  *
  * Each case trims the graph pool first so it starts with nothing reserved.
  * Built twice (_ptsz variant) so the per-thread-default-stream hooks are
@@ -296,6 +298,85 @@ static int growth_only(void) {
   return failed;
 }
 
+/* --------------------------------------------------------------------- [G] */
+/* After a launch the exec is not checked again (its pages stay in the pool),
+ * until cuDeviceGraphMemTrim returns them: then its next launch maps anew and
+ * has to be checked again. */
+static int trim_rechecks(void) {
+  trim_pool();
+  size_t need = headroom() / 3;
+  CUgraph g = captured_graph(need);
+  if (g == NULL) return 1;
+  CUgraphExec ex = NULL;
+  CHECK_DRV_API(cuGraphInstantiateWithFlags(&ex, g, 0));
+  cuGraphDestroy(g);
+  int failed = 0;
+  CUresult r = cuGraphLaunch(ex, g_stream);
+  cuStreamSynchronize(g_stream);
+  describe("cuGraphLaunch (first, fits)", r);
+  if (r != CUDA_SUCCESS) failed = 1;
+
+  trim_pool();
+  printf("  pool after trim: %.0f MiB\n", MIB(pool_reserved()));
+  CUdeviceptr filler = fill_leaving(need / 2);
+  r = cuGraphLaunch(ex, g_stream);
+  cuStreamSynchronize(g_stream);
+  describe("cuGraphLaunch (after trim, headroom taken)", r);
+  if (r != CUDA_ERROR_OUT_OF_MEMORY) {
+    printf("  FAIL: after the trim the launch mapped %.0f MiB past the limit\n", MIB(pool_reserved()));
+    failed = 1;
+  }
+  if (filler) cuMemFree(filler);
+  r = cuGraphLaunch(ex, g_stream);
+  cuStreamSynchronize(g_stream);
+  describe("cuGraphLaunch (after trim, headroom freed)", r);
+  if (r != CUDA_SUCCESS) failed = 1;
+  cuGraphExecDestroy(ex);
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [H] */
+/* A graph allocating on two devices is not checked (a known boundary): its
+ * launch must neither fail nor hang. Needs two devices. */
+static int multi_device_not_checked(void) {
+  int count = 0;
+  cuDeviceGetCount(&count);
+  if (count < 2) { printf("  SKIP (needs 2 devices, have %d)\n", count); return -1; }
+  trim_pool();
+  CUdevice other;
+  CHECK_DRV_API(cuDeviceGet(&other, g_dev == 0 ? 1 : 0));
+  size_t need = headroom() / 3;
+  CUgraph g = NULL;
+  CHECK_DRV_API(cuGraphCreate(&g, 0));
+  CUgraphNode prev = NULL;
+  CUdevice devs[2] = {g_dev, other};
+  for (int i = 0; i < 2; i++) {
+    CUDA_MEM_ALLOC_NODE_PARAMS ap;
+    memset(&ap, 0, sizeof(ap));
+    ap.poolProps.allocType = CU_MEM_ALLOCATION_TYPE_PINNED;
+    ap.poolProps.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    ap.poolProps.location.id = devs[i];
+    ap.bytesize = need;
+    CUgraphNode an = NULL, fn = NULL;
+    CHECK_DRV_API(cuGraphAddMemAllocNode(&an, g, prev ? &prev : NULL, prev ? 1 : 0, &ap));
+    CHECK_DRV_API(cuGraphAddMemFreeNode(&fn, g, &an, 1, ap.dptr));
+    prev = fn;
+  }
+  CUgraphExec ex = NULL;
+  CHECK_DRV_API(cuGraphInstantiateWithFlags(&ex, g, 0));
+  cuGraphDestroy(g);
+  CUdeviceptr filler = fill_leaving(need / 2);
+  CUresult r = cuGraphLaunch(ex, g_stream);
+  CUresult s = cuStreamSynchronize(g_stream);
+  describe("cuGraphLaunch (two devices, headroom taken)", r);
+  int failed = r != CUDA_SUCCESS || s != CUDA_SUCCESS;
+  if (filler) cuMemFree(filler);
+  cuGraphExecDestroy(ex);
+  cuCtxSynchronize();
+  cuDeviceGraphMemTrim(other);
+  return failed;
+}
+
 int main(void) {
   if (!preloaded()) {
     printf("SKIP (needs LD_PRELOAD=libvgpu-control.so and a memory limit)\n");
@@ -315,6 +396,8 @@ int main(void) {
   RUN_CASE("[D] instantiate with the UPLOAD flag refused / accepted", instantiate_upload_admission());
   RUN_CASE("[E] a hand-built alloc-node graph's launch refused / accepted", hand_built_admission());
   RUN_CASE("[F] only the pool's growth is checked", growth_only());
+  RUN_CASE("[G] a trim makes the next launch checked again", trim_rechecks());
+  RUN_CASE("[H] a graph allocating on two devices is not checked", multi_device_not_checked());
 #undef RUN_CASE
   trim_pool();
   cuStreamDestroy(g_stream);

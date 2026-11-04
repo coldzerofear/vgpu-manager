@@ -44,8 +44,9 @@
  *       limit (an oversized node is refused) but not charged -- nothing would
  *       retire a charge on a graph built by hand.
  *
- *   [F] an alloc node added to the graph a capture is building IS charged,
- *       with the capture, and comes off at its end (capture_reg_has_graph).
+ *   [F] an alloc node added to the graph a capture is building: checked like
+ *       [E] and not charged either -- graph allocations are checked as a
+ *       whole when the graph maps them (test_graph_mem_admission).
  *
  *   [G] an invalidated capture: the driver stops reporting its graph and ends
  *       it with an error and no graph, so its charges are only retired if the
@@ -500,9 +501,12 @@ static int alloc_node_is_checked_not_charged(CUdevice dev) {
 }
 
 /* --------------------------------------------------------------------- [F] --
- * An alloc node added to the graph a capture is building is charged with the
- * capture, and comes off when the capture ends. */
-static int alloc_node_in_capture_is_charged(CUdevice dev, CUstream stream) {
+ * An alloc node added to the graph a capture is building: checked against the
+ * limit like any alloc node (an oversized one is refused by the hook before
+ * the driver sees it, so the capture goes on), and not charged: its memory is
+ * mapped at upload/launch, where the graph's alloc nodes are checked as a
+ * whole (test_graph_mem_admission). */
+static int alloc_node_in_capture_is_checked_not_charged(CUdevice dev, CUstream stream) {
   { int _pre = can_assert(); if (_pre != 0) return _pre; }
 
   size_t freeb = 0;
@@ -513,31 +517,36 @@ static int alloc_node_in_capture_is_charged(CUdevice dev, CUstream stream) {
   long long before = ledger_used_self();
   CHECK_DRV_API(cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_RELAXED));
   CUgraph cap = capture_graph_of(stream);
-  CUresult r = CUDA_ERROR_INVALID_VALUE;
+  CUresult r_over = CUDA_ERROR_INVALID_VALUE, r = CUDA_ERROR_INVALID_VALUE;
+  long long during = before;
   if (cap != NULL) {
-    CUDA_MEM_ALLOC_NODE_PARAMS p = alloc_node_params(dev, chunk);
+    CUDA_MEM_ALLOC_NODE_PARAMS over = alloc_node_params(dev, freeb + chunk);
     CUgraphNode node = NULL;
+    r_over = cuGraphAddMemAllocNode(&node, cap, NULL, 0, &over);
+    CUDA_MEM_ALLOC_NODE_PARAMS p = alloc_node_params(dev, chunk);
     r = cuGraphAddMemAllocNode(&node, cap, NULL, 0, &p);
+    during = ledger_used_self();
   }
-  long long during = ledger_used_self();
   CUgraph graph = NULL;
   CUresult e = cuStreamEndCapture(stream, &graph);
   long long after = ledger_used_self();
   if (graph != NULL) cuGraphDestroy(graph);
 
-  describe("cuGraphAddMemAllocNode (into the capture graph)", r);
+  describe("cuGraphAddMemAllocNode (into the capture, over)", r_over);
+  describe("cuGraphAddMemAllocNode (into the capture, within)", r);
   if (e != CUDA_SUCCESS) describe("cuStreamEndCapture", e);
   printf("  ledger: %.0f MiB before, %.0f MiB during capture, %.0f MiB after\n",
          MIB(before), MIB(during), MIB(after));
   if (cap == NULL) { printf("  FAIL: could not read the capture graph\n"); return 1; }
-  if (r != CUDA_SUCCESS) return 1;
   int failed = 0;
-  if (during - before < (long long)chunk) {
-    printf("  FAIL: the node added to the capture was not charged\n");
+  if (r_over != CUDA_ERROR_OUT_OF_MEMORY) {
+    printf("  FAIL: an alloc node larger than the headroom was accepted\n");
     failed = 1;
   }
-  if (after != before) {
-    printf("  FAIL: %.0f MiB left charged after the capture ended\n", MIB(after - before));
+  if (r != CUDA_SUCCESS || e != CUDA_SUCCESS) failed = 1;
+  if (during != before || after != before) {
+    printf("  FAIL: the alloc node was charged (%.0f MiB during, %.0f MiB after)\n",
+           MIB(during - before), MIB(after - before));
     failed = 1;
   }
   return failed;
@@ -1051,8 +1060,8 @@ int main(void) {
            capture_charge_is_enforced(stream));
   RUN_CASE("[E] a hand-built graph's alloc node is checked, not charged",
            alloc_node_is_checked_not_charged(device));
-  RUN_CASE("[F] an alloc node added to a capture is charged and released at end",
-           alloc_node_in_capture_is_charged(device, stream));
+  RUN_CASE("[F] an alloc node added to a capture is checked, not charged",
+           alloc_node_in_capture_is_checked_not_charged(device, stream));
   RUN_CASE("[G] an invalidated capture's charges are released",
            invalidated_capture_is_retired(stream));
   RUN_CASE("[K] an invalidated capture's charges on a joined stream are released",

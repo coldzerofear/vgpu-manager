@@ -3557,9 +3557,11 @@ CUresult cuDeviceGetGraphMemAttribute(CUdevice device,
                          device, attr, value);
 }
 
-CUresult cuDeviceGraphMemTrim(CUdevice device) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGraphMemTrim, device);
-}
+/* cuDeviceGraphMemTrim: public symbol now provided by the graph-memory
+ * admission hook in cuda_hook.c (a trim makes cached graphs map again). */
+//CUresult cuDeviceGraphMemTrim(CUdevice device) {
+//  return CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGraphMemTrim, device);
+//}
 
 CUresult cuDeviceSetGraphMemAttribute(CUdevice device,
                                       CUgraphMem_attribute attr, void *value) {
