@@ -4573,7 +4573,9 @@ static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph) {
  * hands idle pool pages back when a cuMemAlloc outgrows the free device
  * memory, without any notification, and the next launch maps them again.
  * A steady-state replay estimates zero growth and takes no lock. Graphs
- * without alloc nodes return at once; graphs whose allocations span devices
+ * without alloc nodes, and devices whose memory limit is off, return before
+ * the query (the flag is read per call, so a limit switched on by a config
+ * update applies from the next launch); graphs whose allocations span devices
  * (GRAPH_MEM_MULTI) are not checked.
  *
  * Sets *lock_fd (-1 = not held) and returns CUDA_SUCCESS, or returns
@@ -4581,6 +4583,8 @@ static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph) {
 static CUresult graph_mem_admit(const graph_mem_t *mem, int *lock_fd) {
   *lock_fd = -1;
   if (mem->dev < 0 || mem->need == 0) return CUDA_SUCCESS;
+  int host_index = get_host_device_index_by_cuda_device((CUdevice)mem->dev);
+  if (!get_device_flag(host_index, memory_limit)) return CUDA_SUCCESS;
   cuuint64_t reserved = 0;
   if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuDeviceGetGraphMemAttribute, (CUdevice)mem->dev,
                           CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT, &reserved) != CUDA_SUCCESS) {
@@ -4588,7 +4592,6 @@ static CUresult graph_mem_admit(const graph_mem_t *mem, int *lock_fd) {
   }
   size_t growth = mem->need > reserved ? mem->need - (size_t)reserved : 0;
   if (growth == 0) return CUDA_SUCCESS;
-  int host_index = -1;
   if (prepare_memory_allocation((CUdevice)mem->dev, growth, 0, &host_index, lock_fd) == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     LOGGER(VERBOSE, "graph upload/launch refused: device %d pool would grow by %zu bytes",

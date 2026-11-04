@@ -306,3 +306,6 @@ CGROUP 模式在裸机 session scope 下识别不到本进程（占用为 0）�
 
   端到端噪声（±100 ns 以上，个别离群值）远大于两者 ~10 ns 的确定差别，测不出区分；确定的差别只有"一次驱动属性查询（9.8 ns）"
   对"一次数组查表 + 一次原子读（~1–2 ns）"。限额开启时 flag 变体多一次设备号换算（`prepare_memory_allocation` 内还会再做一次），可忽略。
+
+  采纳 flag 变体（先判 `memory_limit` 再查池预留）。采纳后复测：`make test` 29/29、准入与记账测试（普通与 `_ptsz`）全部通过，
+  隐式回收复现仍拒绝 relaunch（A 占用 4032 MiB），限额关闭时 `bench2` 正常运行（plain 2015 / alloc 2245 ns）。
