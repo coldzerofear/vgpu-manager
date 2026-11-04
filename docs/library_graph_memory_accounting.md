@@ -293,3 +293,16 @@ CGROUP 模式在裸机 session scope 下识别不到本进程（占用为 0）�
 
   带 alloc node 的 graph：检查开销平均 +36 ns、中位 +48 ns（约 +1.6%），与单独测得的属性查询 9.8 ns 同量级，组间噪声约 ±60 ns；
   普通 graph 不走查询，本分支与 nocheck 差值在 −83…+61 ns 之间随机分布，即无开销。
+
+  内存限额关闭时（`vgpu.config` / `CUDA_MEM_LIMIT` 均未开，启动日志 `Memory Limit : disabled`）：当前实现对带 alloc node 的 graph
+  仍会先查一次池预留（~10 ns），增长为 0 才返回；首次映射时进 `prepare_memory_allocation`，那里看到限额关闭，不拿锁、不查 NVML。
+  不带 alloc node 的 graph 判 `dev < 0` 即返回。变体 `flag`：在查询前先用 `get_device_flag(host_index, memory_limit)`（一次原子读）
+  判断，限额关闭直接返回。`bench2` 5 组交替（alloc graph 中位数，ns/次）：
+
+  | 限额 | nocheck | 当前实现 | flag 变体 |
+  |---|---|---|---|
+  | 关 | 2279（2109–2354） | 2304（2154–2332） | 2241（1783–2319） |
+  | 开 4096 MiB | 2142（1679–2272） | 2187（1548–2298） | 2272（2099–2289） |
+
+  端到端噪声（±100 ns 以上，个别离群值）远大于两者 ~10 ns 的确定差别，测不出区分；确定的差别只有"一次驱动属性查询（9.8 ns）"
+  对"一次数组查表 + 一次原子读（~1–2 ns）"。限额开启时 flag 变体多一次设备号换算（`prepare_memory_allocation` 内还会再做一次），可忽略。
