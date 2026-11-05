@@ -56,8 +56,15 @@
  *   [Q] [R] [S] a capture ended where the driver refuses it, from another thread,
  *       on a joined stream, unjoined: released once the capture is over.
  *
- *   [T] an async allocation is checked on the device of its stream, not of the
+ *   [T] cuMemAllocAsync is checked on the device of its stream, not of the
  *       current context, also in a capture (needs two devices).
+ *
+ *   [U] a capture whose stream is destroyed is released.
+ *
+ *   [V] cuMemAllocFromPoolAsync is checked on the device of its pool, not of the
+ *       stream or the current context (needs two devices).
+ *
+ *   [W] more pools than the library's table holds, and its slots coming back.
  *
  *   [H] [I] [J] a capture left open when its context goes -- cuCtxDestroy, a
  *       primary-context reset, the release of its last reference. The driver
@@ -988,8 +995,8 @@ static int other_ends_release(CUstream origin) {
 }
 
 /* --------------------------------------------------------------------- [T] --
- * An asynchronous allocation lands on its stream's device, which need not be
- * the current context's. Checked against the stream's device: refused when that
+ * cuMemAllocAsync lands on its stream's device, which need not be the current
+ * context's. Checked against the stream's device: refused when that
  * one is full, not refused because the current one is. Inside a capture as well,
  * where the driver must not be asked for the stream's device -- doing so
  * invalidates the capture. Needs two devices. */
@@ -1045,22 +1052,6 @@ static int async_alloc_uses_stream_device(CUdevice dev, CUcontext ctx) {
     failed = 1;
     if (r == CUDA_SUCCESS) { cuStreamSynchronize(s1); cuMemFreeAsync(p, s1); }
   }
-  CUmemPoolProps props;
-  memset(&props, 0, sizeof(props));
-  props.allocType = CU_MEM_ALLOCATION_TYPE_PINNED;
-  props.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  props.location.id = other;
-  CUmemoryPool pool = NULL;
-  CHECK_DRV_API(cuMemPoolCreate(&pool, &props));
-  r = cuMemAllocFromPoolAsync(&p, chunk, pool, s1);
-  describe("cuMemAllocFromPoolAsync (stream's device full)", r);
-  if (r != CUDA_ERROR_OUT_OF_MEMORY) {
-    printf("  FAIL: allocated past the limit of the stream's device\n");
-    failed = 1;
-    if (r == CUDA_SUCCESS) { cuStreamSynchronize(s1); cuMemFreeAsync(p, s1); }
-  }
-  cuStreamSynchronize(s1);
-  cuMemPoolDestroy(pool);
   /* The same in a capture, which must survive it. */
   CUgraph g = NULL;
   CHECK_DRV_API(cuStreamBeginCapture(s1, CU_STREAM_CAPTURE_MODE_RELAXED));
@@ -1097,7 +1088,7 @@ static int async_alloc_uses_stream_device(CUdevice dev, CUcontext ctx) {
   describe("cuStreamEndCapture", e2);
   printf("  stream's device headroom: %.0f MiB, in capture %.0f MiB\n", MIB(room), MIB(in_capture));
   if (r != CUDA_SUCCESS || e != CUDA_SUCCESS || e2 != CUDA_SUCCESS) failed = 1;
-  if (room - in_capture < chunk) {
+  if (in_capture + chunk > room) {
     printf("  FAIL: the capture's allocation was not charged to the stream's device\n");
     failed = 1;
   }
@@ -1106,6 +1097,171 @@ static int async_alloc_uses_stream_device(CUdevice dev, CUcontext ctx) {
   cuStreamDestroy(s1);
   cuDevicePrimaryCtxRelease(other);
   cuCtxSetCurrent(ctx);
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [U] --
+ * A stream destroyed during a capture it began: the driver accepts it and that
+ * capture can never be ended, so its charges go with the stream. */
+static int destroyed_stream_is_retired(void) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  size_t chunk = freeb / 4;
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
+  CUstream t = NULL;
+  CHECK_DRV_API(cuStreamCreate(&t, CU_STREAM_NON_BLOCKING));
+  long long before = ledger_used_self();
+  CHECK_DRV_API(cuStreamBeginCapture(t, CU_STREAM_CAPTURE_MODE_RELAXED));
+  CUdeviceptr dptr = 0;
+  CUresult a = cuMemAllocAsync(&dptr, chunk, t);
+  long long during = ledger_used_self();
+  CUresult d = cuStreamDestroy(t);
+  long long after = ledger_used_self();
+  describe("cuStreamDestroy (during capture)", d);
+  printf("  ledger: %.0f MiB before, %.0f MiB during capture, %.0f MiB after\n",
+         MIB(before), MIB(during), MIB(after));
+  int failed = a != CUDA_SUCCESS || d != CUDA_SUCCESS;
+  if (during - before < (long long)chunk) {
+    printf("  FAIL: the allocation in capture was not charged\n");
+    failed = 1;
+  }
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged by a capture whose stream is gone\n", MIB(after - before));
+    failed = 1;
+  }
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [V] --
+ * cuMemAllocFromPoolAsync lands on the POOL's device, whatever the stream's and
+ * the current context's: checked there, for created and for default pools, in a
+ * capture as well. Needs two devices. */
+static CUresult pool_on(CUdevice d, CUmemoryPool *pool) {
+  CUmemPoolProps props;
+  memset(&props, 0, sizeof(props));
+  props.allocType = CU_MEM_ALLOCATION_TYPE_PINNED;
+  props.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  props.location.id = d;
+  return cuMemPoolCreate(pool, &props);
+}
+
+static int expect_pool_alloc(const char *what, CUmemoryPool pool, size_t bytes, CUstream s, CUresult want) {
+  CUdeviceptr p = 0;
+  CUresult r = cuMemAllocFromPoolAsync(&p, bytes, pool, s);
+  describe(what, r);
+  cuStreamSynchronize(s);
+  if (r == CUDA_SUCCESS) {
+    cuMemFreeAsync(p, s);
+    cuStreamSynchronize(s);
+  }
+  if (r != want) {
+    printf("  FAIL: expected %d\n", (int)want);
+    return 1;
+  }
+  return 0;
+}
+
+static int pool_alloc_uses_pool_device(CUdevice dev, CUcontext ctx) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+  int count = 0;
+  cuDeviceGetCount(&count);
+  /* Not a skip: see [T]. */
+  if (count < 2) { printf("  not run (needs 2 devices, have %d)\n", count); return 0; }
+  CUdevice other;
+  CHECK_DRV_API(cuDeviceGet(&other, dev == 0 ? 1 : 0));
+  CUcontext octx = NULL;
+  CHECK_DRV_API(cuDevicePrimaryCtxRetain(&octx, other));
+  CUstream s0 = NULL, s1 = NULL;
+  CHECK_DRV_API(cuStreamCreate(&s0, CU_STREAM_NON_BLOCKING));
+  cuCtxSetCurrent(octx);
+  CHECK_DRV_API(cuStreamCreate(&s1, CU_STREAM_NON_BLOCKING));
+  cuCtxSetCurrent(ctx);
+  CUmemoryPool here = NULL, there = NULL, there_default = NULL, there_current = NULL;
+  CHECK_DRV_API(pool_on(dev, &here));
+  CHECK_DRV_API(pool_on(other, &there));
+  CHECK_DRV_API(cuDeviceGetDefaultMemPool(&there_default, other));
+  CHECK_DRV_API(cuDeviceGetMemPool(&there_current, other));
+  size_t chunk = headroom_of(ctx, ctx) / 4;
+  int failed = 0;
+
+  /* The other device full, this one free. */
+  CUdeviceptr filler = fill_ctx(octx, ctx, chunk / 2);
+  failed += expect_pool_alloc("pool there, stream here (there full)", there, chunk, s0, CUDA_ERROR_OUT_OF_MEMORY);
+  failed += expect_pool_alloc("pool there, stream there (there full)", there, chunk, s1, CUDA_ERROR_OUT_OF_MEMORY);
+  failed += expect_pool_alloc("default pool there, stream here (there full)", there_default, chunk, s0, CUDA_ERROR_OUT_OF_MEMORY);
+  failed += expect_pool_alloc("current pool there, stream here (there full)", there_current, chunk, s0, CUDA_ERROR_OUT_OF_MEMORY);
+  failed += expect_pool_alloc("pool here, stream there (there full)", here, chunk, s1, CUDA_SUCCESS);
+  CUgraph g = NULL;
+  CUdeviceptr p = 0;
+  CHECK_DRV_API(cuStreamBeginCapture(s0, CU_STREAM_CAPTURE_MODE_RELAXED));
+  CUresult r = cuMemAllocFromPoolAsync(&p, chunk, there, s0);
+  CUresult e = cuStreamEndCapture(s0, &g);
+  describe("in capture: pool there, stream here (there full)", r);
+  describe("cuStreamEndCapture", e);
+  if (r != CUDA_ERROR_OUT_OF_MEMORY || e != CUDA_SUCCESS) failed++;
+  if (g != NULL) cuGraphDestroy(g);
+  free_ctx(octx, ctx, filler);
+
+  /* This device full, the other free. */
+  filler = fill_ctx(ctx, ctx, chunk / 2);
+  failed += expect_pool_alloc("pool there, stream here (here full)", there, chunk, s0, CUDA_SUCCESS);
+  failed += expect_pool_alloc("pool here, stream there (here full)", here, chunk, s1, CUDA_ERROR_OUT_OF_MEMORY);
+  size_t room = headroom_of(octx, ctx);
+  g = NULL;
+  CHECK_DRV_API(cuStreamBeginCapture(s0, CU_STREAM_CAPTURE_MODE_RELAXED));
+  r = cuMemAllocFromPoolAsync(&p, chunk, there, s0);
+  size_t in_capture = headroom_of(octx, ctx);
+  CUresult f = r == CUDA_SUCCESS ? cuMemFreeAsync(p, s0) : r;
+  e = cuStreamEndCapture(s0, &g);
+  describe("in capture: pool there, stream here (here full)", r);
+  describe("cuStreamEndCapture", e);
+  printf("  pool device's headroom: %.0f MiB, in capture %.0f MiB\n", MIB(room), MIB(in_capture));
+  if (r != CUDA_SUCCESS || f != CUDA_SUCCESS || e != CUDA_SUCCESS) failed++;
+  if (in_capture + chunk > room) {
+    printf("  FAIL: the capture's allocation was not charged to the pool's device\n");
+    failed++;
+  }
+  if (g != NULL) cuGraphDestroy(g);
+  free_ctx(ctx, ctx, filler);
+  cuMemPoolDestroy(here);
+  cuMemPoolDestroy(there);
+  cuStreamDestroy(s0);
+  cuStreamDestroy(s1);
+  cuDevicePrimaryCtxRelease(other);
+  cuCtxSetCurrent(ctx);
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [W] --
+ * More pools than the library's table holds: allocation goes on (falling back
+ * to the current context for those it missed), and destroying pools frees the
+ * table for later ones. */
+static int pool_table_overflow(CUdevice dev) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+  enum { POOLS = 80 };
+  CUmemoryPool pools[POOLS];
+  int made = 0, failed = 0;
+  for (int i = 0; i < POOLS; i++) {
+    if (pool_on(dev, &pools[i]) != CUDA_SUCCESS) break;
+    made++;
+  }
+  CUstream s = NULL;
+  CHECK_DRV_API(cuStreamCreate(&s, CU_STREAM_NON_BLOCKING));
+  printf("  %d pools created\n", made);
+  for (int i = 0; i < made; i += 13) {
+    char what[64];
+    snprintf(what, sizeof(what), "cuMemAllocFromPoolAsync (pool %d)", i);
+    failed += expect_pool_alloc(what, pools[i], 1 << 20, s, CUDA_SUCCESS);
+  }
+  for (int i = 0; i < made; i++) {
+    if (cuMemPoolDestroy(pools[i]) != CUDA_SUCCESS) failed++;
+  }
+  CUmemoryPool again = NULL;
+  CHECK_DRV_API(pool_on(dev, &again));
+  failed += expect_pool_alloc("cuMemAllocFromPoolAsync (after destroying them)", again, 1 << 20, s, CUDA_SUCCESS);
+  cuMemPoolDestroy(again);
+  cuStreamDestroy(s);
   return failed;
 }
 
@@ -1377,6 +1533,12 @@ int main(void) {
            other_ends_release(stream));
   RUN_CASE("[T] an async allocation is checked on its stream's device",
            async_alloc_uses_stream_device(device, ctx));
+  RUN_CASE("[U] a capture whose stream is destroyed is released",
+           destroyed_stream_is_retired());
+  RUN_CASE("[V] a pool allocation is checked on the pool's device",
+           pool_alloc_uses_pool_device(device, ctx));
+  RUN_CASE("[W] more pools than the table holds",
+           pool_table_overflow(device));
   RUN_CASE("[M] concurrent captures across threads, some invalidated, all released",
            concurrent_captures_retire(ctx));
   RUN_CASE("[N] more captures open at once than the registry holds are released",

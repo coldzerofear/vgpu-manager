@@ -1276,13 +1276,8 @@ CUresult _cuStreamDestroy(CUstream hStream) {
   return ret;
 }
 
-CUresult cuStreamDestroy_v2(CUstream hStream) {
-  return _cuStreamDestroy(hStream);
-}
-
-CUresult cuStreamDestroy(CUstream hStream) {
-  return _cuStreamDestroy(hStream);
-}
+/* cuStreamDestroy, cuStreamDestroy_v2: public symbols now provided by the hook in
+ * cuda_hook.c, which retires the charges of a capture destroyed with its stream. */
 
 CUresult cuStreamWaitEvent(CUstream hStream, CUevent hEvent, unsigned int Flags) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamWaitEvent),
@@ -3332,19 +3327,15 @@ CUresult cuArrayGetSparseProperties(CUDA_ARRAY_SPARSE_PROPERTIES *sparseProperti
                          sparseProperties, array);
 }
 
-CUresult cuDeviceGetDefaultMemPool(CUmemoryPool *pool_out, CUdevice dev) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGetDefaultMemPool,
-                         pool_out, dev);
-}
+/* cuDeviceGetDefaultMemPool: public symbol now provided by the pool table in
+ * cuda_hook.c. */
 
 CUresult cuDeviceGetLuid(char *luid, unsigned int *deviceNodeMask, CUdevice dev) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGetLuid, luid,
                          deviceNodeMask, dev);
 }
 
-CUresult cuDeviceGetMemPool(CUmemoryPool *pool, CUdevice dev) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGetMemPool, pool, dev);
-}
+/* cuDeviceGetMemPool: public symbol now provided by the pool table in cuda_hook.c. */
 
 CUresult cuDeviceGetTexture1DLinearMaxWidth(size_t *maxWidthInElements, CUarray_format format,
                                             unsigned numChannels, CUdevice dev) {
@@ -3479,13 +3470,8 @@ CUresult cuMemMapArrayAsync_ptsz(CUarrayMapInfo *mapInfoList,
                          mapInfoList, count, hStream);
 }
 
-CUresult cuMemPoolCreate(CUmemoryPool *pool, const CUmemPoolProps *poolProps) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemPoolCreate, pool, poolProps);
-}
-
-CUresult cuMemPoolDestroy(CUmemoryPool pool) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemPoolDestroy, pool);
-}
+/* cuMemPoolCreate, cuMemPoolDestroy: public symbols now provided by the pool table
+ * in cuda_hook.c. */
 
 CUresult cuMemPoolExportPointer(CUmemPoolPtrExportData *shareData_out,
                                 CUdeviceptr ptr) {

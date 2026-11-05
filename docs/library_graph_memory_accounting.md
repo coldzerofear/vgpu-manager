@@ -46,7 +46,8 @@ launch 之后显存由 NVML 计入，记账若继续持有会重复计数（误�
   `cuStreamBeginCapture` 属 ABI 冲突族，已按先例加入 `R5_ALLOWLIST`（每个包装都调用自己同名的入口）。
 - **`cuStreamEndCapture`**：graph 取自登记表（缺失时现场查询），在返回 `CUDA_SUCCESS`、`CUDA_ERROR_STREAM_CAPTURE_INVALIDATED`，
   或 End 失败但 stream 已不在捕获中（跨线程的 `WRONG_THREAD`、未汇合的 `UNJOINED`，驱动拒绝的同时已终止捕获，见 6.6）时释放；捕获还在（接入的 stream 上 End 的 `UNMATCHED`）不释放。
-- **异步分配的设备**：`cuMemAllocAsync`、`cuMemAllocFromPoolAsync` 按 stream 所在的卡检查和记账，不用当前 context（见 6.6）。
+- **异步分配的设备**：`cuMemAllocAsync` 按 stream 所在的卡、`cuMemAllocFromPoolAsync` 按池所在的卡检查和记账，都不用当前 context（见 6.6、6.7）。
+- **`cuStreamDestroy`**（新 hook）：销毁正在发起捕获的 stream 时释放该捕获的记账（见 6.7）。
 - **context 拆除兜底**：记账记录增加 `ctx` 字段（进程私有，不涉及共享 ABI）。`cuCtxDestroy(_v2)`、`cuDevicePrimaryCtxReset(_v2)`、
   释放最后一个引用的 `cuDevicePrimaryCtxRelease(_v2)` 成功后按 context 清理记账与登记表。这 6 个入口从透传改为注册进 hook 表，
   `cudaDeviceReset` 等经 `cuGetProcAddress` 获取的调用也能覆盖。primary context 只在活跃时获取句柄（对非活跃的 retain 会创建它）。
@@ -391,7 +392,7 @@ main 841a111 同样如此。新增用例 [Q] 复现（账本 0 / 947 / 947 MiB�
 HAMi-core #393 的其余内容在本库不适用：它在捕获和 alloc node 上长期持有记账，要到 graph 销毁才释放，所以"从未运行的 graph 销毁时要退账"；
 本库捕获结束即退账、alloc node 不记账，不存在这类残留（[B]、[E]、[F]）。作废捕获的释放本库已有（[G]、[K]、[L]）。
 
-#### 问题 2：异步分配按当前 context 查卡，stream 在别的卡上时查错（既有，已修复）
+#### 问题 2：异步分配按当前 context 查卡，查错卡（既有，已修复；`cuMemAllocFromPoolAsync` 的修法以 6.7 为准）
 
 `cuMemAllocAsync`、`cuMemAllocFromPoolAsync` 的显存落在 **stream 所在的卡**（`probe_end` A/A2/A3：ctx=d0、stream 在 d1，NVML d1 +1024，捕获得到的 alloc node loc=1），
 而 hook 用 `cuCtxGetDevice` 检查和记账。`probe_cross`（本库，每卡限额 4096 MiB，550、580 相同）：
@@ -439,3 +440,51 @@ HAMi-core #393 的其余内容在本库不适用：它在捕获和 alloc node �
 另外 hook 一致性（606 项，hook 69 个）、ABI 签名、session 路径、导出符号检查通过，`make test-nogpu` 通过；`reclaim.sh` 拒绝 relaunch，占用 4032 MiB。修复前 [Q] 失败（账本残留 947 MiB），X2、X3 越限、X5 误报。PyTorch 2.14.1+cu126（`limit_pytorch_graph.py`，`backend:cudaMallocAsync`，限额 4096 MiB），`--device 0` 与 `--device 1` 都通过：
 T2 24 个 graph（临时张量合计 6144 MiB）捕获加回放无误报；T4 占掉余量时回放被拒（`AcceleratorError`），释放后回放成功。
 注意：torch 的 cu130 版不带 V100（CC 7.0）的 kernel，报 `no kernel image is available`，V100 要用 cu126 版。
+
+### 6.7 复查发现（2026-11-05，针对提交 5a7c302；驱动 580.178.04，两张 V100）
+
+**缺陷（5a7c302 引入，已修复）：`cuMemAllocFromPoolAsync` 不该按 stream 查卡。** 上文"问题 2"对这个 API 的结论不完整。`cuda.h` 写明"The specified memory pool may be from a device different
+than that of the specified hStream"，`probe_pool2`（不加载本库）证实显存落在**池所在的卡**，与 stream、当前 context 都无关；捕获中得到的 alloc node 也是池的 location：
+
+| 池 | stream | 当前 ctx | NVML 增长 | main 查的卡 | 5a7c302 查的卡 |
+|---|---|---|---|---|---|
+| d0 | d0 | d0 | d0 +1024 | d0 对 | d0 对 |
+| d1 | d1 | d0 | d1 +1024 | d0 错 | d1 对 |
+| d1 | d0 | d0 | d1 +1024 | d0 错 | d0 错 |
+| d0 | d1 | d1 | d0 +1024 | d1 错 | d1 错 |
+| d0 | d1 | d0 | 同上推断 d0 | d0 对 | **d1 错（回归）** |
+
+`cuMemAllocAsync` 不受影响（落在 stream 的卡，见上文）。没有查询池所在设备的 API：`cuMemPoolGetAccess` 对所属卡和被授权的对端都返回 3（READWRITE），不能区分（`probe_edge`）。
+
+修复：在池句柄的来源处记下它的设备。hook `cuMemPoolCreate`（device 类型的 location）、`cuDeviceGetDefaultMemPool`、`cuDeviceGetMemPool`，记入 64 槽的表，`cuMemPoolDestroy` 删除，fork 子进程清空并重新初始化锁。
+`cuMemAllocFromPoolAsync` 查这张表，捕获中也不需要问驱动。查不到（导入的池、host 位置的池、表满）回退到当前 context，即 main 的行为。
+
+**既有的窄残留（main 上同样存在）：**
+
+| 场景（`probe_edge`，本库，限额 4096 MiB） | 结果 | 处理 |
+|---|---|---|
+| 捕获中 `cuStreamDestroy`（驱动返回 SUCCESS） | 记账留到 context 销毁或进程退出（free 2764） | 已修：hook `cuStreamDestroy(_v2)`，只针对登记表里的发起 stream；接入的 stream 销毁时捕获还在，不释放 |
+| 当前 ctx=d0，捕获在 d1 的 stream 上并分配 1 GiB，然后 `cuDevicePrimaryCtxReset(d1)` | 记账留在 d1（free 2764），重新 retain 后仍在。记录的 ctx 是当前 context（c0），按 c1 清扫不到 | 不修，已知边界：等 c0 销毁或进程退出 |
+
+**核实后没有问题的点：**
+- `CU_STREAM_LEGACY`、`CU_STREAM_PER_THREAD`：`cuStreamGetDevice` 返回当前 context 的设备（ctx=d1 时都是 1），`cuStreamGetCtx(LEGACY)` 成功。
+- `gap_begin` 在持设备锁时调用，但用 `trylock`，不会阻塞。
+- 函数表未加载时 `fn_ptr` 为空：`stream_is_capturing`、`stream_device` 都判空，回退到 `cuCtxGetDevice`。
+- 任何时刻最多一把设备锁；`capture_reg` 的互斥锁不跨驱动调用。
+- fork：登记表（含新字段）被 `memset` 清空、锁重新初始化；graph 成本缓存同样。
+- `make test-sanitize`（ASan+UBSan，无 GPU）20 项通过。注意 `VGPU_SANITIZE` 不作用于 `libvgpu-control.so` 本身（6.4），这项不覆盖 hook 代码。
+
+捕获中 `cuMemPoolGetAttribute`、`cuMemPoolGetAccess` 在 580 上合法，捕获不受影响；老驱动未测。
+
+**修复后的测试**：新增 [U]（捕获中销毁 stream）、[V]（池和 stream 不在同一张卡的组合，含默认池、当前池、捕获内）、[W]（80 个池超过表容量，销毁后可复用）；[T] 只留 `cuMemAllocAsync`。
+同一批用例在 5a7c302 上失败 9 处，说明它们能抓到这两个问题。
+
+| 驱动 | 单卡 | 双卡 |
+|---|---|---|
+| 550.54.15（12.4） | 30/30（torch 需要 12.6 以上驱动，python 用例 SKIP） | 30/30 |
+| 570.133.07（12.8） | 32/32（含 PyTorch） | 32/32（含 PyTorch） |
+| 580.178.04（13.0） | 32/32（含 PyTorch） | 32/32（含 PyTorch） |
+
+hook 一致性（606 项，hook 75 个，比 main 多 6 个：4 个池相关、2 个 `cuStreamDestroy`）、ABI 签名、session 路径、导出符号通过，`make test-nogpu` 20 项通过。
+`make cppcheck` 在这台机器（cppcheck 2.7）上报 2 处 `uninitvar`（`walk_graph_cost` 的 `type`、`loader.c` 的 `device_count`），main 上同样有且位置对应，不是这次引入的；CI 用的版本没有核对。
+host 位置的池未实测，走回退。

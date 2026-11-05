@@ -271,11 +271,13 @@ static unsigned int g_share_log_tick[MAX_DEVICE_COUNT] = {0};
  * registration itself survives fork via glibc's own atfork handler list, so
  * resetting it would just multiply-register on every fork generation. */
 static void capture_reg_reset_after_fork(void);
+static void pool_dev_reset_after_fork(void);
 
 void child_after_fork(void) {
   g_init_set = (pthread_once_t)PTHREAD_ONCE_INIT;
   /* Captures do not cross fork, and the registry lock may be held mid-update. */
   capture_reg_reset_after_fork();
+  pool_dev_reset_after_fork();   /* pool handles do not cross fork either */
   /* Drop the inherited sampling-lock descriptor. An OFD lock belongs to the
    * open file description, which fork SHARES -- so keeping this fd would
    * either make parent and child both think they own sampling (once
@@ -558,6 +560,12 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream);
 CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStream);
 CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
                      const CUmemAllocationProp *prop, unsigned long long flags);
+CUresult cuMemPoolCreate(CUmemoryPool *pool, const CUmemPoolProps *poolProps);
+CUresult cuMemPoolDestroy(CUmemoryPool pool);
+CUresult cuDeviceGetDefaultMemPool(CUmemoryPool *pool_out, CUdevice dev);
+CUresult cuDeviceGetMemPool(CUmemoryPool *pool, CUdevice dev);
+CUresult cuStreamDestroy_v2(CUstream hStream);
+CUresult cuStreamDestroy(CUstream hStream);
 CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
                                  CUmemoryPool pool, CUstream hStream);
 CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
@@ -639,6 +647,12 @@ entry_t cuda_hooks_entry[] = {
     {.name = "cuMemAllocAsync", .fn_ptr = cuMemAllocAsync},
     {.name = "cuMemAllocAsync_ptsz", .fn_ptr = cuMemAllocAsync_ptsz},
     {.name = "cuMemCreate", .fn_ptr = cuMemCreate},
+    {.name = "cuMemPoolCreate", .fn_ptr = cuMemPoolCreate},
+    {.name = "cuMemPoolDestroy", .fn_ptr = cuMemPoolDestroy},
+    {.name = "cuDeviceGetDefaultMemPool", .fn_ptr = cuDeviceGetDefaultMemPool},
+    {.name = "cuDeviceGetMemPool", .fn_ptr = cuDeviceGetMemPool},
+    {.name = "cuStreamDestroy_v2", .fn_ptr = cuStreamDestroy_v2},
+    {.name = "cuStreamDestroy", .fn_ptr = cuStreamDestroy},
     {.name = "cuMemAllocFromPoolAsync", .fn_ptr = cuMemAllocFromPoolAsync},
     {.name = "cuMemAllocFromPoolAsync_ptsz", .fn_ptr = cuMemAllocFromPoolAsync_ptsz},
     {.name = "cuGraphAddMemAllocNode", .fn_ptr = cuGraphAddMemAllocNode},
@@ -2013,7 +2027,7 @@ static int capture_reg_stream_device(CUstream stream, int ptsz) {
   return dev;
 }
 
-/* The device an asynchronous allocation on stream lands on: the stream's, which
+/* The device cuMemAllocAsync lands on: the stream's, which
  * need not be the current context's (V100: current context on device 0, stream
  * on device 1, the memory appears on device 1). During a capture it comes from
  * the registry. A stream joined to a capture is not in the registry and falls
@@ -4353,7 +4367,6 @@ DONE:
   return ret;
 }
 
-
 /* Multi-device cooperative launch: applies the per-device throttle by
  * extracting host_index from each entry's stream context. Rare API; we keep
  * the simple approach of throttling per entry rather than aggregating, so
@@ -4940,6 +4953,96 @@ DONE:
   return ret;
 }
 
+/* The device a memory pool lives on, which is where cuMemAllocFromPoolAsync's
+ * memory lands -- "may be from a device different than that of the specified
+ * hStream" (cuda.h), and measured so (V100, driver 580): neither the stream nor
+ * the current context decides. No API reports it: cuMemPoolGetAccess answers
+ * READWRITE for the owner and for a peer granted access alike. So it is noted
+ * where a handle comes from. A pool missing here -- imported, host-located, or
+ * past a full table -- falls back to the current context. */
+#define POOL_DEV_SLOTS 64
+typedef struct {
+  CUmemoryPool pool;   /* NULL = unused slot */
+  int dev;
+} pool_dev_t;
+static pool_dev_t g_pool_dev[POOL_DEV_SLOTS];
+static pthread_mutex_t g_pool_dev_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void pool_dev_reset_after_fork(void) {
+  memset(g_pool_dev, 0, sizeof(g_pool_dev));
+  pthread_mutex_init(&g_pool_dev_lock, NULL);
+}
+
+static void pool_dev_remember(CUmemoryPool pool, int dev) {
+  if (pool == NULL) return;
+  pthread_mutex_lock(&g_pool_dev_lock);
+  pool_dev_t *slot = NULL;
+  for (int i = 0; i < POOL_DEV_SLOTS; i++) {
+    if (g_pool_dev[i].pool == pool) { slot = &g_pool_dev[i]; break; }
+    if (slot == NULL && g_pool_dev[i].pool == NULL) slot = &g_pool_dev[i];
+  }
+  if (slot != NULL) {
+    slot->pool = pool;
+    slot->dev = dev;
+  } else {
+    LOGGER(VERBOSE, "memory pool table full, pool %p falls back to the current context", (void *)pool);
+  }
+  pthread_mutex_unlock(&g_pool_dev_lock);
+}
+
+static void pool_dev_forget(CUmemoryPool pool) {
+  pthread_mutex_lock(&g_pool_dev_lock);
+  for (int i = 0; i < POOL_DEV_SLOTS; i++) {
+    if (g_pool_dev[i].pool == pool) {
+      g_pool_dev[i].pool = NULL;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_pool_dev_lock);
+}
+
+/* The device cuMemAllocFromPoolAsync allocates on. */
+static CUresult pool_alloc_device(CUmemoryPool pool, CUdevice *device) {
+  int dev = -1;
+  pthread_mutex_lock(&g_pool_dev_lock);
+  for (int i = 0; pool != NULL && i < POOL_DEV_SLOTS; i++) {
+    if (g_pool_dev[i].pool == pool) { dev = g_pool_dev[i].dev; break; }
+  }
+  pthread_mutex_unlock(&g_pool_dev_lock);
+  if (dev >= 0) {
+    *device = (CUdevice)dev;
+    return CUDA_SUCCESS;
+  }
+  return CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, device);
+}
+
+CUresult cuMemPoolCreate(CUmemoryPool *pool, const CUmemPoolProps *poolProps) {
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemPoolCreate, pool, poolProps);
+  if (ret == CUDA_SUCCESS && pool != NULL && poolProps != NULL &&
+      poolProps->location.type == CU_MEM_LOCATION_TYPE_DEVICE) {
+    pool_dev_remember(*pool, poolProps->location.id);
+  }
+  return ret;
+}
+
+CUresult cuMemPoolDestroy(CUmemoryPool pool) {
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemPoolDestroy, pool);
+  if (ret == CUDA_SUCCESS) pool_dev_forget(pool);
+  return ret;
+}
+
+CUresult cuDeviceGetDefaultMemPool(CUmemoryPool *pool_out, CUdevice dev) {
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGetDefaultMemPool, pool_out, dev);
+  if (ret == CUDA_SUCCESS && pool_out != NULL) pool_dev_remember(*pool_out, (int)dev);
+  return ret;
+}
+
+CUresult cuDeviceGetMemPool(CUmemoryPool *pool, CUdevice dev) {
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGetMemPool, pool, dev);
+  if (ret == CUDA_SUCCESS && pool != NULL) pool_dev_remember(*pool, (int)dev);
+  return ret;
+}
+
 CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
                                  CUmemoryPool pool, CUstream hStream) {
   CUresult ret;
@@ -4952,7 +5055,7 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
   if (unlikely(dptr == NULL)) {
     goto CALL;
   }
-  ret = async_alloc_device(hStream, __CUDA_API_IS_PTSZ, &device);
+  ret = pool_alloc_device(pool, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -5005,7 +5108,7 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
   if (unlikely(dptr == NULL)) {
     goto CALL;
   }
-  ret = async_alloc_device(hStream, 1, &device);
+  ret = pool_alloc_device(pool, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -5296,6 +5399,30 @@ CUresult cuStreamEndCapture(CUstream hStream, CUgraph *phGraph) {
 
 CUresult cuStreamEndCapture_ptsz(CUstream hStream, CUgraph *phGraph) {
   return end_capture_and_discharge(hStream, phGraph, 1);
+}
+
+/* Destroying a stream during a capture it began: the driver accepts it (SUCCESS,
+ * V100, driver 580) and nothing can end that capture any more, so its charges go
+ * here. Only the origin stream, which is what the registry holds: a stream merely
+ * joined to a capture leaves it running. */
+extern CUresult _cuStreamDestroy(CUstream hStream);
+
+static CUresult stream_destroy_and_discharge(CUstream hStream) {
+  CUgraph capturing = capture_reg_graph(hStream, 0);
+  CUresult ret = _cuStreamDestroy(hStream);
+  if (ret == CUDA_SUCCESS && capturing != NULL) {
+    free_gpu_virt_memory_by_graph(capturing);
+    capture_reg_forget(capturing, NULL);
+  }
+  return ret;
+}
+
+CUresult cuStreamDestroy_v2(CUstream hStream) {
+  return stream_destroy_and_discharge(hStream);
+}
+
+CUresult cuStreamDestroy(CUstream hStream) {
+  return stream_destroy_and_discharge(hStream);
 }
 
 /* Second, deterministic discharge point for capture charges. cuStreamEnd
