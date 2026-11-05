@@ -535,7 +535,7 @@ host 位置的池未实测，走回退。
 
 | 表 | 初始槽数 | 上限 | 表项 |
 |---|---|---|---|
-| graph 成本（原 `GRAPH_COST_CACHE_SIZE`） | 4096 | 1 << 20 | 单卡信息内联，约 64 字节（原约 280）；跨卡 graph 的设备列表单独分配 |
+| graph 成本（原 `GRAPH_COST_CACHE_SIZE`） | 4096 | 1 << 20 | 单卡信息内联，约 72 字节（原约 280）；跨卡 graph 的设备列表单独分配 |
 | 捕获登记（原 `CAPTURE_REG_SLOTS`） | 64 | 1 << 16 | 键是 stream，per-thread 默认 stream 再加线程；NULL 映射成对应的特殊句柄 |
 | 池（原 `POOL_DEV_SLOTS`） | 64 | 1 << 16 | 池 → 设备 |
 
@@ -591,3 +591,68 @@ host 位置的池未实测，走回退。
 本次所有 graph 都稳定在约 12500 次/s，与首个 graph 一致，不影响限流精度。a2538e2 上未计费的 graph 比本次快约 2.5 倍，即修复前的限流绕过幅度；不限流是 10 倍。
 
 **仍未做的：** 没有实际跑 vLLM（`cu130` 以上的 torch 不带 V100 的 kernel，vLLM 对 V100 的支持也没确认），graph 数量仍是按源码推算的上限。没有在 595 驱动上跑（V100 不适用）。
+
+### 6.10 长时间运行的回收、内存安全与遗留项（2026-11-05，双 V100）
+
+**三张表会不会无休止增长。** 用带统计的变体（进程退出时打印容量和项数）把每条回收路径单独循环：
+
+| 路径（`probe_churn`，每种一个进程） | 次数 | 修复前 | 修复后 |
+|---|---|---|---|
+| exec 创建 + 销毁 | 3 万 | cost 容量 4096，项数 0 | 同左 |
+| 跨卡 exec（设备列表单独分配） | 5000 | cost 4096 / 0 | 同左 |
+| context 销毁（当前、非当前、带跨卡 exec） | 100–150 | 0 项 | 同左 |
+| primary reset、release 最后一个引用 | 60 | 0 项 | 同左 |
+| 捕获 + End | 20 万 | reg 容量 64，项数 0 | 同左 |
+| 捕获被作废、跨线程 End、捕获中销毁 stream | 3000–1 万 | reg 64 / 0 | 同左 |
+| 捕获中销毁 context | 150 | reg 64 / 0 | 同左 |
+| **捕获在 X 的 stream 上、当前 context 是 Y，销毁 X** | 150 | **reg 容量 256，项数 150，记账残留** | reg 64 / 0，记账释放 |
+| **线程带着打开的捕获退出** | 1 万 | 项数 1（线程 id 复用），但**被替换的旧 graph 记账再也退不掉** | 项数 1，旧记账在替换时释放 |
+| 池创建 + 销毁 | 2 万 | pool 容量 64，项数 0 | 同左 |
+| 反复取默认池、当前池 | 20 万 | pool 64 / 1 | 同左 |
+
+修复：登记表记下 stream 自己的 context（`BeginCapture` 之前读），任一 context 销毁都清掉记录并按 graph 退记账；同一键被新捕获替换时退掉旧 graph 的记账。
+
+有两条路径项数会涨，核实后是对的，项数等于应用真实持有的数量：
+- 建池不销毁、然后 reset 设备（60 项）：池在 reset 后仍有效，`cuMemPoolDestroy` 返回 0。
+- graph 建在 X、当前 context 为 Y 时 instantiate，然后销毁 X（150 项）：exec 归属 Y，X 销毁后 exec 仍能 launch 和销毁（`probe_ownr`）。
+
+表只增不缩，容量上限是历史峰值的约 2 倍：表项小（成本 72 字节，其余约 48），不值得为缩容增加复杂度。RSS 在高频循环下不涨（exec 3 万次 154656 → 155424 kB）；涉及 context 或作废捕获的路径多约 15～30 MB，是驱动自身的，是否随循环次数线性增长没有单独测量。
+
+**内存安全。** 之前 `VGPU_SANITIZE` 不覆盖 `libvgpu-control.so`，这次用测试专用构建（`-fsanitize=address,undefined` 作用于 hook 代码，导出表去掉 `dlsym`，`protect_shadow_gap=0`）在真机跑：
+`test_graph_mem_admission(_ptsz)`、`test_alloc_async_accounting(_ptsz)`、`test_vmm_accounting`、7 种循环全部 0 个 ASan、0 个 UBSan 报告。runtime（`.cu`）测试因不导出 `dlsym` 不经过本库，不在覆盖内。
+
+**遗留项：**
+
+| 项 | 结果 |
+|---|---|
+| `cuGraphLaunch` 限流按当前 context 查卡 | **真 bug，已修**。`CUDA_CORE_LIMIT_0=10`，d0 stream 上的 graph：当前 context 切到 d1 时从约 15500 涨到 110820 次/s；修复后 12715、13318、12508。普通 kernel 不受影响，驱动直接返回 `invalid resource handle`。成本表项记下 instantiate 时的设备，launch 少一次 `cuCtxGetDevice` |
+| 捕获 stream 的 context 被销毁时的记账残留 | 已修（上表） |
+| `run_tests_with_env.sh` 裸机双卡只配第一张 | 已改成配上全部 GPU；双卡上标准 `make test` 30/30，单卡机行为不变（只有一个 UUID） |
+| 13.x 头文件 | 用 CUDA 13.4 的 `cuda.h`：结构体布局、ABI 签名检查通过；`test_graph_mem_admission`、`test_alloc_async_accounting`、`test_vmm_accounting`（含 `_ptsz`）编译通过，未运行 |
+| cppcheck | 2.7 版只有 2 处 `uninitvar`（main 上同样有）；CI 用 ubuntu-24.04 自带版本，本次未核对 |
+
+已知边界：kernel 节点跨卡的 graph 只计到 instantiate 时的卡；不在成本表里的 exec（没有 kernel）仍按当前 context。
+
+**PyTorch 大量 graph**（`torch_many.py`，真实 `torch.cuda.CUDAGraph`，模拟 vLLM piecewise 的存活数量，驱动 580）：
+
+| 分配器 | graph 数 | 限额 | 结果 |
+|---|---|---|---|
+| 默认 | 1700 | 8192 MiB | 存活、回放、释放，再捕获一遍，退出时 cost 容量 4096、项数 0 |
+| 默认 | 5000 | 15500 MiB | 同上，容量自动扩到 8192，项数 0 |
+| 默认 | 5000 | 8192 MiB | 第 3691 个 OOM，不加载本库能过。每个 graph 约占 2.2 MiB 显存，算下来正好撞限额，是限额在正常工作 |
+| `cudaMallocAsync` | 1700 | 不加载本库 | 第 1010 个失败，即 6.8 的驱动 alloc node 上限，与本库无关 |
+
+捕获 + 回放 + 释放循环 3000 次：cost 容量 4096、项数 0。按上面的显存占用，1700 个 graph 约 3.7 GiB，vLLM 实际用量要结合它的模型层数看，这里没有跑 vLLM。
+
+**fork 压力**（`probe_fork`）：4 个线程持续改动三张表（含 800 个 graph 的增减），主线程反复 fork，每个子进程走一遍 hook 再 fork 一层：60 次 0 挂死 0 错误；ASan 构建下 25 次 0 报告。
+
+**回归**（提交 7b72dd0 / d40a89b，两者只差 cppcheck 写法）：
+
+| 驱动 | 单卡 | 双卡 |
+|---|---|---|
+| 550.54.15（12.4） | 30/30 | 30/30，单独跑的准入、记账（含 [X]、[Y]）全部通过 |
+| 580.178.04（13.0） | 未跑完（节点到期前优先其他项） | 32/32（含 PyTorch），标准 `make test` 30/30 |
+| 570.133.07（12.8） | 这两个提交未跑；上一提交 0286792 为 32/32 | 同左 |
+
+静态检查、`make test-nogpu`（21 项）、`make test-sanitize`（21 项）通过；跨卡 X2、X3 返回 OOM、X5 成功；`reclaim.sh`（550.54）拒绝 relaunch，占用 4032 MiB；限流速率见上。
+探针修正：`probe_fork` 最初在子进程传伪造句柄 `0x4321`，段错误在驱动内部，属于非法调用，已改用真实句柄。
