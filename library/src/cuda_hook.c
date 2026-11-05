@@ -4537,6 +4537,7 @@ typedef struct {
   slot_header_t h;        /* the exec */
   int64_t tokens;         /* sum of sm_launch_tokens() over all kernel nodes */
   CUcontext ctx;          /* current at instantiation: its teardown takes the exec along */
+  int launch_dev;         /* that context's device, what the tokens are charged to; -1 unknown */
   int mem_n;              /* devices allocated on, as graph_mem_t.n */
   graph_mem_dev_t mem1;   /* mem_n == 1 */
   graph_mem_dev_t *mem_more;  /* mem_n > 1: mem_n entries */
@@ -4643,12 +4644,19 @@ static void graph_cost_remember(CUgraphExec exec, int64_t tokens, const graph_me
   if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetCurrent, &ctx) != CUDA_SUCCESS) {
     ctx = NULL;   /* never swept by context: cuGraphExecDestroy still clears it */
   }
+  CUdevice device;
+  int launch_dev = -1;
+  if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device) == CUDA_SUCCESS) {
+    /* cppcheck-suppress uninitvar ; out-param of the call above, read only on success */
+    launch_dev = (int)device;
+  }
   int created;
   pthread_mutex_lock(&g_graph_cost_lock);
   graph_cost_entry_t *e = (graph_cost_entry_t *)slot_table_insert(&g_graph_cost, (uintptr_t)exec, 0, &created);
   if (e != NULL) {
     e->tokens = tokens;
     e->ctx = ctx;
+    e->launch_dev = launch_dev;
     graph_cost_store_mem(e, mem);
   } else if (!g_graph_cost_full_warned) {
     g_graph_cost_full_warned = 1;
@@ -4659,13 +4667,14 @@ static void graph_cost_remember(CUgraphExec exec, int64_t tokens, const graph_me
   pthread_mutex_unlock(&g_graph_cost_lock);
 }
 
-/* mem may be NULL; outputs are left untouched when exec is not cached. */
-static int graph_cost_lookup(CUgraphExec exec, int64_t *tokens, graph_mem_t *mem) {
+/* mem and launch_dev may be NULL; outputs are left untouched when exec is not cached. */
+static int graph_cost_lookup(CUgraphExec exec, int64_t *tokens, graph_mem_t *mem, int *launch_dev) {
   if (unlikely(!exec)) return 0;
   pthread_mutex_lock(&g_graph_cost_lock);
   const graph_cost_entry_t *e = (const graph_cost_entry_t *)slot_table_find(&g_graph_cost, (uintptr_t)exec, 0);
   if (e != NULL) {
     *tokens = e->tokens;
+    if (launch_dev != NULL) *launch_dev = e->launch_dev;
     if (mem != NULL) {
       mem->n = e->mem_n;
       if (e->mem_n == 1) {
@@ -4891,14 +4900,19 @@ CUresult cuGraphInstantiateWithParams_ptsz(CUgraphExec *phGraphExec, CUgraph hGr
 
 CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
   CUresult ret;
-  CUdevice device;
-  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
-  if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
-  int host_index = get_host_device_index_by_cuda_device(device);
   int64_t tokens = 1;
   graph_mem_t mem;
   mem.n = 0;   /* only n needs initialising: entries past it are never read */
-  graph_cost_lookup(hGraphExec, &tokens, &mem);
+  int launch_dev = -1;
+  graph_cost_lookup(hGraphExec, &tokens, &mem, &launch_dev);
+  /* The exec's device, not the current context's: an exec can be launched with
+   * another device current, and that must not slip past its device's limit. */
+  CUdevice device = (CUdevice)launch_dev;
+  if (launch_dev < 0) {
+    ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+    if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
+  }
+  int host_index = get_host_device_index_by_cuda_device(device);
   /* Throttle first: rate_limiter may sleep, and must not do so while
    * graph_mem_admit holds the cross-process device lock -- nor can the check
    * run before it and drop the lock, since another process could then take
@@ -4920,14 +4934,19 @@ DONE:
 
 CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
   CUresult ret;
-  CUdevice device;
-  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
-  if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
-  int host_index = get_host_device_index_by_cuda_device(device);
   int64_t tokens = 1;
   graph_mem_t mem;
   mem.n = 0;   /* only n needs initialising: entries past it are never read */
-  graph_cost_lookup(hGraphExec, &tokens, &mem);
+  int launch_dev = -1;
+  graph_cost_lookup(hGraphExec, &tokens, &mem, &launch_dev);
+  /* The exec's device, not the current context's: an exec can be launched with
+   * another device current, and that must not slip past its device's limit. */
+  CUdevice device = (CUdevice)launch_dev;
+  if (launch_dev < 0) {
+    ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+    if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
+  }
+  int host_index = get_host_device_index_by_cuda_device(device);
   /* Throttle first: rate_limiter may sleep, and must not do so while
    * graph_mem_admit holds the cross-process device lock -- nor can the check
    * run before it and drop the lock, since another process could then take
@@ -4952,7 +4971,7 @@ static CUresult graph_upload_admitted(CUgraphExec hGraphExec, CUstream hStream, 
   int64_t tokens = 1;
   graph_mem_t mem;
   mem.n = 0;   /* only n needs initialising: entries past it are never read */
-  graph_cost_lookup(hGraphExec, &tokens, &mem);
+  graph_cost_lookup(hGraphExec, &tokens, &mem, NULL);
   int lock_fd = -1;
   CUresult ret = graph_mem_admit(&mem, &lock_fd);
   if (unlikely(ret != CUDA_SUCCESS)) return ret;
