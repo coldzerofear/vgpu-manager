@@ -1896,23 +1896,25 @@ static CUcontext stream_context(CUstream stream, int ptsz) {
  * invalidated the capture -- falling back on the error would be too late. See
  * capture_reg_stream_device() for the value to use during a capture.
  *
- * With some other stream's capture open (other_capture), cuStreamGetDevice is
- * avoided on this stream too: asking through its context is measured safe for a
- * capture elsewhere (V100, drivers 550, 570, 580), cuStreamGetDevice is not known
- * to be. */
-static int stream_device(CUstream stream, int ptsz, int other_capture) {
+ * So it goes through the stream's context, which works on every driver measured
+ * (V100 550, 570, 580, RTX 5090 595), with a capture open elsewhere as well.
+ * cuStreamGetDevice only stands in if that fails: it is absent in 550, and on an idle
+ * stream with a capture open elsewhere it is measured only on 595. */
+static int stream_device(CUstream stream, int ptsz) {
   CUdevice device = -1;
-  cuda_entry_enum_t sym = ptsz ? CUDA_ENTRY_ENUM(cuStreamGetDevice_ptsz)
-                               : CUDA_ENTRY_ENUM(cuStreamGetDevice);
-  if (!other_capture && cuda_library_entry[sym].fn_ptr) {
-    CUresult ret = ((CUresult (*)(CUstream, CUdevice *))cuda_library_entry[sym].fn_ptr)(stream, &device);
+  CUcontext ctx = stream_context(stream, ptsz), popped = NULL;
+  if (ctx != NULL && _cuCtxPushCurrent(ctx) == CUDA_SUCCESS) {
+    CUresult ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+    _cuCtxPopCurrent(&popped);
     return ret == CUDA_SUCCESS ? (int)device : -1;
   }
-  CUcontext ctx = stream_context(stream, ptsz), popped = NULL;
-  if (ctx == NULL || _cuCtxPushCurrent(ctx) != CUDA_SUCCESS) return -1;
-  CUresult ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
-  _cuCtxPopCurrent(&popped);
-  return ret == CUDA_SUCCESS ? (int)device : -1;
+  cuda_entry_enum_t sym = ptsz ? CUDA_ENTRY_ENUM(cuStreamGetDevice_ptsz)
+                               : CUDA_ENTRY_ENUM(cuStreamGetDevice);
+  if (cuda_library_entry[sym].fn_ptr == NULL ||
+      ((CUresult (*)(CUstream, CUdevice *))cuda_library_entry[sym].fn_ptr)(stream, &device) != CUDA_SUCCESS) {
+    return -1;
+  }
+  return (int)device;
 }
 
 /* Graph currently being captured into by hStream, or NULL if that can't be
@@ -2043,13 +2045,6 @@ static CUgraph capture_reg_graph(CUstream stream, int ptsz) {
   return graph;
 }
 
-static int capture_reg_any(void) {
-  pthread_mutex_lock(&g_capture_reg_lock);
-  int any = g_capture_reg.count != 0;
-  pthread_mutex_unlock(&g_capture_reg_lock);
-  return any;
-}
-
 /* The device and context of a stream about to begin a capture. The last moment
  * they can be asked: see stream_device(). A stream that is already part of a
  * capture is not asked at all. The per-thread default stream is the current
@@ -2057,7 +2052,7 @@ static int capture_reg_any(void) {
 static capture_origin_t stream_origin_before_capture(CUstream stream, int ptsz) {
   capture_origin_t origin = {-1, NULL};
   if (stream == NULL || stream == CU_STREAM_PER_THREAD || stream_is_capturing(stream, ptsz)) return origin;
-  origin.dev = stream_device(stream, ptsz, capture_reg_any());
+  origin.dev = stream_device(stream, ptsz);
   origin.ctx = stream_context(stream, ptsz);
   return origin;
 }
@@ -2085,7 +2080,7 @@ static CUresult async_alloc_device(CUstream stream, int ptsz, CUdevice *device) 
   int dev = -1;
   if (stream != NULL && stream != CU_STREAM_PER_THREAD) {
     dev = stream_is_capturing(stream, ptsz) ? capture_reg_stream_device(stream, ptsz)
-                                            : stream_device(stream, ptsz, capture_reg_any());
+                                            : stream_device(stream, ptsz);
   }
   if (dev >= 0) {
     *device = (CUdevice)dev;
@@ -2216,6 +2211,17 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
   metrics_record_gap_throttle(host_index, gpu_us, sleep_us);
   g_dev_hot[host_index].last_launch_ns = monotonic_ns();
   pthread_mutex_unlock(&g_gap_lock[host_index]);
+}
+
+/* gap_begin() for a graph launch. The gap's events belong to the current context, and
+ * are made once per device: with another device current they would be made in the
+ * wrong one for good. Such a launch stays on the token bucket, and still counts as
+ * activity on its device, or the next launch there would pass for one after an idle
+ * gap. */
+static int graph_gap_begin(int host_index, CUstream stream, int on_current_device) {
+  if (on_current_device) return gap_begin(host_index, stream);
+  if (host_index >= 0) g_dev_hot[host_index].last_launch_ns = monotonic_ns();
+  return 0;
 }
 
 static batch_t batches[MAX_DEVICE_COUNT / DEVICE_BATCH_SIZE] = {};
@@ -4946,10 +4952,7 @@ CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
   int lock_fd = -1;
   ret = graph_mem_admit(&mem, &lock_fd);
   if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
-  /* The gap's events belong to the current context, and are made once per device:
-   * with another device current they would be made in the wrong one for good. Such
-   * a launch stays on the token bucket. */
-  int gap = current == device ? gap_begin(host_index, hStream) : 0;
+  int gap = graph_gap_begin(host_index, hStream, current == device);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuGraphLaunch),
                          hGraphExec, hStream);
   /* The mapping is done once the call returns; gap_end may synchronize and
@@ -4982,10 +4985,7 @@ CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
   int lock_fd = -1;
   ret = graph_mem_admit(&mem, &lock_fd);
   if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
-  /* The gap's events belong to the current context, and are made once per device:
-   * with another device current they would be made in the wrong one for good. Such
-   * a launch stays on the token bucket. */
-  int gap = current == device ? gap_begin(host_index, hStream) : 0;
+  int gap = graph_gap_begin(host_index, hStream, current == device);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphLaunch_ptsz,
                          hGraphExec, hStream);
   /* The mapping is done once the call returns; gap_end may synchronize and
