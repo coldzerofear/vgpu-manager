@@ -811,7 +811,25 @@ cppcheck：CI 用的 2.13（ubuntu-24.04）在全部代码上没有报告；6.9�
 
 TSan 只覆盖这两个测试程序，不包含 fork，也不覆盖多进程。
 
+#### 同一台机器切到驱动 570.133.07（CUDA 12.8）
+
+5090 必须用开源内核模块和 GSP 固件（`nvidia-kernel-source-570-open`、`nvidia-firmware-570-570.133.07`），闭源模块报 "requires use of the NVIDIA open kernel modules"。550 不支持这张卡。
+
+| 项 | 结果 |
+|---|---|
+| `probe_capture_apis` 裸跑和挂库 | 输出完全相同，也和 595 的表相同（同样 900→901） |
+| accounting、`_ptsz`，graph 准入、`_ptsz`，VMM，test_alloc，pool async、`_ptsz`，test_mem_create | 全部 rc=0；[Z]、[AA]、[AB]、[K] 的数值和 595 相同 |
+| [V] 按位置取池 | 570 没有这两个 API（返回 500），打印未运行；hook 不崩，只打告警 |
+| `probe_churn`：exec_update、capture_begin_ctx_destroyed、capture_invalidated、capture_other_ctx_destroyed、ctx_multi、pool_get | 无失败，count 为 0（pool_get 为 1） |
+| ASan+UBSan | 只跑完 `test_graph_mem_admission`，无报告。其余四项没有结果：100 秒的上限是这次时间不够设的，补跑时命令写错，没来得及再跑 |
+
+这台机器上没有 CUDA 12 工具链，所以测试是用 13.2 头文件编译的，有两个限制：
+
+- `.cu` 测试和 PyTorch cu130 在 570 上跑不了（"driver version is insufficient"）。所以 `probe_launch_device`、GAP 相关和 runtime 测试只有 595 的数据。
+- 13.x 头文件把 `cuCtxCreate` 映射成 `cuCtxCreate_v4`，测试传 NULL 参数；570 的 `_v4` 不接受 NULL，直接段错误（最小程序不加载本库也复现，和库无关）。这次临时把测试里的建 context 改成 `_v2` 才跑通，未提交。用与驱动匹配的工具链编译的程序碰不到这个问题。
+
 #### 没有验证的
 
-- 550、580 上这次的提交；570 见下。`stream_device()` 现在走的路径就是 550 上一直走的路径，且 6.6 已在 570/580 上测过这些查询是安全的，但整体回归没有在旧驱动上重跑。
+- 550、580 上这次的提交（550 不支持 5090）。`stream_device()` 现在走的路径就是 550 上一直走的路径，这些查询在 6.6 已于 550/570/580 上测过，但这几个提交没有在这两个驱动上整体回归。
+- 570 上的 `make test` 全量：缺 12.x 工具链，只跑了上表这些 C 用例和探针；570 上的 ASan 只覆盖一项。
 - vLLM 本身。
