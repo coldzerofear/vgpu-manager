@@ -1872,6 +1872,17 @@ static int stream_is_capturing(CUstream stream, int ptsz) {
 extern CUresult _cuCtxPushCurrent(CUcontext ctx);
 extern CUresult _cuCtxPopCurrent(CUcontext *pctx);
 
+/* The context hStream belongs to, or NULL. Same restriction as stream_device(). */
+static CUcontext stream_context(CUstream stream, int ptsz) {
+  cuda_entry_enum_t sym = ptsz ? CUDA_ENTRY_ENUM(cuStreamGetCtx_ptsz) : CUDA_ENTRY_ENUM(cuStreamGetCtx);
+  CUcontext ctx = NULL;
+  if (!cuda_library_entry[sym].fn_ptr ||
+      ((CUresult (*)(CUstream, CUcontext *))cuda_library_entry[sym].fn_ptr)(stream, &ctx) != CUDA_SUCCESS) {
+    return NULL;
+  }
+  return ctx;
+}
+
 /* The device hStream belongs to, or -1 if that can't be established.
  *
  * NEVER while a capture involves the stream: there cuStreamGetDevice answers
@@ -1888,13 +1899,8 @@ static int stream_device(CUstream stream, int ptsz) {
     CUresult ret = ((CUresult (*)(CUstream, CUdevice *))cuda_library_entry[sym].fn_ptr)(stream, &device);
     return ret == CUDA_SUCCESS ? (int)device : -1;
   }
-  sym = ptsz ? CUDA_ENTRY_ENUM(cuStreamGetCtx_ptsz) : CUDA_ENTRY_ENUM(cuStreamGetCtx);
-  if (!cuda_library_entry[sym].fn_ptr) return -1;
-  CUcontext ctx = NULL, popped = NULL;
-  if (((CUresult (*)(CUstream, CUcontext *))cuda_library_entry[sym].fn_ptr)(stream, &ctx) != CUDA_SUCCESS ||
-      ctx == NULL || _cuCtxPushCurrent(ctx) != CUDA_SUCCESS) {
-    return -1;
-  }
+  CUcontext ctx = stream_context(stream, ptsz), popped = NULL;
+  if (ctx == NULL || _cuCtxPushCurrent(ctx) != CUDA_SUCCESS) return -1;
   CUresult ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   _cuCtxPopCurrent(&popped);
   return ret == CUDA_SUCCESS ? (int)device : -1;
@@ -1957,9 +1963,16 @@ static CUgraph stream_capture_graph(CUstream stream, int ptsz) {
 typedef struct {
   slot_header_t h;       /* stream, plus the thread for the per-thread stream */
   CUgraph graph;
-  CUcontext ctx;
-  int stream_dev;        /* device of the stream, read before the capture began; -1 unknown */
+  CUcontext ctx;         /* current when the capture began */
+  CUcontext stream_ctx;  /* the stream's, which need not be that one; NULL unknown */
+  int stream_dev;        /* the stream's device; -1 unknown */
 } capture_reg_t;
+/* What can only be asked of a stream before it begins a capture: see stream_device(). */
+typedef struct {
+  int dev;
+  CUcontext ctx;
+} capture_origin_t;
+
 static slot_table_t g_capture_reg = SLOT_TABLE_INIT(capture_reg_t, 64, 1u << 16);
 static pthread_mutex_t g_capture_reg_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1975,7 +1988,11 @@ static void capture_reg_key(CUstream stream, int ptsz, uintptr_t *key, uintptr_t
   }
 }
 
-static void capture_reg_begin(CUstream stream, int ptsz, CUgraph graph, int stream_dev) {
+/* A record already there for this stream or thread belongs to a capture that is
+ * over, or the driver would not have begun this one: its thread exited without
+ * ending it, most likely. Nothing else would retire its charges now that its key
+ * is taken. */
+static void capture_reg_begin(CUstream stream, int ptsz, CUgraph graph, const capture_origin_t *origin) {
   if (graph == NULL) return;
   CUcontext ctx = NULL;
   if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetCurrent, &ctx) != CUDA_SUCCESS) {
@@ -1984,17 +2001,21 @@ static void capture_reg_begin(CUstream stream, int ptsz, CUgraph graph, int stre
   uintptr_t key, key2;
   capture_reg_key(stream, ptsz, &key, &key2);
   int created;
+  CUgraph displaced = NULL;
   pthread_mutex_lock(&g_capture_reg_lock);
   capture_reg_t *e = (capture_reg_t *)slot_table_insert(&g_capture_reg, key, key2, &created);
   if (e != NULL) {
+    if (!created && e->graph != graph) displaced = e->graph;
     e->graph = graph;
     e->ctx = ctx;
-    e->stream_dev = stream_dev;
+    e->stream_ctx = origin->ctx;
+    e->stream_dev = origin->dev;
   } else {
     LOGGER(VERBOSE, "capture registry full, graph %p falls back to lookup at end of capture",
            (void *)graph);
   }
   pthread_mutex_unlock(&g_capture_reg_lock);
+  free_gpu_virt_memory_by_graph(displaced);   /* NULL is a no-op */
 }
 
 /* The graph stream's capture began with, or NULL if it was not recorded. */
@@ -2009,13 +2030,16 @@ static CUgraph capture_reg_graph(CUstream stream, int ptsz) {
   return graph;
 }
 
-/* The device of a stream about to begin a capture, -1 if unknown. The last
- * moment it can be asked: see stream_device(). A stream that is already part of
- * a capture is not asked at all. The per-thread default stream is the current
+/* The device and context of a stream about to begin a capture. The last moment
+ * they can be asked: see stream_device(). A stream that is already part of a
+ * capture is not asked at all. The per-thread default stream is the current
  * context's by definition. */
-static int stream_device_before_capture(CUstream stream, int ptsz) {
-  if (stream == NULL || stream == CU_STREAM_PER_THREAD || stream_is_capturing(stream, ptsz)) return -1;
-  return stream_device(stream, ptsz);
+static capture_origin_t stream_origin_before_capture(CUstream stream, int ptsz) {
+  capture_origin_t origin = {-1, NULL};
+  if (stream == NULL || stream == CU_STREAM_PER_THREAD || stream_is_capturing(stream, ptsz)) return origin;
+  origin.dev = stream_device(stream, ptsz);
+  origin.ctx = stream_context(stream, ptsz);
+  return origin;
 }
 
 /* The device stream's capture began on, -1 if the registry has no answer. */
@@ -2055,24 +2079,48 @@ static void capture_reg_reset_after_fork(void) {
   pthread_mutex_init(&g_capture_reg_lock, NULL);
 }
 
-/* Forget captures by graph (ended) or, with graph NULL, by context (torn down). */
-struct capture_reg_sweep {
-  CUgraph graph;
-  CUcontext ctx;
-};
-
-static int capture_reg_selected(void *cell, void *arg) {
-  const capture_reg_t *e = (const capture_reg_t *)cell;
-  const struct capture_reg_sweep *s = (const struct capture_reg_sweep *)arg;
-  return s->graph != NULL ? e->graph == s->graph : e->ctx == s->ctx;
+static int capture_reg_of_graph(void *cell, void *arg) {
+  return ((capture_reg_t *)cell)->graph == (CUgraph)arg;
 }
 
+/* A batch of the records of a context going away, handing back their graphs: the
+ * charges are retired off the registry's lock. */
+struct capture_reg_ctx_sweep {
+  CUcontext ctx;
+  size_t n;
+  CUgraph graphs[32];
+};
+
+static int capture_reg_of_ctx(void *cell, void *arg) {
+  const capture_reg_t *e = (const capture_reg_t *)cell;
+  struct capture_reg_ctx_sweep *s = (struct capture_reg_ctx_sweep *)arg;
+  if (s->n == sizeof(s->graphs) / sizeof(s->graphs[0])) return 0;
+  if (e->ctx != s->ctx && e->stream_ctx != s->ctx) return 0;
+  s->graphs[s->n++] = e->graph;
+  return 1;
+}
+
+/* Forget captures by graph (ended) or, with graph NULL, by context (torn down).
+ * Either context of a capture ends it. The stream's may not be the one its charges
+ * were recorded under, which free_gpu_virt_memory_by_ctx() goes by, so they go here
+ * by graph too. */
 static void capture_reg_forget(CUgraph graph, CUcontext ctx) {
-  if (graph == NULL && ctx == NULL) return;
-  struct capture_reg_sweep sweep = {graph, ctx};
-  pthread_mutex_lock(&g_capture_reg_lock);
-  slot_table_retire_if(&g_capture_reg, capture_reg_selected, &sweep);
-  pthread_mutex_unlock(&g_capture_reg_lock);
+  if (graph != NULL) {
+    pthread_mutex_lock(&g_capture_reg_lock);
+    slot_table_retire_if(&g_capture_reg, capture_reg_of_graph, graph);
+    pthread_mutex_unlock(&g_capture_reg_lock);
+    return;
+  }
+  if (ctx == NULL) return;
+  struct capture_reg_ctx_sweep sweep;
+  sweep.ctx = ctx;
+  do {
+    sweep.n = 0;
+    pthread_mutex_lock(&g_capture_reg_lock);
+    slot_table_retire_if(&g_capture_reg, capture_reg_of_ctx, &sweep);
+    pthread_mutex_unlock(&g_capture_reg_lock);
+    for (size_t i = 0; i < sweep.n; i++) free_gpu_virt_memory_by_graph(sweep.graphs[i]);
+  } while (sweep.n == sizeof(sweep.graphs) / sizeof(sweep.graphs[0]));
 }
 
 /* Returns 1 if this launch enters the GAP path -- the caller MUST then call
@@ -5329,37 +5377,37 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
  * them loses the caller's capture mode in one direction and reads it from an
  * unset register in the other. */
 CUresult cuStreamBeginCapture(CUstream hStream) {
-  int dev = stream_device_before_capture(hStream, __CUDA_API_IS_PTSZ);
+  capture_origin_t origin = stream_origin_before_capture(hStream, __CUDA_API_IS_PTSZ);
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture), hStream);
   if (ret == CUDA_SUCCESS) {
-    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ), dev);
+    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ), &origin);
   }
   return ret;
 }
 
 CUresult cuStreamBeginCapture_v2(CUstream hStream, CUstreamCaptureMode mode) {
-  int dev = stream_device_before_capture(hStream, __CUDA_API_IS_PTSZ);
+  capture_origin_t origin = stream_origin_before_capture(hStream, __CUDA_API_IS_PTSZ);
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture_v2), hStream, mode);
   if (ret == CUDA_SUCCESS) {
-    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ), dev);
+    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ), &origin);
   }
   return ret;
 }
 
 CUresult cuStreamBeginCapture_ptsz(CUstream hStream) {
-  int dev = stream_device_before_capture(hStream, 1);
+  capture_origin_t origin = stream_origin_before_capture(hStream, 1);
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamBeginCapture_ptsz, hStream);
   if (ret == CUDA_SUCCESS) {
-    capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1), dev);
+    capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1), &origin);
   }
   return ret;
 }
 
 CUresult cuStreamBeginCapture_v2_ptsz(CUstream hStream, CUstreamCaptureMode mode) {
-  int dev = stream_device_before_capture(hStream, 1);
+  capture_origin_t origin = stream_origin_before_capture(hStream, 1);
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamBeginCapture_v2_ptsz, hStream, mode);
   if (ret == CUDA_SUCCESS) {
-    capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1), dev);
+    capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1), &origin);
   }
   return ret;
 }
@@ -5368,12 +5416,12 @@ CUresult cuStreamBeginCaptureToGraph(CUstream hStream, CUgraph hGraph,
                                      const CUgraphNode *dependencies,
                                      const CUgraphEdgeData *dependencyData,
                                      size_t numDependencies, CUstreamCaptureMode mode) {
-  int dev = stream_device_before_capture(hStream, __CUDA_API_IS_PTSZ);
+  capture_origin_t origin = stream_origin_before_capture(hStream, __CUDA_API_IS_PTSZ);
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCaptureToGraph),
                                   hStream, hGraph, dependencies, dependencyData,
                                   numDependencies, mode);
   if (ret == CUDA_SUCCESS) {
-    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, hGraph, dev);
+    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, hGraph, &origin);
   }
   return ret;
 }
@@ -5382,12 +5430,12 @@ CUresult cuStreamBeginCaptureToGraph_ptsz(CUstream hStream, CUgraph hGraph,
                                           const CUgraphNode *dependencies,
                                           const CUgraphEdgeData *dependencyData,
                                           size_t numDependencies, CUstreamCaptureMode mode) {
-  int dev = stream_device_before_capture(hStream, 1);
+  capture_origin_t origin = stream_origin_before_capture(hStream, 1);
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamBeginCaptureToGraph_ptsz,
                                   hStream, hGraph, dependencies, dependencyData,
                                   numDependencies, mode);
   if (ret == CUDA_SUCCESS) {
-    capture_reg_begin(hStream, 1, hGraph, dev);
+    capture_reg_begin(hStream, 1, hGraph, &origin);
   }
   return ret;
 }

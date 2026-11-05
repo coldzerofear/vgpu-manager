@@ -66,6 +66,9 @@
  *
  *   [W] more pools than the table starts with, and its slots coming back.
  *
+ *   [X] [Y] a capture dying with its stream's context, and one left open by a thread
+ *       that exited.
+ *
  *   [H] [I] [J] a capture left open when its context goes -- cuCtxDestroy, a
  *       primary-context reset, the release of its last reference. The driver
  *       destroys the graphs with no cuGraphDestroy; the teardown hooks retire
@@ -1264,6 +1267,74 @@ static int pool_table_overflow(CUdevice dev) {
   return failed;
 }
 
+/* --------------------------------------------------------------------- [X] --
+ * A capture on a stream of a context that is not the current one, when the
+ * stream's context goes: its record and its charges go too, though they were
+ * recorded under the current context. */
+static int capture_of_other_context_is_retired(CUdevice dev, CUcontext back) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+  long long before = ledger_used_self();
+  long long during = before;
+  for (int i = 0; i < 40; i++) {
+    CUcontext x = NULL, popped = NULL;
+    CUstream s = NULL;
+    CHECK_DRV_API(CUCTX_CREATE(&x, 0, dev));
+    CHECK_DRV_API(cuStreamCreate(&s, CU_STREAM_NON_BLOCKING));
+    CHECK_DRV_API(cuCtxPopCurrent(&popped));
+    CHECK_DRV_API(cuCtxSetCurrent(back));
+    CHECK_DRV_API(cuStreamBeginCapture(s, CU_STREAM_CAPTURE_MODE_RELAXED));
+    CUdeviceptr dptr = 0;
+    CHECK_DRV_API(cuMemAllocAsync(&dptr, 16u << 20, s));
+    during = ledger_used_self();
+    CHECK_DRV_API(cuCtxDestroy(x));
+    CHECK_DRV_API(cuCtxSetCurrent(back));
+  }
+  long long after = ledger_used_self();
+  printf("  ledger: %.0f MiB before, %.0f MiB in the last capture, %.0f MiB after\n",
+         MIB(before), MIB(during), MIB(after));
+  if (during - before < (16 << 20)) { printf("  FAIL: not charged\n"); return 1; }
+  if (after != before) { printf("  FAIL: %.0f MiB left charged\n", MIB(after - before)); return 1; }
+  return 0;
+}
+
+/* --------------------------------------------------------------------- [Y] --
+ * A thread exiting with a capture open on its default stream, and later threads
+ * doing the same under the same thread id: the record of the earlier one is
+ * displaced, which must retire its charges, as nothing else ever could. */
+static CUcontext g_y_ctx;
+static size_t g_y_chunk;
+static void *open_capture_and_exit(void *arg) {
+  (void)arg;
+  cuCtxSetCurrent(g_y_ctx);
+  cuStreamBeginCapture(CU_STREAM_PER_THREAD, CU_STREAM_CAPTURE_MODE_RELAXED);
+  CUdeviceptr dptr = 0;
+  cuMemAllocAsync(&dptr, g_y_chunk, CU_STREAM_PER_THREAD);
+  return NULL;
+}
+
+static int thread_exit_mid_capture(CUcontext ctx) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  g_y_ctx = ctx;
+  g_y_chunk = freeb / 4;
+  long long before = ledger_used_self();
+  /* Five charges this size would not fit the limit if they added up. */
+  for (int i = 0; i < 20; i++) {
+    pthread_t t;
+    pthread_create(&t, NULL, open_capture_and_exit, NULL);
+    pthread_join(t, NULL);
+  }
+  long long after = ledger_used_self();
+  printf("  ledger after 20 threads: %.0f MiB (one capture of %.0f MiB still on record)\n",
+         MIB(after - before), MIB(g_y_chunk));
+  if (after - before > (long long)g_y_chunk) {
+    printf("  FAIL: %.0f MiB charged by captures whose threads are gone\n", MIB(after - before));
+    return 1;
+  }
+  return 0;
+}
+
 /* ------------------------------------------------------------ concurrency --
  * [M] Threads capturing concurrently on their own streams, every third capture
  * invalidated: every charge comes off. Thread-local mode, so one thread's
@@ -1551,6 +1622,10 @@ int main(void) {
            abandoned_capture_retired_by_primary(device, ctx, 1));
   RUN_CASE("[J] a capture abandoned when the primary context's last reference goes",
            abandoned_capture_retired_by_primary(device, ctx, 0));
+  RUN_CASE("[X] a capture dies with its stream's context, current or not",
+           capture_of_other_context_is_retired(device, ctx));
+  RUN_CASE("[Y] a capture left by an exited thread is retired when displaced",
+           thread_exit_mid_capture(ctx));
   trim_graph_pool(device);
   #undef RUN_CASE
 
