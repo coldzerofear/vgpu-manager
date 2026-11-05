@@ -999,6 +999,10 @@ typedef enum {
   /** cuStreamGetCtx_ptsz */
   CUDA_ENTRY_ENUM(cuStreamGetCtx_ptsz),
   CUDA_ENTRY_ENUM(cuStreamGetCtx_v2_ptsz),
+  /** cuStreamGetDevice */
+  CUDA_ENTRY_ENUM(cuStreamGetDevice),
+  /** cuStreamGetDevice_ptsz */
+  CUDA_ENTRY_ENUM(cuStreamGetDevice_ptsz),
   CUDA_ENTRY_ENUM(cuGreenCtxStreamCreate),
   /** cuStreamIsCapturing */
   CUDA_ENTRY_ENUM(cuStreamIsCapturing),

@@ -53,6 +53,12 @@
  *       graph was recorded when the capture began (capture_reg_begin) and the
  *       end-of-capture hook discharges on CUDA_ERROR_STREAM_CAPTURE_INVALIDATED.
  *
+ *   [Q] [R] [S] a capture ended where the driver refuses it, from another thread,
+ *       on a joined stream, unjoined: released once the capture is over.
+ *
+ *   [T] an async allocation is checked on the device of its stream, not of the
+ *       current context, also in a capture (needs two devices).
+ *
  *   [H] [I] [J] a capture left open when its context goes -- cuCtxDestroy, a
  *       primary-context reset, the release of its last reference. The driver
  *       destroys the graphs with no cuGraphDestroy; the teardown hooks retire
@@ -808,6 +814,301 @@ static int capture_to_graph_invalidation_is_retired(CUstream stream) {
 #endif
 }
 
+/* --------------------------------------------------------------------- [Q] --
+ * Ending a capture from another thread. In GLOBAL and THREAD_LOCAL mode the
+ * driver refuses with CUDA_ERROR_STREAM_CAPTURE_WRONG_THREAD and terminates
+ * the capture all the same: the stream reports no capture afterwards, and an
+ * end on the right thread answers CUDA_ERROR_ILLEGAL_STATE (V100, driver 550).
+ * No graph comes out and nothing else ends it, so that refused end is the last
+ * chance to retire the charges. In RELAXED mode the end simply succeeds. */
+typedef struct {
+  CUcontext ctx;
+  CUstream stream;
+  CUgraph graph;
+  CUresult ret;
+} end_elsewhere_t;
+
+static void *end_elsewhere(void *arg) {
+  end_elsewhere_t *e = (end_elsewhere_t *)arg;
+  cuCtxSetCurrent(e->ctx);
+  e->ret = cuStreamEndCapture(e->stream, &e->graph);
+  return NULL;
+}
+
+static int wrong_thread_end_is_retired(CUcontext ctx, CUstream stream) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  size_t chunk = freeb / 4;
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
+
+  static const struct { CUstreamCaptureMode mode; const char *name; CUresult want; } modes[] = {
+    {CU_STREAM_CAPTURE_MODE_GLOBAL, "GLOBAL", CUDA_ERROR_STREAM_CAPTURE_WRONG_THREAD},
+    {CU_STREAM_CAPTURE_MODE_THREAD_LOCAL, "THREAD_LOCAL", CUDA_ERROR_STREAM_CAPTURE_WRONG_THREAD},
+    {CU_STREAM_CAPTURE_MODE_RELAXED, "RELAXED", CUDA_SUCCESS},
+  };
+  int failed = 0;
+  for (size_t m = 0; m < sizeof(modes) / sizeof(modes[0]); m++) {
+    long long before = ledger_used_self();
+    CHECK_DRV_API(cuStreamBeginCapture(stream, modes[m].mode));
+    CUdeviceptr dptr = 0;
+    CUresult a = cuMemAllocAsync(&dptr, chunk, stream);
+    long long during = ledger_used_self();
+    end_elsewhere_t e = {ctx, stream, NULL, CUDA_SUCCESS};
+    pthread_t t;
+    pthread_create(&t, NULL, end_elsewhere, &e);
+    pthread_join(t, NULL);
+    long long after = ledger_used_self();
+    printf("  %-12s end from another thread -> %d; ledger %.0f / %.0f / %.0f MiB\n",
+           modes[m].name, (int)e.ret, MIB(before), MIB(during), MIB(after));
+    if (e.graph != NULL) cuGraphDestroy(e.graph);
+    if (a != CUDA_SUCCESS) { describe("cuMemAllocAsync", a); failed = 1; continue; }
+    if (e.ret != modes[m].want) {
+      printf("  FAIL: expected %d from the end on another thread\n", (int)modes[m].want);
+      failed = 1;
+    }
+    if (during - before < (long long)chunk) {
+      printf("  FAIL: the allocation in capture was not charged\n");
+      failed = 1;
+    }
+    if (after != before) {
+      printf("  FAIL: %.0f MiB left charged by a capture that is over\n", MIB(after - before));
+      failed = 1;
+    }
+    /* The stream must be usable for the next capture. */
+    CUgraph g = NULL;
+    CHECK_DRV_API(cuStreamBeginCapture(stream, modes[m].mode));
+    CHECK_DRV_API(cuStreamEndCapture(stream, &g));
+    if (g != NULL) cuGraphDestroy(g);
+  }
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [R] --
+ * Ending a capture on a stream that joined it, not the origin: the driver
+ * answers CUDA_ERROR_STREAM_CAPTURE_UNMATCHED and invalidates the capture, so
+ * the end on the origin stream reports INVALIDATED, and retires the charges. */
+static int unmatched_end_is_retired(CUstream origin) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  size_t chunk = freeb / 4;
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
+
+  CUstream side = NULL;
+  CUevent ev = NULL;
+  CHECK_DRV_API(cuStreamCreate(&side, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuEventCreate(&ev, CU_EVENT_DISABLE_TIMING));
+  long long before = ledger_used_self();
+  CHECK_DRV_API(cuStreamBeginCapture(origin, CU_STREAM_CAPTURE_MODE_RELAXED));
+  CHECK_DRV_API(cuEventRecord(ev, origin));
+  CHECK_DRV_API(cuStreamWaitEvent(side, ev, 0));
+  CUdeviceptr dptr = 0;
+  CUresult a = cuMemAllocAsync(&dptr, chunk, side);
+  long long during = ledger_used_self();
+  CUgraph g = NULL;
+  CUresult e1 = cuStreamEndCapture(side, &g);
+  long long kept = ledger_used_self();
+  CUresult e2 = cuStreamEndCapture(origin, &g);
+  long long after = ledger_used_self();
+  describe("cuStreamEndCapture (joined stream)", e1);
+  describe("cuStreamEndCapture (origin)", e2);
+  printf("  ledger: %.0f MiB before, %.0f MiB during capture, %.0f MiB after\n",
+         MIB(before), MIB(during), MIB(after));
+  if (a == CUDA_SUCCESS && kept - before < (long long)chunk) {
+    printf("  FAIL: the end on the joined stream dropped the charge before the origin ended\n");
+    return 1;
+  }
+  int failed = 0;
+  if (a != CUDA_SUCCESS) failed = 1;
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged\n", MIB(after - before));
+    failed = 1;
+  }
+  cuEventDestroy(ev);
+  cuStreamDestroy(side);
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [S] --
+ * A fork not joined back: CUDA_ERROR_STREAM_CAPTURE_UNJOINED and the capture is
+ * over, so its charges go. A NULL phGraph is no refusal: the driver answers
+ * CUDA_SUCCESS and the capture is over too (V100, drivers 550, 570, 580). */
+static int other_ends_release(CUstream origin) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+
+  size_t freeb = 0;
+  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
+  size_t chunk = freeb / 4;
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
+
+  int failed = 0;
+  CUstream side = NULL;
+  CUevent ev = NULL;
+  CHECK_DRV_API(cuStreamCreate(&side, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuEventCreate(&ev, CU_EVENT_DISABLE_TIMING));
+  long long before = ledger_used_self();
+  CHECK_DRV_API(cuStreamBeginCapture(origin, CU_STREAM_CAPTURE_MODE_RELAXED));
+  CHECK_DRV_API(cuEventRecord(ev, origin));
+  CHECK_DRV_API(cuStreamWaitEvent(side, ev, 0));
+  CUdeviceptr dptr = 0;
+  CUresult a = cuMemAllocAsync(&dptr, chunk, side);
+  long long during = ledger_used_self();
+  CUgraph g = NULL;
+  CUresult e = cuStreamEndCapture(origin, &g);
+  long long after = ledger_used_self();
+  describe("cuStreamEndCapture (fork not joined)", e);
+  printf("  ledger: %.0f MiB before, %.0f MiB during capture, %.0f MiB after\n",
+         MIB(before), MIB(during), MIB(after));
+  if (g != NULL) cuGraphDestroy(g);
+  if (a != CUDA_SUCCESS || e != CUDA_ERROR_STREAM_CAPTURE_UNJOINED) failed = 1;
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged by a capture that is over\n", MIB(after - before));
+    failed = 1;
+  }
+  cuStreamSynchronize(side);
+  cuEventDestroy(ev);
+  cuStreamDestroy(side);
+
+  before = ledger_used_self();
+  CHECK_DRV_API(cuStreamBeginCapture(origin, CU_STREAM_CAPTURE_MODE_RELAXED));
+  a = cuMemAllocAsync(&dptr, chunk, origin);
+  e = cuStreamEndCapture(origin, NULL);
+  after = ledger_used_self();
+  describe("cuStreamEndCapture (NULL phGraph)", e);
+  printf("  ledger: %.0f MiB before, %.0f MiB after\n", MIB(before), MIB(after));
+  if (a != CUDA_SUCCESS || e != CUDA_SUCCESS) failed = 1;
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged after the capture ended\n", MIB(after - before));
+    failed = 1;
+  }
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [T] --
+ * An asynchronous allocation lands on its stream's device, which need not be
+ * the current context's. Checked against the stream's device: refused when that
+ * one is full, not refused because the current one is. Inside a capture as well,
+ * where the driver must not be asked for the stream's device -- doing so
+ * invalidates the capture. Needs two devices. */
+static size_t headroom_of(CUcontext c, CUcontext back) {
+  size_t freeb = 0, total = 0;
+  cuCtxSetCurrent(c);
+  cuMemGetInfo(&freeb, &total);
+  cuCtxSetCurrent(back);
+  return freeb;
+}
+
+static CUdeviceptr fill_ctx(CUcontext c, CUcontext back, size_t leave) {
+  CUdeviceptr d = 0;
+  size_t room = headroom_of(c, back);
+  cuCtxSetCurrent(c);
+  if (room <= leave || cuMemAlloc(&d, room - leave) != CUDA_SUCCESS) d = 0;
+  cuCtxSetCurrent(back);
+  return d;
+}
+
+static void free_ctx(CUcontext c, CUcontext back, CUdeviceptr d) {
+  cuCtxSetCurrent(c);
+  if (d) cuMemFree(d);
+  cuCtxSetCurrent(back);
+}
+
+static int async_alloc_uses_stream_device(CUdevice dev, CUcontext ctx) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+  int count = 0;
+  cuDeviceGetCount(&count);
+  /* Not a skip: that would report the whole file as skipped on a one-GPU host,
+   * hiding every other case's verdict. */
+  if (count < 2) { printf("  not run (needs 2 devices, have %d)\n", count); return 0; }
+  CUdevice other;
+  CHECK_DRV_API(cuDeviceGet(&other, dev == 0 ? 1 : 0));
+  CUcontext octx = NULL;
+  CHECK_DRV_API(cuDevicePrimaryCtxRetain(&octx, other));
+  CUstream s1 = NULL;
+  cuCtxSetCurrent(octx);
+  CHECK_DRV_API(cuStreamCreate(&s1, CU_STREAM_NON_BLOCKING));
+  cuCtxSetCurrent(ctx);
+  size_t chunk = headroom_of(ctx, ctx) / 4;
+  int failed = 0;
+  CUresult r;
+  CUdeviceptr p = 0;
+
+  /* The stream's device full, the current one free. */
+  CUdeviceptr filler = fill_ctx(octx, ctx, chunk / 2);
+  r = cuMemAllocAsync(&p, chunk, s1);
+  describe("cuMemAllocAsync (stream's device full)", r);
+  if (r != CUDA_ERROR_OUT_OF_MEMORY) {
+    printf("  FAIL: allocated past the limit of the stream's device\n");
+    failed = 1;
+    if (r == CUDA_SUCCESS) { cuStreamSynchronize(s1); cuMemFreeAsync(p, s1); }
+  }
+  CUmemPoolProps props;
+  memset(&props, 0, sizeof(props));
+  props.allocType = CU_MEM_ALLOCATION_TYPE_PINNED;
+  props.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  props.location.id = other;
+  CUmemoryPool pool = NULL;
+  CHECK_DRV_API(cuMemPoolCreate(&pool, &props));
+  r = cuMemAllocFromPoolAsync(&p, chunk, pool, s1);
+  describe("cuMemAllocFromPoolAsync (stream's device full)", r);
+  if (r != CUDA_ERROR_OUT_OF_MEMORY) {
+    printf("  FAIL: allocated past the limit of the stream's device\n");
+    failed = 1;
+    if (r == CUDA_SUCCESS) { cuStreamSynchronize(s1); cuMemFreeAsync(p, s1); }
+  }
+  cuStreamSynchronize(s1);
+  cuMemPoolDestroy(pool);
+  /* The same in a capture, which must survive it. */
+  CUgraph g = NULL;
+  CHECK_DRV_API(cuStreamBeginCapture(s1, CU_STREAM_CAPTURE_MODE_RELAXED));
+  r = cuMemAllocAsync(&p, chunk, s1);
+  describe("cuMemAllocAsync (in capture, stream's device full)", r);
+  if (r != CUDA_ERROR_OUT_OF_MEMORY) failed = 1;
+  CUresult e = cuStreamEndCapture(s1, &g);
+  describe("cuStreamEndCapture", e);
+  if (e != CUDA_SUCCESS) failed = 1;
+  if (g != NULL) cuGraphDestroy(g);
+  free_ctx(octx, ctx, filler);
+
+  /* The current device full, the stream's free: no false refusal, and the
+   * capture's charge lands on the stream's device. */
+  filler = fill_ctx(ctx, ctx, chunk / 2);
+  r = cuMemAllocAsync(&p, chunk, s1);
+  describe("cuMemAllocAsync (current device full)", r);
+  if (r != CUDA_SUCCESS) {
+    printf("  FAIL: refused because of the wrong device\n");
+    failed = 1;
+  } else {
+    cuStreamSynchronize(s1);
+    cuMemFreeAsync(p, s1);
+    cuStreamSynchronize(s1);
+  }
+  size_t room = headroom_of(octx, ctx);
+  g = NULL;
+  CHECK_DRV_API(cuStreamBeginCapture(s1, CU_STREAM_CAPTURE_MODE_RELAXED));
+  r = cuMemAllocAsync(&p, chunk, s1);
+  size_t in_capture = headroom_of(octx, ctx);
+  e = r == CUDA_SUCCESS ? cuMemFreeAsync(p, s1) : r;
+  CUresult e2 = cuStreamEndCapture(s1, &g);
+  describe("cuMemAllocAsync (in capture, current device full)", r);
+  describe("cuStreamEndCapture", e2);
+  printf("  stream's device headroom: %.0f MiB, in capture %.0f MiB\n", MIB(room), MIB(in_capture));
+  if (r != CUDA_SUCCESS || e != CUDA_SUCCESS || e2 != CUDA_SUCCESS) failed = 1;
+  if (room - in_capture < chunk) {
+    printf("  FAIL: the capture's allocation was not charged to the stream's device\n");
+    failed = 1;
+  }
+  if (g != NULL) cuGraphDestroy(g);
+  free_ctx(ctx, ctx, filler);
+  cuStreamDestroy(s1);
+  cuDevicePrimaryCtxRelease(other);
+  cuCtxSetCurrent(ctx);
+  return failed;
+}
+
 /* ------------------------------------------------------------ concurrency --
  * [M] Threads capturing concurrently on their own streams, every third capture
  * invalidated: every charge comes off. Thread-local mode, so one thread's
@@ -1068,6 +1369,14 @@ int main(void) {
            joined_stream_invalidation_is_retired(stream));
   RUN_CASE("[L] an invalidated capture into an owned graph is released",
            capture_to_graph_invalidation_is_retired(stream));
+  RUN_CASE("[Q] a capture ended from another thread is released",
+           wrong_thread_end_is_retired(ctx, stream));
+  RUN_CASE("[R] a capture ended on a joined stream is released",
+           unmatched_end_is_retired(stream));
+  RUN_CASE("[S] an unjoined end and a NULL phGraph end release the charges",
+           other_ends_release(stream));
+  RUN_CASE("[T] an async allocation is checked on its stream's device",
+           async_alloc_uses_stream_device(device, ctx));
   RUN_CASE("[M] concurrent captures across threads, some invalidated, all released",
            concurrent_captures_retire(ctx));
   RUN_CASE("[N] more captures open at once than the registry holds are released",

@@ -3073,6 +3073,14 @@ CUresult cuSignalExternalSemaphoresAsync_ptsz(
 //                         phGraph);
 //}
 
+CUresult cuStreamGetDevice(CUstream hStream, CUdevice *device) {
+  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetDevice), hStream, device);
+}
+
+CUresult cuStreamGetDevice_ptsz(CUstream hStream, CUdevice *device) {
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamGetDevice_ptsz, hStream, device);
+}
+
 CUresult cuStreamGetCtx(CUstream hStream, CUcontext *pctx) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCtx), hStream, pctx);
 }

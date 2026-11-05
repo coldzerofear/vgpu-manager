@@ -1854,6 +1854,37 @@ static int stream_is_capturing(CUstream stream, int ptsz) {
   return (cap != CU_STREAM_CAPTURE_STATUS_NONE) ? 1 : 0;
 }
 
+extern CUresult _cuCtxPushCurrent(CUcontext ctx);
+extern CUresult _cuCtxPopCurrent(CUcontext *pctx);
+
+/* The device hStream belongs to, or -1 if that can't be established.
+ *
+ * NEVER while a capture involves the stream: there cuStreamGetDevice answers
+ * CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED (V100, drivers 570 and 580) and
+ * cuStreamGetCtx does on older ones (550, whose libcuda has no
+ * cuStreamGetDevice at all), and either way the failed call has already
+ * invalidated the capture -- falling back on the error would be too late. See
+ * capture_reg_stream_device() for the value to use during a capture. */
+static int stream_device(CUstream stream, int ptsz) {
+  CUdevice device = -1;
+  cuda_entry_enum_t sym = ptsz ? CUDA_ENTRY_ENUM(cuStreamGetDevice_ptsz)
+                               : CUDA_ENTRY_ENUM(cuStreamGetDevice);
+  if (cuda_library_entry[sym].fn_ptr) {
+    CUresult ret = ((CUresult (*)(CUstream, CUdevice *))cuda_library_entry[sym].fn_ptr)(stream, &device);
+    return ret == CUDA_SUCCESS ? (int)device : -1;
+  }
+  sym = ptsz ? CUDA_ENTRY_ENUM(cuStreamGetCtx_ptsz) : CUDA_ENTRY_ENUM(cuStreamGetCtx);
+  if (!cuda_library_entry[sym].fn_ptr) return -1;
+  CUcontext ctx = NULL, popped = NULL;
+  if (((CUresult (*)(CUstream, CUcontext *))cuda_library_entry[sym].fn_ptr)(stream, &ctx) != CUDA_SUCCESS ||
+      ctx == NULL || _cuCtxPushCurrent(ctx) != CUDA_SUCCESS) {
+    return -1;
+  }
+  CUresult ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  _cuCtxPopCurrent(&popped);
+  return ret == CUDA_SUCCESS ? (int)device : -1;
+}
+
 /* Graph currently being captured into by hStream, or NULL if that can't be
  * established. `ptsz` selects the entry-point family, same reason as in
  * stream_is_capturing(). Only _v2/_v3 report the graph mid-capture; a driver
@@ -1913,6 +1944,7 @@ typedef struct {
   pthread_t thread;      /* only for the per-thread default stream */
   CUgraph graph;
   CUcontext ctx;
+  int stream_dev;        /* device of the stream, read before the capture began; -1 unknown */
 } capture_reg_t;
 static capture_reg_t g_capture_reg[CAPTURE_REG_SLOTS];
 static int g_capture_reg_used;
@@ -1924,7 +1956,7 @@ static int capture_reg_match(const capture_reg_t *e, CUstream stream, int ptsz) 
   return !per_thread || pthread_equal(e->thread, pthread_self());
 }
 
-static void capture_reg_begin(CUstream stream, int ptsz, CUgraph graph) {
+static void capture_reg_begin(CUstream stream, int ptsz, CUgraph graph, int stream_dev) {
   if (graph == NULL) return;
   CUcontext ctx = NULL;
   if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetCurrent, &ctx) != CUDA_SUCCESS) {
@@ -1942,6 +1974,7 @@ static void capture_reg_begin(CUstream stream, int ptsz, CUgraph graph) {
     slot->thread = pthread_self();
     slot->graph = graph;
     slot->ctx = ctx;
+    slot->stream_dev = stream_dev;
   } else {
     LOGGER(VERBOSE, "capture registry full, graph %p falls back to lookup at end of capture",
            (void *)graph);
@@ -1958,6 +1991,46 @@ static CUgraph capture_reg_graph(CUstream stream, int ptsz) {
   }
   pthread_mutex_unlock(&g_capture_reg_lock);
   return graph;
+}
+
+/* The device of a stream about to begin a capture, -1 if unknown. The last
+ * moment it can be asked: see stream_device(). A stream that is already part of
+ * a capture is not asked at all. The per-thread default stream is the current
+ * context's by definition. */
+static int stream_device_before_capture(CUstream stream, int ptsz) {
+  if (stream == NULL || stream == CU_STREAM_PER_THREAD || stream_is_capturing(stream, ptsz)) return -1;
+  return stream_device(stream, ptsz);
+}
+
+/* The device stream's capture began on, -1 if the registry has no answer. */
+static int capture_reg_stream_device(CUstream stream, int ptsz) {
+  int dev = -1;
+  pthread_mutex_lock(&g_capture_reg_lock);
+  for (int i = 0; g_capture_reg_used > 0 && i < CAPTURE_REG_SLOTS; i++) {
+    if (capture_reg_match(&g_capture_reg[i], stream, ptsz)) { dev = g_capture_reg[i].stream_dev; break; }
+  }
+  pthread_mutex_unlock(&g_capture_reg_lock);
+  return dev;
+}
+
+/* The device an asynchronous allocation on stream lands on: the stream's, which
+ * need not be the current context's (V100: current context on device 0, stream
+ * on device 1, the memory appears on device 1). During a capture it comes from
+ * the registry. A stream joined to a capture is not in the registry and falls
+ * back to the current context -- which is right for the captures that work: an
+ * allocation on a joined stream of another device, with the current context not
+ * moved to it, ends the capture with CUDA_ERROR_STREAM_CAPTURE_UNJOINED. */
+static CUresult async_alloc_device(CUstream stream, int ptsz, CUdevice *device) {
+  int dev = -1;
+  if (stream != NULL && stream != CU_STREAM_PER_THREAD) {
+    dev = stream_is_capturing(stream, ptsz) ? capture_reg_stream_device(stream, ptsz)
+                                            : stream_device(stream, ptsz);
+  }
+  if (dev >= 0) {
+    *device = (CUdevice)dev;
+    return CUDA_SUCCESS;
+  }
+  return CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, device);
 }
 
 static void capture_reg_reset_after_fork(void) {
@@ -3586,7 +3659,7 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   if (unlikely(dptr == NULL)) {
     goto ALLOCATED_TO_GPU;
   }
-  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = async_alloc_device(hStream, __CUDA_API_IS_PTSZ, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -3669,7 +3742,7 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
   if (unlikely(dptr == NULL)) {
     goto ALLOCATED_TO_GPU;
   }
-  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = async_alloc_device(hStream, 1, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -4280,8 +4353,6 @@ DONE:
   return ret;
 }
 
-extern CUresult _cuCtxPushCurrent(CUcontext ctx);
-extern CUresult _cuCtxPopCurrent(CUcontext *pctx);
 
 /* Multi-device cooperative launch: applies the per-device throttle by
  * extracting host_index from each entry's stream context. Rare API; we keep
@@ -4881,7 +4952,7 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
   if (unlikely(dptr == NULL)) {
     goto CALL;
   }
-  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = async_alloc_device(hStream, __CUDA_API_IS_PTSZ, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -4934,7 +5005,7 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
   if (unlikely(dptr == NULL)) {
     goto CALL;
   }
-  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = async_alloc_device(hStream, 1, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -5124,33 +5195,37 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
  * them loses the caller's capture mode in one direction and reads it from an
  * unset register in the other. */
 CUresult cuStreamBeginCapture(CUstream hStream) {
+  int dev = stream_device_before_capture(hStream, __CUDA_API_IS_PTSZ);
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture), hStream);
   if (ret == CUDA_SUCCESS) {
-    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ));
+    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ), dev);
   }
   return ret;
 }
 
 CUresult cuStreamBeginCapture_v2(CUstream hStream, CUstreamCaptureMode mode) {
+  int dev = stream_device_before_capture(hStream, __CUDA_API_IS_PTSZ);
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture_v2), hStream, mode);
   if (ret == CUDA_SUCCESS) {
-    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ));
+    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ), dev);
   }
   return ret;
 }
 
 CUresult cuStreamBeginCapture_ptsz(CUstream hStream) {
+  int dev = stream_device_before_capture(hStream, 1);
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamBeginCapture_ptsz, hStream);
   if (ret == CUDA_SUCCESS) {
-    capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1));
+    capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1), dev);
   }
   return ret;
 }
 
 CUresult cuStreamBeginCapture_v2_ptsz(CUstream hStream, CUstreamCaptureMode mode) {
+  int dev = stream_device_before_capture(hStream, 1);
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamBeginCapture_v2_ptsz, hStream, mode);
   if (ret == CUDA_SUCCESS) {
-    capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1));
+    capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1), dev);
   }
   return ret;
 }
@@ -5159,11 +5234,12 @@ CUresult cuStreamBeginCaptureToGraph(CUstream hStream, CUgraph hGraph,
                                      const CUgraphNode *dependencies,
                                      const CUgraphEdgeData *dependencyData,
                                      size_t numDependencies, CUstreamCaptureMode mode) {
+  int dev = stream_device_before_capture(hStream, __CUDA_API_IS_PTSZ);
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCaptureToGraph),
                                   hStream, hGraph, dependencies, dependencyData,
                                   numDependencies, mode);
   if (ret == CUDA_SUCCESS) {
-    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, hGraph);
+    capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, hGraph, dev);
   }
   return ret;
 }
@@ -5172,11 +5248,12 @@ CUresult cuStreamBeginCaptureToGraph_ptsz(CUstream hStream, CUgraph hGraph,
                                           const CUgraphNode *dependencies,
                                           const CUgraphEdgeData *dependencyData,
                                           size_t numDependencies, CUstreamCaptureMode mode) {
+  int dev = stream_device_before_capture(hStream, 1);
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamBeginCaptureToGraph_ptsz,
                                   hStream, hGraph, dependencies, dependencyData,
                                   numDependencies, mode);
   if (ret == CUDA_SUCCESS) {
-    capture_reg_begin(hStream, 1, hGraph);
+    capture_reg_begin(hStream, 1, hGraph, dev);
   }
   return ret;
 }
@@ -5190,10 +5267,13 @@ CUresult cuStreamBeginCaptureToGraph_ptsz(CUstream hStream, CUgraph hGraph,
  * before the invalidation still need to come off -- the driver has thrown the
  * graph away, and the application, holding no handle, can never destroy it.
  *
- * Retired when the capture is over: ended (SUCCESS) or abandoned by the driver
- * (CUDA_ERROR_STREAM_CAPTURE_INVALIDATED). Any other failure -- the wrong
- * thread ending a global-mode capture, say -- leaves the capture running, and
- * its charges with it. */
+ * Retired when the capture is over, which a refused end does not rule out: from
+ * another thread in GLOBAL or THREAD_LOCAL mode (WRONG_THREAD), or with a fork
+ * not joined back (UNJOINED), the driver refuses and terminates the capture all
+ * the same, the stream reports none, and nothing else would ever end it (V100,
+ * drivers 550, 570, 580). So ask the stream rather than list error codes. A
+ * capture not over yet -- an end on a joined stream (UNMATCHED) leaves it for
+ * the origin stream to end -- keeps its charges. */
 static CUresult end_capture_and_discharge(CUstream hStream, CUgraph *phGraph, int ptsz) {
   CUgraph capturing = capture_reg_graph(hStream, ptsz);
   if (capturing == NULL) {
@@ -5202,7 +5282,8 @@ static CUresult end_capture_and_discharge(CUstream hStream, CUgraph *phGraph, in
   CUresult ret = ptsz
       ? CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamEndCapture_ptsz, hStream, phGraph)
       : CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamEndCapture, hStream, phGraph);
-  if (ret == CUDA_SUCCESS || ret == CUDA_ERROR_STREAM_CAPTURE_INVALIDATED) {
+  if (ret == CUDA_SUCCESS || ret == CUDA_ERROR_STREAM_CAPTURE_INVALIDATED ||
+      !stream_is_capturing(hStream, ptsz)) {
     free_gpu_virt_memory_by_graph(capturing);
     capture_reg_forget(capturing, NULL);
   }

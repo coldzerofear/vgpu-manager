@@ -44,8 +44,9 @@ launch 之后显存由 NVML 计入，记账若继续持有会重复计数（误�
 - **捕获登记表**：hook `cuStreamBeginCapture` / `_v2` / `_ptsz` / `_v2_ptsz` / `cuStreamBeginCaptureToGraph` / `_ptsz`，开始捕获成功后记下
   "发起 stream → graph"（默认 per-thread stream 再按线程区分），64 个槽位，满了退回到结束时查询。`cuStreamBeginCaptureToGraph(_ptsz)` 原先不在驱动函数表里，现已加入。
   `cuStreamBeginCapture` 属 ABI 冲突族，已按先例加入 `R5_ALLOWLIST`（每个包装都调用自己同名的入口）。
-- **`cuStreamEndCapture`**：graph 取自登记表（缺失时现场查询），在返回 `CUDA_SUCCESS` 或 `CUDA_ERROR_STREAM_CAPTURE_INVALIDATED` 时释放；
-  其他失败（如全局模式下换线程结束）捕获仍在进行，不释放。
+- **`cuStreamEndCapture`**：graph 取自登记表（缺失时现场查询），在返回 `CUDA_SUCCESS`、`CUDA_ERROR_STREAM_CAPTURE_INVALIDATED`，
+  或 End 失败但 stream 已不在捕获中（跨线程的 `WRONG_THREAD`、未汇合的 `UNJOINED`，驱动拒绝的同时已终止捕获，见 6.6）时释放；捕获还在（接入的 stream 上 End 的 `UNMATCHED`）不释放。
+- **异步分配的设备**：`cuMemAllocAsync`、`cuMemAllocFromPoolAsync` 按 stream 所在的卡检查和记账，不用当前 context（见 6.6）。
 - **context 拆除兜底**：记账记录增加 `ctx` 字段（进程私有，不涉及共享 ABI）。`cuCtxDestroy(_v2)`、`cuDevicePrimaryCtxReset(_v2)`、
   释放最后一个引用的 `cuDevicePrimaryCtxRelease(_v2)` 成功后按 context 清理记账与登记表。这 6 个入口从透传改为注册进 hook 表，
   `cudaDeviceReset` 等经 `cuGetProcAddress` 获取的调用也能覆盖。primary context 只在活跃时获取句柄（对非活跃的 retain 会创建它）。
@@ -105,6 +106,7 @@ T2 也是 6.1 节"不能把记账持有到首次 launch"的实证：持有的话
 - 手工 graph 的 alloc node 在创建时各自检查、不累加；upload/launch 时按整个 graph 的总量（扣除池已预留）再检查一次。
 - alloc node 跨多个设备的 graph 逐卡检查、每张卡检查完立即放锁（6.5）：检查到 launch 之间别的进程若在已检查的卡上分配，会低估（仅多卡 graph 的首次映射）。
 - 登记表满（同时超过 64 个进行中的捕获）时退回到结束时查询，此时被作废的捕获仍会遗留记账，直到 context 拆除或进程退出。
+  此时捕获内的异步分配也按当前 context 查卡（6.6）；接入捕获的 stream 同样按当前 context 查卡。
 - `cuDevicePrimaryCtxRelease` 的"查状态 → retain"之间若另一线程释放了最后一个引用，retain 会重新创建 primary context，随即被撤销的 release 销毁；记账结果不受影响。
 
 ## 6. 空窗 B：研究与实现
@@ -328,3 +330,112 @@ graph 可以跨卡（编程指南：单设备约束只针对条件节点 body �
 验证（RTX 2080 Ti 单卡）：`make test` 29/29；准入与记账测试（普通与 `_ptsz`）通过；隐式回收复现仍拒绝 relaunch（4032 MiB）。
 [H] 改为断言"当前卡余量被占、另一张卡余量被占时 launch 都返回 OOM，释放后成功"，单卡机 SKIP，**待双卡机器验证**
 （另需确认：不配 `accessDescs` 时能否在设备 0 的 context 里向设备 1 加 alloc node）。
+
+### 6.6 双卡真机验证与 VMM 可见时机（2026-11-05，两张 Tesla V100-PCIE-16GB，无 NVLink）
+
+驱动 550.127.05（CUDA 12.4）与升级后的 580.178.04（CUDA 13.0）各测一遍，工具链 12.4；问题 2 的 API 行为和最终回归另测了 550.54.15、570.133.07（CUDA 12.8）。
+老驱动的切换方法：官方 CDN 对这台机器返回 403，从 Ubuntu 软件包池下载 `nvidia-kernel-source-*`、`libnvidia-compute-*`，`dpkg -x` 解包、`make modules` 编内核模块，`rmmod` 后 `insmod`，用户态库走 `LD_LIBRARY_PATH`；不动 apt，`modprobe nvidia` 即可回到 580。
+
+**graph 跨卡（`probe_multi`，不加载本库，每卡 1 GiB）**：graph 确实可以跨卡，每张卡一个池，且不要求配 `accessDescs`。
+
+| 场景 | 550 | 580 |
+|---|---|---|
+| M1 当前 ctx=d0，alloc node 只在 d1 | 成功，池 d1=1024，NVML d1 +1024 | 同左 |
+| M2 alloc node 分别在 d0、d1 | 成功，两池各 1024；relaunch 不增长；trim 后归零 | 同左 |
+| M3 同上加 `accessDescs` 互相映射 | `CUDA_ERROR_PEER_ACCESS_UNSUPPORTED`（`cuDeviceCanAccessPeer`=0） | 成功（`CanAccessPeer`=1） |
+| M4 memset 节点各带 ctx0/ctx1 | 成功 | 成功 |
+| M5 捕获：d0 与 d1 的 stream 经 event 接入同一捕获，各分配一次 | 成功，graph 含 loc=0、loc=1 两个 alloc node，launch 后两池各 1024 | 同左 |
+| M6 当前 ctx=d1，launch 到 d0 的 stream，分配在 d0 | 成功，映射在 d0 | 同左 |
+
+M6 是"准入不能用 `cuCtxGetDevice`"的实证。M5 说明跨卡 graph 不止手工构建一种来源。
+
+**本库双卡**：`test_graph_mem_admission` [H] 在 550、580 上都通过：当前卡或另一张卡余量被占时 launch 返回 OOM，释放后成功（用例不需要 `accessDescs`）。
+
+**VMM 显存何时对 NVML 可见（`probe_vmm`，1 GiB）**，550 与 580 结果相同：
+
+| 步骤 | NVML 进程占用 |
+|---|---|
+| 基线 | 306 |
+| `cuMemCreate` 返回时（未映射） | 1330（连续 3 次都是首个采样即可见，create 耗时 0.03 ms） |
+| map / setaccess / 写入 | 1330 |
+| 仍映射时 `cuMemRelease` | 1330 |
+| `cuMemUnmap` | 306 |
+| 先 unmap 不 release | 1330，release 后 306 |
+| retain（返回同一 handle 值）后 release 一次、unmap | 1330，最后一次 release 后 306 |
+| 同一 handle 映射两次：release、unmap 一次 | 1330，第二次 unmap 后 306 |
+| 从未映射：release | 306 |
+
+结论：`cuMemCreate` 检查完放锁**没有空窗**（物理显存在 create 返回时已被 NVML 计入）；NVML 严格遵循"引用与映射都没了才释放"，
+所以我们不写账本的做法不会出现 HAMi-core #390 的提前扣账。新增 `test_vmm_accounting`（[A]–[E]）把这些固定成回归测试，限额 4096 MiB 下 550、580 都通过。
+
+**隐式回收（6.5）在 V100 上同样成立**：580 上池 5280 MiB、空闲 10552 MiB 时 `cuMemAlloc(13191 MiB)` 成功且池归 0；`reclaim.sh` 端到端拒绝 relaunch，占用 4032 MiB。
+
+#### 问题 1：被拒绝的 End 造成记账泄漏（与 HAMi-core #393 同类，已修复）
+
+`probe_end`（不加载本库，550 与 580 相同）：
+
+| 操作 | 返回 | 之后的捕获状态 |
+|---|---|---|
+| GLOBAL / THREAD_LOCAL 捕获，另一线程 `EndCapture` | `WRONG_THREAD`（908），graph=NULL | **捕获已终止**（status=0）；发起线程再 End 返回 `ILLEGAL_STATE`（401） |
+| RELAXED 捕获，另一线程 `EndCapture` | SUCCESS | 正常结束，本库已正确释放 |
+| 在接入的 stream 上 `EndCapture` | `UNMATCHED`（903） | 捕获被作废（status=2）；发起 stream 上 End 返回 INVALIDATED，本库已正确释放 |
+
+第 3 节"其他失败（如全局模式下换线程结束）捕获仍在进行，不释放"的判断是**错的**。本库实测（`probe_leak`，限额 4096 MiB）：捕获内分配 3588 MiB，
+另一线程 End 后余量视图仍只有 200 MiB、`cuMemAlloc(3588 MiB)` 返回 OOM；5 s 后、其他 stream 上再捕获、同一 stream 上再捕获都清不掉，只能等 context 销毁或进程退出。
+main 841a111 同样如此。新增用例 [Q] 复现（账本 0 / 947 / 947 MiB），[R] 覆盖接入 stream 的情况（已通过）。
+
+修复：`end_capture_and_discharge` 在 SUCCESS、INVALIDATED 之外，End 失败后问 `cuStreamIsCapturing`（任何时候都合法），stream 已不在捕获中就释放。
+不枚举错误码，因为 `UNJOINED`（904，有分支未汇合）同样是拒绝加终止，只写 `WRONG_THREAD` 会漏。[Q] 账本 0 / 947 / 0，`probe_leak` 余量恢复到 3788 MiB。
+另外 `cuStreamEndCapture(s, NULL)` 三个版本都返回 SUCCESS 并结束捕获，不是拒绝（[S]）。
+
+HAMi-core #393 的其余内容在本库不适用：它在捕获和 alloc node 上长期持有记账，要到 graph 销毁才释放，所以"从未运行的 graph 销毁时要退账"；
+本库捕获结束即退账、alloc node 不记账，不存在这类残留（[B]、[E]、[F]）。作废捕获的释放本库已有（[G]、[K]、[L]）。
+
+#### 问题 2：异步分配按当前 context 查卡，stream 在别的卡上时查错（既有，已修复）
+
+`cuMemAllocAsync`、`cuMemAllocFromPoolAsync` 的显存落在 **stream 所在的卡**（`probe_end` A/A2/A3：ctx=d0、stream 在 d1，NVML d1 +1024，捕获得到的 alloc node loc=1），
+而 hook 用 `cuCtxGetDevice` 检查和记账。`probe_cross`（本库，每卡限额 4096 MiB，550、580 相同）：
+
+| 场景 | 结果 |
+|---|---|
+| d1 只剩 512 MiB，ctx=d0，`cuMemAllocAsync(1 GiB, d1 的 stream)` | **成功，d1 越限** |
+| 同上 `cuMemAllocFromPoolAsync`（池和 stream 都在 d1） | **成功，d1 越限** |
+| d0 只剩 512 MiB、d1 空闲，ctx=d0，`cuMemAllocAsync(1 GiB, d1 的 stream)` | **误报 OOM** |
+
+能否在捕获中问 stream 的设备（`probe_sctx`/`probe_sctx2`，ns 为单次耗时）：
+
+| API | 550.54.15（CUDA 12.4） | 570.133.07（12.8）、580（13.0） |
+|---|---|---|
+| 不在捕获中 `cuStreamGetCtx` | 正常 | 正常 |
+| 不在捕获中 `cuStreamGetDevice` | 符号不存在 | 正常（22 ns） |
+| 捕获中 `cuStreamGetCtx` | UNSUPPORTED（900）**并作废捕获**（每个 API 用独立的新捕获验证，End 返回 901） | 成功，捕获不受影响（23 ns） |
+| 捕获中 `cuCtxPushCurrent` + `cuCtxGetDevice` + `cuCtxPopCurrent` | 成功，捕获不受影响 | 成功，捕获不受影响（63 ns） |
+| 捕获中 `cuStreamGetDevice` | 符号不存在 | UNSUPPORTED（900）**并作废捕获** |
+| `cuStreamGetCaptureInfo` | 合法 | 合法 |
+
+所以"捕获中先调用、返回 UNSUPPORTED 再回退"不可行：拿到错误时捕获已被作废，老驱动上每个捕获内的异步分配都会坏掉；新驱动上 `cuStreamGetDevice` 也一样。
+查接入捕获的 stream 同样不行（550：同卡接入，对照 End=0，查询后 End=901）。符号表（`nm -D`）：535、550 有 `cuStreamGetCtx`，无 `cuStreamGetDevice`、`_v2`；570 三个都有。
+12.6、12.7 的 Ubuntu 包只是过渡空壳，查不到，`cuStreamGetDevice` 确切引入版本在 12.5 到 12.8 之间，官方发行说明里没查到明确记载。设计不依赖这个版本号。
+
+实现（`async_alloc_device`）：
+- 查设备的顺序：`cuStreamGetDevice` → `cuStreamGetCtx` 加 push/GetDevice/pop → `cuCtxGetDevice`，按符号是否存在选，不看驱动版本。`cuStreamGetDevice(_ptsz)` 为此加入驱动函数表（透传，不是 hook），表从 604 项增到 606 项。
+- 捕获中绝不问驱动：`BeginCapture` 的 6 个 hook 在真正开始捕获之前查好设备号，存进捕获登记表，捕获中读登记表。stream 已经在捕获中（比如已接入别的捕获）时也不问。
+- 回退到当前 context 的情况（已知边界）：登记表满（同时超过 64 个捕获）；接入捕获的 stream。后者的缺口基本是空的：接入的 stream 在别的卡且当前 context 没切过去时，驱动本身让捕获失败（End 返回 904，三个版本相同，`probe_join`）；切过去时当前 context 正好是对的卡（M5）。
+- 默认 per-thread stream 就是当前 context 的，不查询。
+
+修复后 `probe_cross`：d1 满时 X2、X3 返回 OOM，d0 满 d1 空时 X5 成功。新增用例 [T]（需要两张卡，单卡机不运行、不计 SKIP）覆盖普通、pool 和捕获内三种路径，并断言捕获不被作废、记账落在 stream 的卡上。
+
+**测试环境注意**：`run_tests_with_env.sh` 只把第一张卡的 UUID 写进配置，裸机双卡上 CUDA 能看到第二张卡，库报 FATAL `cuda device 1 cannot find the corresponding host device`，所有测试 rc=1。
+要么加 `CUDA_VISIBLE_DEVICES=0`，要么把两张卡的 UUID 都写进 `NVIDIA_VISIBLE_DEVICES` 再直接跑 `run_all_tests.sh`。这次两种都跑了。
+
+**全量测试**（最终实现；C 测试用 CUDA 12.4 工具链编译）：
+
+| 驱动 | 单卡（`CUDA_VISIBLE_DEVICES=0`） | 双卡（两张卡都配限额） |
+|---|---|---|
+| 550.54.15（12.4） | 30/30（torch 需要 12.6 以上驱动，python 用例 SKIP） | 30/30 |
+| 570.133.07（12.8） | 32/32（含 PyTorch） | 32/32（含 PyTorch） |
+| 580.178.04（13.0） | 32/32（含 PyTorch） | 32/32（含 PyTorch） |
+
+另外 hook 一致性（606 项，hook 69 个）、ABI 签名、session 路径、导出符号检查通过，`make test-nogpu` 通过；`reclaim.sh` 拒绝 relaunch，占用 4032 MiB。修复前 [Q] 失败（账本残留 947 MiB），X2、X3 越限、X5 误报。PyTorch 2.14.1+cu126（`limit_pytorch_graph.py`，`backend:cudaMallocAsync`，限额 4096 MiB），`--device 0` 与 `--device 1` 都通过：
+T2 24 个 graph（临时张量合计 6144 MiB）捕获加回放无误报；T4 占掉余量时回放被拒（`AcceleratorError`），释放后回放成功。
+注意：torch 的 cu130 版不带 V100（CC 7.0）的 kernel，报 `no kernel image is available`，V100 要用 cu126 版。
