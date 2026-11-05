@@ -208,7 +208,7 @@ PyTorch 侧的观察（与本库无关，不加载本库同样发生）：
 
 内存安全：ASan + UBSan 构建（因 ASan 初始化走 `dlsym`，测试构建不导出本库 `dlsym`；runtime 测试因此不经过本库，只作冒烟）跑全部 GPU 测试
 零报告；`make test-sanitize`（无 GPU）20/20 通过。另发现 `VGPU_SANITIZE` CMake 选项不作用于 `libvgpu-control.so` 本身
-（`add_compile_options` 位于目标定义之后），既有问题，未改。
+（`add_compile_options` 位于目标定义之后），已在 6.11 修复。
 
 热路径开销（`lbench`：带 1 MiB alloc+free 的 graph 稳态 replay 20000 次，10 轮中位数）：不加载本库 2.61 µs/次，
 7b36d05 2.59 µs，本次 2.59 µs，准入检查无可测开销。
@@ -625,7 +625,7 @@ host 位置的池未实测，走回退。
 
 | 项 | 结果 |
 |---|---|
-| `cuGraphLaunch` 限流按当前 context 查卡 | **真 bug，已修**。`CUDA_CORE_LIMIT_0=10`，d0 stream 上的 graph：当前 context 切到 d1 时从约 15500 涨到 110820 次/s；修复后 12715、13318、12508。普通 kernel 不受影响，驱动直接返回 `invalid resource handle`。成本表项记下 instantiate 时的设备，launch 少一次 `cuCtxGetDevice` |
+| `cuGraphLaunch` 限流按当前 context 查卡 | **真 bug，已修**。`CUDA_CORE_LIMIT_0=10`，d0 stream 上的 graph：当前 context 切到 d1 时从约 15500 涨到 110820 次/s；修复后 12715、13318、12508。普通 kernel 不受影响，驱动直接返回 `invalid resource handle`。成本表项记下 instantiate 时的设备（`cuCtxGetDevice` 仍保留，见 6.12） |
 | 捕获 stream 的 context 被销毁时的记账残留 | 已修（上表） |
 | `run_tests_with_env.sh` 裸机双卡只配第一张 | 已改成配上全部 GPU；双卡上标准 `make test` 30/30，单卡机行为不变（只有一个 UUID） |
 | 13.x 头文件 | 用 CUDA 13.4 的 `cuda.h`：结构体布局、ABI 签名检查通过；`test_graph_mem_admission`、`test_alloc_async_accounting`、`test_vmm_accounting`（含 `_ptsz`）编译通过，未运行 |
@@ -656,3 +656,52 @@ host 位置的池未实测，走回退。
 
 静态检查、`make test-nogpu`（21 项）、`make test-sanitize`（21 项）通过；跨卡 X2、X3 返回 OOM、X5 成功；`reclaim.sh`（550.54）拒绝 relaunch，占用 4032 MiB；限流速率见上。
 探针修正：`probe_fork` 最初在子进程传伪造句柄 `0x4321`，段错误在驱动内部，属于非法调用，已改用真实句柄。
+
+### 6.11 探针入库与 `VGPU_SANITIZE`（2026-11-05，无 GPU 环境，未在真机运行）
+
+**探针**：`library/test/probes/`，`make test-probes` 运行，`run_all_tests.sh` 不跑；用法和判定标准见其 `README.md`。上文提到的探针名与入库版本的对应：
+
+| 上文 | 入库 | 差别 |
+|---|---|---|
+| `probe_churn` | `probe_churn.c` | 模式重命名，期望值写在 `run_probes.sh` 里并断言 |
+| `probe_fork` | `probe_fork.c` | |
+| `reclaim.sh` + `reclaim.c` | `probe_reclaim.c` + `run_probes.sh` | 自带断言，驱动没回收时跳过 |
+| `probe_sctx3` | `probe_capture_apis.c` | 新驱动上要重跑：捕获中不问驱动的规则依赖它 |
+| `probe_kern` | `probe_graph_throttle.cu` | |
+| `probe_rate` | `probe_launch_device.cu` | |
+| `torch_many.py` | `torch_many_graphs.py` | |
+
+其余（`probe_multi`、`probe_vmm`、`probe_end`、`probe_join`、`probe_pool2`、`probe_cross`、`probe_leak`、`probe_cache`、`bench2` 等）一次性的驱动事实探针或已被 [H]、[Q]、[T]、[V] 等用例覆盖的，没有入库。
+
+表统计不再靠临时变体：`check_no_constructors.sh` 禁止 destructor，改由现有退出处理打一行 VERBOSE 日志（`table stats: ...`，`LOGGER_LEVEL=4` 可见），不加载调试构建也能查。
+
+入库时为了可读重写过，**重写后的版本没有上 GPU 跑过**，只验证了编译（C 探针用 CUDA 13.4 头文件；`.cu` 探针本机没有 nvcc，未编译）。逻辑和跑过的版本相同，第一次 `make test-probes` 时注意区分探针自身的问题。写的过程中查出一处：`cuCtxCreate` 在 13.x 头文件下是 `_v4` 的 4 参数形式，已改用 `CUCTX_CREATE`。
+
+**`VGPU_SANITIZE`**：
+- 原来 `add_compile_options` 在 `add_library(vgpu-control)` 之后，`.so` 根本没被插桩，`make test-sanitize` 只覆盖无 GPU 测试自己的代码。挪到目标定义之前。
+- sanitize 构建的 `.so` 不导出 `dlsym`：ASan 启动时调 `dlsym`，导出的话会进到被插桩的 hook，此时 shadow 还没建好就崩了（6.4 的现象）。代价是经 `dlsym` 找驱动的代码（CUDA runtime 等）绕过本库，所以只用于测试。
+- 新增 `make test-gpu-sanitize`（`test/run_gpu_sanitize.sh`）：测试程序不插桩，只有库插桩，预加载 ASan 运行时，跑 5 个直接调驱动 API 的 GPU 测试。方法和 6.10 手工构建的一样，但这个入口本身还没在 GPU 上跑过。
+
+cppcheck：CI 用的 2.13（ubuntu-24.04）在全部代码上没有报告；6.9、6.10 记的 2 处 `uninitvar` 只出现在 2.7 上，是旧版本的误报。
+
+### 6.12 合并前的独立审查（2026-11-05，无 GPU，只验证了构建和无 GPU 测试）
+
+对整个分支做了一次独立审查，下面都已修复。**这些修复没有上过 GPU**，上面的真机数据都来自修复之前的提交（到 d40a89b 为止）。
+
+| 问题 | 后果 | 修复 |
+|---|---|---|
+| launch 改用 exec 的设备后，当前 context 在别的卡时 `gap_events_ensure` 仍用当前 context 建事件，事件却按 exec 的设备索引，而且每卡只建一次 | 该卡之后每次 `cuEventRecord` 跨 context 失败，占空比 gap 被静默关掉，只剩令牌桶（读代码推断） | 当前 context 不是 exec 的卡时这次 launch 不走 gap。`cuCtxGetDevice` 因此保留，开销与 main 相同 |
+| `cuGraphExecUpdate` 走 `graph_cost_remember` 时覆盖了表项的 context 和设备 | 在别的 context 下 update 后，令牌扣错卡，context 清扫也按错的 context | 更新时保留原值，新 exec 才写入 |
+| 池来源漏了 `cuMemGetDefaultMemPool`、`cuMemGetMemPool` | 经它们拿到别的卡的池，查卡回退到当前 context，正是 6.7 要堵的洞 | 补 hook，函数表 608 项、hook 77 个 |
+| 每个 context 有自己的 per-thread stream，登记表的键只有线程 | 同一线程在两个 context 上各开一个捕获时，第二个把第一个判为已结束并退账（只会少计） | 键加上当前 context |
+| 按 begin 时的当前 context 清扫 | 销毁 X，而捕获在 Y 的 stream 上：记录被提前清掉 | 优先按 stream 的 context，未知时才用当前 context |
+| `cuStreamGetDevice` 在别的 stream 上有 GLOBAL 捕获时是否安全，没有数据 | 可能把应用的捕获弄坏（`cuStreamGetCtx` 已实测安全） | 进程内有捕获时走 `cuStreamGetCtx` + push/pop，探针增加这一项，待上机确认后可放开 |
+| `log_graph_table_stats()` 只声明、没有调用（改退出处理的替换没匹配上） | `make test-probes` 必然失败 | 补上调用 |
+| `make test-sanitize` 的断言用 `grep -q`，配 `pipefail` 在 `nm` 收到 SIGPIPE 时误判 | CI 随机变红 | 改 `grep -c` |
+| `probe_reclaim` 等待没有上限 | 对方进程死掉时 `run_probes.sh` 永远挂住 | 150 s 超时退出 |
+| [J]、[W]、[Y] 断言不到声称的内容 | [J] 在可增长的表上看不出记录泄漏；[W] 丢记录时回退结果相同；[Y] 没记账也算过 | [J] 改名说明它测什么（泄漏靠 `probe_churn`）；[W] 增加另一张卡上的池；[Y] 检查返回值并断言确实记账 |
+| sanitize 导出表未声明配置依赖、脚本未处理 `nvidia-smi` 失败 | 改导出表不重新生成；错误信息被当成 GPU 列表 | `CMAKE_CONFIGURE_DEPENDS`；检查退出码 |
+
+仍是已知边界：销毁 begin 时的当前 context 会清掉记在它名下的记账，即使捕获在别的 context 的 stream 上还在进行（只会少计）；host 位置的池和导入的池按当前 context 查卡。
+
+审查里没有发现问题的部分：`slot_table.h`（另有 2 万轮 `retire_if` 模糊测试）、加锁和锁顺序、设备锁在所有返回路径的释放、fork 重置、`mem_more` 的所有权。

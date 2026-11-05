@@ -196,6 +196,9 @@ make check                                 # 静态检查（无需 GPU）：hook
 make check-exports                         # 校验导出符号（ABI 冲突族）
 make test-nogpu                            # 共享区无 GPU 测试（sm_node / vmem 并发）
 make test                                  # 需 GPU：LD_PRELOAD 冒烟测试
+make test-sanitize                         # 无 GPU 测试，库和测试都插桩 ASan+UBSan
+make test-gpu-sanitize                     # 需 GPU：直接调驱动 API 的测试，跑在插桩的库上
+make test-probes                           # 需 GPU：表回收、fork、限流等长时间探针（test/probes/README.md）
 ```
 
 ### lupine（`../lupine`）
