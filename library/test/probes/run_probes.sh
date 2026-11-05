@@ -58,6 +58,7 @@ churn() {
 echo "=== tables under churn"
 churn exec                        20000 cost    4096 0
 churn exec_multi                   3000 cost    4096 0
+churn exec_update                  3000 cost    4096 0
 churn ctx                           100 cost    4096 0
 churn ctx_not_current               100 cost    4096 0
 churn ctx_multi                     100 cost    4096 0
@@ -69,6 +70,7 @@ churn capture_wrong_thread         3000 capture   64 0
 churn capture_stream_destroyed     5000 capture   64 0
 churn capture_ctx_destroyed         100 capture   64 0
 churn capture_other_ctx_destroyed   100 capture   64 0
+churn capture_begin_ctx_destroyed   100 capture   64 0
 # Thread ids come back, so one record; the point is it stays at one.
 churn capture_thread_exit          5000 capture   64 1
 churn pool                        10000 pool      64 0
@@ -97,10 +99,19 @@ elif (( rc != 0 )); then
   report_fail "probe_reclaim rc=${rc}"
 fi
 
-echo "=== capture and stream queries on this driver (prints, no library)"
-env -u VMEMORY_NODE_ENABLED -u CUDA_MEM_LIMIT -u NVIDIA_VISIBLE_DEVICES "${PROBES}/probe_capture_apis"
-rc=$?
-(( rc == 0 || rc == 77 )) || report_fail "probe_capture_apis rc=${rc}"
+echo "=== capture and stream queries on this driver, and the library changes none of it"
+plain="$(mktemp)"
+hooked="$(mktemp)"
+rc=0
+env -u VMEMORY_NODE_ENABLED -u CUDA_MEM_LIMIT -u NVIDIA_VISIBLE_DEVICES "${PROBES}/probe_capture_apis" >"${plain}" 2>&1 || rc=$?
+cat "${plain}"
+(( rc == 0 )) || report_fail "probe_capture_apis rc=${rc}"
+fresh_config
+rc=0
+LD_PRELOAD="${VGPU_SO}" "${PROBES}/probe_capture_apis" >"${hooked}" 2>/dev/null || rc=$?
+(( rc == 0 )) || report_fail "probe_capture_apis under the library rc=${rc}"
+diff "${plain}" "${hooked}" || report_fail "the library changes what a capture survives"
+rm -f "${plain}" "${hooked}"
 
 if [[ -x "${PROBES}/probe_graph_throttle" ]]; then
   echo "=== graphs stay throttled in number (core limit 10, compare with the same line without the library)"

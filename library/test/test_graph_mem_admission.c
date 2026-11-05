@@ -20,6 +20,7 @@
  *   [H] a graph allocating on two devices is checked on each (needs 2 GPUs)
  *   [I] graphs past what a fixed table of 256 held are still checked
  *   [J] graphs stay checked in a process cycling contexts
+ *   [K] a cuGraphExecUpdate under another context leaves the exec's record with its own
  *
  * Each case trims the graph pool first so it starts with nothing reserved.
  * Built twice (_ptsz variant) so the per-thread-default-stream hooks are
@@ -491,6 +492,44 @@ static int context_teardown_frees_records(CUcontext main_ctx) {
   return big_graph_is_refused("cuGraphLaunch (after 300 context lifetimes)");
 }
 
+/* --------------------------------------------------------------------- [K] */
+/* The exec stays its context's when updated under another. Were the record moved, that
+ * context going would take the record along, and the graph would go unchecked. */
+static int update_keeps_owner(void) {
+  trim_pool();
+  size_t need = headroom() / 3;
+  CUgraph g = captured_graph(need);
+  if (g == NULL) { printf("  FAIL: could not build a graph\n"); return 1; }
+  CUgraphExec ex = NULL;
+  CHECK_DRV_API(cuGraphInstantiateWithFlags(&ex, g, 0));
+  CUcontext x = NULL;
+  CHECK_DRV_API(CUCTX_CREATE(&x, 0, g_dev));
+  CUresult r = cuGraphExecUpdate(ex, g, NULL);
+  describe("cuGraphExecUpdate (another context current)", r);
+  CHECK_DRV_API(cuCtxDestroy(x));
+  cuGraphDestroy(g);
+  int failed = 0;
+  if (r != CUDA_SUCCESS) {
+    printf("  not run: this driver refuses the update\n");
+  } else {
+    CUdeviceptr filler = fill_leaving(need / 2);
+    r = cuGraphLaunch(ex, g_stream);
+    describe("cuGraphLaunch (headroom taken)", r);
+    if (r != CUDA_ERROR_OUT_OF_MEMORY) {
+      printf("  FAIL: the exec went unchecked after its update\n");
+      failed = 1;
+    }
+    cuStreamSynchronize(g_stream);
+    if (filler) cuMemFree(filler);
+    r = launch_and_wait(ex);
+    describe("cuGraphLaunch (freed)", r);
+    if (r != CUDA_SUCCESS) failed = 1;
+  }
+  cuGraphExecDestroy(ex);
+  trim_pool();
+  return failed;
+}
+
 int main(void) {
   if (!preloaded()) {
     printf("SKIP (needs LD_PRELOAD=libvgpu-control.so and a memory limit)\n");
@@ -514,6 +553,7 @@ int main(void) {
   RUN_CASE("[H] a graph allocating on two devices is checked on each", multi_device_checked());
   RUN_CASE("[I] graphs past what a fixed table of 256 held are still checked", many_live_graphs());
   RUN_CASE("[J] graphs stay checked in a process cycling contexts", context_teardown_frees_records(ctx));
+  RUN_CASE("[K] an update under another context leaves the exec's record", update_keeps_owner());
 #undef RUN_CASE
   trim_pool();
   cuStreamDestroy(g_stream);

@@ -69,6 +69,15 @@
  *   [X] [Y] a capture dying with its stream's context, and one left open by a thread
  *       that exited.
  *
+ *   [Z] an async allocation on another stream, of this device and of another, leaves
+ *       an open capture alone: asking for that stream's device must not touch it.
+ *
+ *   [AA] the per-thread stream captured in two contexts by one thread: two captures,
+ *       and ending or losing one leaves the other's charge.
+ *
+ *   [AB] the context current when a capture began goes first, the stream's stays:
+ *       the capture lives on, and ending it leaves nothing charged.
+ *
  *   [H] [I] [J] a capture left open when its context goes -- cuCtxDestroy, a
  *       primary-context reset, the release of its last reference. The driver
  *       destroys the graphs with no cuGraphDestroy; the teardown hooks retire
@@ -88,6 +97,7 @@
  *     VMEMORY_NODE_ENABLED=1 ./test_alloc_async_accounting
  */
 #include <cuda.h>
+#include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1165,6 +1175,27 @@ static int expect_pool_alloc(const char *what, CUmemoryPool pool, size_t bytes, 
   return 0;
 }
 
+/* cuMemGetDefaultMemPool and cuMemGetMemPool name the device by location, and only
+ * newer drivers have them. They return the pools the cuDevice calls do, so they are
+ * used before those are called: only they can have told the library the pool's device. */
+static const char *const g_location_pool_getters[2] = {"cuMemGetDefaultMemPool", "cuMemGetMemPool"};
+
+static void get_location_pools(CUdevice dev, CUmemoryPool pools[2]) {
+  typedef CUresult (*get_pool_t)(CUmemoryPool *, CUmemLocation *, CUmemAllocationType);
+  for (int i = 0; i < 2; i++) {
+    get_pool_t get = (get_pool_t)dlsym(RTLD_DEFAULT, g_location_pool_getters[i]);
+    CUmemLocation where;
+    memset(&where, 0, sizeof(where));
+    where.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    where.id = dev;
+    CUresult r = get != NULL ? get(&pools[i], &where, CU_MEM_ALLOCATION_TYPE_PINNED) : CUDA_ERROR_NOT_FOUND;
+    if (r != CUDA_SUCCESS) {
+      printf("  %s: not run on this driver (%d)\n", g_location_pool_getters[i], (int)r);
+      pools[i] = NULL;
+    }
+  }
+}
+
 static int pool_alloc_uses_pool_device(CUdevice dev, CUcontext ctx) {
   { int _pre = can_assert(); if (_pre != 0) return _pre; }
   int count = 0;
@@ -1183,8 +1214,8 @@ static int pool_alloc_uses_pool_device(CUdevice dev, CUcontext ctx) {
   CUmemoryPool here = NULL, there = NULL, there_default = NULL, there_current = NULL;
   CHECK_DRV_API(pool_on(dev, &here));
   CHECK_DRV_API(pool_on(other, &there));
-  CHECK_DRV_API(cuDeviceGetDefaultMemPool(&there_default, other));
-  CHECK_DRV_API(cuDeviceGetMemPool(&there_current, other));
+  CUmemoryPool there_by_location[2] = {NULL, NULL};
+  get_location_pools(other, there_by_location);
   size_t chunk = headroom_of(ctx, ctx) / 4;
   int failed = 0;
 
@@ -1192,6 +1223,12 @@ static int pool_alloc_uses_pool_device(CUdevice dev, CUcontext ctx) {
   CUdeviceptr filler = fill_ctx(octx, ctx, chunk / 2);
   failed += expect_pool_alloc("pool there, stream here (there full)", there, chunk, s0, CUDA_ERROR_OUT_OF_MEMORY);
   failed += expect_pool_alloc("pool there, stream there (there full)", there, chunk, s1, CUDA_ERROR_OUT_OF_MEMORY);
+  for (int i = 0; i < 2; i++) {
+    if (there_by_location[i] == NULL) continue;
+    failed += expect_pool_alloc(g_location_pool_getters[i], there_by_location[i], chunk, s0, CUDA_ERROR_OUT_OF_MEMORY);
+  }
+  CHECK_DRV_API(cuDeviceGetDefaultMemPool(&there_default, other));
+  CHECK_DRV_API(cuDeviceGetMemPool(&there_current, other));
   failed += expect_pool_alloc("default pool there, stream here (there full)", there_default, chunk, s0, CUDA_ERROR_OUT_OF_MEMORY);
   failed += expect_pool_alloc("current pool there, stream here (there full)", there_current, chunk, s0, CUDA_ERROR_OUT_OF_MEMORY);
   failed += expect_pool_alloc("pool here, stream there (there full)", here, chunk, s1, CUDA_SUCCESS);
@@ -1366,6 +1403,166 @@ static int thread_exit_mid_capture(CUcontext ctx) {
   }
   if (after - before > (long long)g_y_chunk) {
     printf("  FAIL: %.0f MiB charged by captures whose threads are gone\n", MIB(after - before));
+    return 1;
+  }
+  return 0;
+}
+
+/* --------------------------------------------------------------------- [Z] --
+ * The stream allocated on is not the one in capture: the hook asks for its device
+ * with the capture open, which must not disturb it. */
+static int alloc_on_other_stream(CUstream capturing, CUstream other, const char *what) {
+  CUdeviceptr p = 0, in_capture = 0;
+  CUgraph g = NULL;
+  long long before = ledger_used_self();
+  CHECK_DRV_API(cuStreamBeginCapture(capturing, CU_STREAM_CAPTURE_MODE_RELAXED));
+  CUresult a = cuMemAllocAsync(&in_capture, 16u << 20, capturing);
+  CUresult r = cuMemAllocAsync(&p, 1u << 20, other);
+  CUresult f = a == CUDA_SUCCESS ? cuMemFreeAsync(in_capture, capturing) : a;
+  CUresult e = cuStreamEndCapture(capturing, &g);
+  describe(what, r);
+  describe("cuStreamEndCapture", e);
+  if (g != NULL) cuGraphDestroy(g);
+  if (r == CUDA_SUCCESS) {
+    cuStreamSynchronize(other);
+    cuMemFreeAsync(p, other);
+    cuStreamSynchronize(other);
+  }
+  long long after = ledger_used_self();
+  if (a != CUDA_SUCCESS || f != CUDA_SUCCESS || r != CUDA_SUCCESS || e != CUDA_SUCCESS) {
+    printf("  FAIL: the capture did not survive\n");
+    return 1;
+  }
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged\n", MIB(after - before));
+    return 1;
+  }
+  return 0;
+}
+
+static int other_stream_leaves_capture_alone(CUdevice dev, CUcontext ctx) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+  CUstream s0 = NULL, s0b = NULL;
+  CHECK_DRV_API(cuStreamCreate(&s0, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuStreamCreate(&s0b, CU_STREAM_NON_BLOCKING));
+  int failed = alloc_on_other_stream(s0, s0b, "another stream, same device");
+  int count = 0;
+  cuDeviceGetCount(&count);
+  if (count > 1) {
+    CUdevice other;
+    CUcontext octx = NULL;
+    CUstream s1 = NULL;
+    CHECK_DRV_API(cuDeviceGet(&other, dev == 0 ? 1 : 0));
+    CHECK_DRV_API(cuDevicePrimaryCtxRetain(&octx, other));
+    CHECK_DRV_API(cuCtxSetCurrent(octx));
+    CHECK_DRV_API(cuStreamCreate(&s1, CU_STREAM_NON_BLOCKING));
+    CHECK_DRV_API(cuCtxSetCurrent(ctx));
+    failed += alloc_on_other_stream(s0, s1, "a stream of another device");
+    failed += alloc_on_other_stream(s1, s0, "capturing on the other device");
+    cuStreamDestroy(s1);
+    cuDevicePrimaryCtxRelease(other);
+    CHECK_DRV_API(cuCtxSetCurrent(ctx));
+  }
+  cuStreamDestroy(s0);
+  cuStreamDestroy(s0b);
+  return failed;
+}
+
+/* -------------------------------------------------------------------- [AA] --
+ * Each context has a per-thread stream of its own, so one thread can capture on
+ * both at once. Ending the second, or losing its context, must leave the first. */
+static int per_thread_stream_two_contexts(CUdevice dev, CUcontext ctx) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+  const size_t first = 64u << 20, second = 32u << 20;
+  long long before = ledger_used_self();
+  int failed = 0;
+  for (int lose_context = 0; lose_context < 2; lose_context++) {
+    CUcontext x = NULL, popped = NULL;
+    CUgraph g = NULL;
+    CUdeviceptr p = 0, q = 0;
+    CHECK_DRV_API(cuCtxSetCurrent(ctx));
+    CHECK_DRV_API(cuStreamBeginCapture(CU_STREAM_PER_THREAD, CU_STREAM_CAPTURE_MODE_RELAXED));
+    CHECK_DRV_API(cuMemAllocAsync(&p, first, CU_STREAM_PER_THREAD));
+    CHECK_DRV_API(CUCTX_CREATE(&x, 0, dev));
+    CUresult r = cuStreamBeginCapture(CU_STREAM_PER_THREAD, CU_STREAM_CAPTURE_MODE_RELAXED);
+    describe("cuStreamBeginCapture (second context)", r);
+    if (r != CUDA_SUCCESS) {
+      printf("  not run: this driver refuses the second capture\n");
+      cuCtxDestroy(x);
+      cuCtxSetCurrent(ctx);
+      cuStreamEndCapture(CU_STREAM_PER_THREAD, &g);
+      if (g != NULL) cuGraphDestroy(g);
+      return 0;
+    }
+    CHECK_DRV_API(cuMemAllocAsync(&q, second, CU_STREAM_PER_THREAD));
+    long long both = ledger_used_self();
+    if (lose_context) {
+      CHECK_DRV_API(cuCtxDestroy(x));
+    } else {
+      CHECK_DRV_API(cuMemFreeAsync(q, CU_STREAM_PER_THREAD));
+      CHECK_DRV_API(cuStreamEndCapture(CU_STREAM_PER_THREAD, &g));
+      if (g != NULL) cuGraphDestroy(g);
+      g = NULL;
+      CHECK_DRV_API(cuCtxPopCurrent(&popped));
+    }
+    CHECK_DRV_API(cuCtxSetCurrent(ctx));
+    long long one = ledger_used_self();
+    /* The other context's record, still found under this key. */
+    CHECK_DRV_API(cuMemFreeAsync(p, CU_STREAM_PER_THREAD));
+    CHECK_DRV_API(cuStreamEndCapture(CU_STREAM_PER_THREAD, &g));
+    if (g != NULL) cuGraphDestroy(g);
+    if (!lose_context) cuCtxDestroy(x);
+    CHECK_DRV_API(cuCtxSetCurrent(ctx));
+    long long none = ledger_used_self();
+    printf("  %s: both %.0f, one %.0f, none %.0f MiB over the start\n",
+           lose_context ? "second context destroyed" : "second capture ended",
+           MIB(both - before), MIB(one - before), MIB(none - before));
+    if (both - before != (long long)(first + second) || one - before != (long long)first || none != before) {
+      printf("  FAIL: expected %.0f, %.0f, 0\n", MIB(first + second), MIB(first));
+      failed = 1;
+    }
+  }
+  return failed;
+}
+
+/* -------------------------------------------------------------------- [AB] --
+ * The context current at the beginning of a capture is destroyed; the stream's is
+ * not, so the capture lives on and its record stays. The charge went by the context
+ * it was recorded under. Ending the capture must work and retire what is left once. */
+static int begin_context_destroyed_first(CUdevice dev, CUcontext back) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }
+  long long before = ledger_used_self();
+  for (int i = 0; i < 5; i++) {
+    CUcontext y = NULL, x = NULL, popped = NULL;
+    CUstream s = NULL;
+    CUgraph g = NULL;
+    CUdeviceptr p = 0;
+    CHECK_DRV_API(CUCTX_CREATE(&y, 0, dev));
+    CHECK_DRV_API(cuStreamCreate(&s, CU_STREAM_NON_BLOCKING));
+    CHECK_DRV_API(cuCtxPopCurrent(&popped));
+    CHECK_DRV_API(CUCTX_CREATE(&x, 0, dev));
+    CHECK_DRV_API(cuStreamBeginCapture(s, CU_STREAM_CAPTURE_MODE_RELAXED));
+    CHECK_DRV_API(cuMemAllocAsync(&p, 16u << 20, s));
+    CHECK_DRV_API(cuCtxDestroy(x));
+    CHECK_DRV_API(cuCtxSetCurrent(back));
+    CUresult r = cuMemFreeAsync(p, s);
+    CUresult e = cuStreamEndCapture(s, &g);
+    if (i == 0) {
+      describe("cuMemFreeAsync, begin's context gone", r);
+      describe("cuStreamEndCapture, begin's context gone", e);
+    }
+    if (g != NULL) cuGraphDestroy(g);
+    if (e != CUDA_SUCCESS) {
+      printf("  FAIL: the capture did not survive\n");
+      return 1;
+    }
+    CHECK_DRV_API(cuCtxDestroy(y));
+    CHECK_DRV_API(cuCtxSetCurrent(back));
+  }
+  long long after = ledger_used_self();
+  printf("  ledger %.0f -> %.0f MiB\n", MIB(before), MIB(after));
+  if (after != before) {
+    printf("  FAIL: %.0f MiB left charged\n", MIB(after - before));
     return 1;
   }
   return 0;
@@ -1644,6 +1841,12 @@ int main(void) {
            pool_alloc_uses_pool_device(device, ctx));
   RUN_CASE("[W] more pools than the table starts with",
            pool_table_overflow(device));
+  RUN_CASE("[Z] an async allocation on another stream leaves an open capture alone",
+           other_stream_leaves_capture_alone(device, ctx));
+  RUN_CASE("[AA] the per-thread stream captured in two contexts by one thread",
+           per_thread_stream_two_contexts(device, ctx));
+  RUN_CASE("[AB] the context current at a capture's beginning goes first",
+           begin_context_destroyed_first(device, ctx));
   RUN_CASE("[M] concurrent captures across threads, some invalidated, all released",
            concurrent_captures_retire(ctx));
   RUN_CASE("[N] more captures open at once than the registry starts with are released",

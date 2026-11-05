@@ -127,6 +127,19 @@ static void m_ctx_multi(void) {
   cuCtxSetCurrent(g_ctx);
 }
 
+/* An update on the way, of a graph that stays the exec's. */
+static void m_exec_update(void) {
+  CUgraph g;
+  CUgraphExec e;
+  CUgraphNode prev = NULL;
+  CHECK(cuGraphCreate(&g, 0));
+  add_alloc_free(g, g_dev, &prev);
+  CHECK(cuGraphInstantiateWithFlags(&e, g, 0));
+  COUNT_FAILURE(cuGraphExecUpdate(e, g, NULL));
+  COUNT_FAILURE(cuGraphExecDestroy(e));
+  COUNT_FAILURE(cuGraphDestroy(g));
+}
+
 static CUdevice teardown_device(void) { return g_two_devices ? g_other : g_dev; }
 
 static void exec_on_primary(CUdevice d) {
@@ -202,6 +215,20 @@ static void m_capture_other_ctx_destroyed(void) {
   cuCtxSetCurrent(g_ctx);
 }
 
+/* The context current at the beginning goes first, and the stream's outlives it. */
+static void m_capture_begin_ctx_destroyed(void) {
+  CUcontext x = new_context();
+  CUgraph g = NULL;
+  CUdeviceptr p;
+  CHECK(cuStreamBeginCapture(g_stream, CU_STREAM_CAPTURE_MODE_RELAXED));
+  COUNT_FAILURE(cuMemAllocAsync(&p, 1 << 16, g_stream));
+  COUNT_FAILURE(cuCtxDestroy(x));
+  cuCtxSetCurrent(g_ctx);
+  COUNT_FAILURE(cuMemFreeAsync(p, g_stream));
+  COUNT_FAILURE(cuStreamEndCapture(g_stream, &g));
+  if (g != NULL) cuGraphDestroy(g);
+}
+
 static void m_capture_thread_exit(void) {
   pthread_t t;
   pthread_create(&t, NULL, capture_and_exit, NULL);
@@ -224,6 +251,7 @@ static const struct {
 } g_modes[] = {
   {"exec", m_exec, 0},
   {"exec_multi", m_exec_multi, 1},
+  {"exec_update", m_exec_update, 0},
   {"ctx", m_ctx, 0},
   {"ctx_not_current", m_ctx_not_current, 0},
   {"ctx_multi", m_ctx_multi, 1},
@@ -235,6 +263,7 @@ static const struct {
   {"capture_stream_destroyed", m_capture_stream_destroyed, 0},
   {"capture_ctx_destroyed", m_capture_ctx_destroyed, 0},
   {"capture_other_ctx_destroyed", m_capture_other_ctx_destroyed, 0},
+  {"capture_begin_ctx_destroyed", m_capture_begin_ctx_destroyed, 0},
   {"capture_thread_exit", m_capture_thread_exit, 0},
   {"pool", m_pool, 0},
   {"pool_get", m_pool_get, 0},

@@ -705,3 +705,113 @@ cppcheck：CI 用的 2.13（ubuntu-24.04）在全部代码上没有报告；6.9�
 仍是已知边界：销毁 begin 时的当前 context 会清掉记在它名下的记账，即使捕获在别的 context 的 stream 上还在进行（只会少计）；host 位置的池和导入的池按当前 context 查卡。
 
 审查里没有发现问题的部分：`slot_table.h`（另有 2 万轮 `retire_if` 模糊测试）、加锁和锁顺序、设备锁在所有返回路径的释放、fork 重置、`mem_more` 的所有权。
+
+### 6.13 双 RTX 5090 全量验证与补测（2026-11-05，两张 RTX 5090 32 GiB，无 NVLink，驱动 595.71.05，CUDA 13.2 工具链，PyTorch 2.14.1+cu130）
+
+这是 6.12 的修复第一次上 GPU。先按审查里没覆盖到的项补了用例和探针，再跑全量。13.2 的头文件比 `cuda-subset.h`（13.4）旧，布局检查失败属预期，所以这台机器用 `-DVGPU_RUN_HOOK_CHECKS=OFF`；本地用 13.4 头文件跑了 `make check`。
+
+#### 这轮改的两处库代码
+
+| 问题 | 修法 | 依据 |
+|---|---|---|
+| `current != device` 的 graph launch 跳过 `gap_begin()`，也就不更新 `last_launch_ns`（评审指出）。下一次本设备 launch 被当成刚结束空闲，多走一次 GAP 路径，多一次同步和占空比 sleep。偏严、一次性，但不对 | `graph_gap_begin()`：跨设备 launch 只打活动戳，仍走令牌桶 | `probe_launch_device`，见下 |
+| `stream_device()` 优先用 `cuStreamGetDevice`，有捕获时走 `cuStreamGetCtx`，多一条分支和一个"别的流有 GLOBAL 捕获时是否安全"的未知项 | **按"优先沿用旧驱动的处理方式"**：一律走 `cuStreamGetCtx` + push + `cuCtxGetDevice` + pop，它在 550/570/580/595 上都实测可用；只有它失败才回退 `cuStreamGetDevice`。删掉 `other_capture` 参数和 `capture_reg_any()` | `probe_capture_apis`，见下 |
+
+#### 补的用例（缺口 → 用例）
+
+| 缺口 | 用例 | 595 上的结果 |
+|---|---|---|
+| 捕获进行中对另一个流做异步分配（同卡、跨卡、捕获在另一张卡） | `test_alloc_async_accounting` [Z] | 捕获都正常结束，账本归零 |
+| per-thread stream 在同一线程的两个 context 上各开一个捕获 | [AA] | 结束第二个或销毁其 context：96 → 64 → 0 MiB，互不影响 |
+| begin 时的当前 context 先销毁，stream 的 context 还在 | [AB]，`probe_churn capture_begin_ctx_destroyed` | 捕获继续有效，End 成功，账本归零（没有重复退账），表 count=0 |
+| `cuMemGetDefaultMemPool`、`cuMemGetMemPool` 按位置取别的卡的池 | [V]（`dlsym` 取符号，旧驱动没有则跳过；先于 `cuDevice*` 取池，否则同一句柄已被登记，测不到） | 该卡满时都返回 OOM |
+| `cuGraphExecUpdate` 在别的 context 下更新后，记录仍归原 context | `test_graph_mem_admission` [K]，`probe_churn exec_update` | 那个 context 销毁后 launch 仍被拦截，表 count=0 |
+| update 后 launch 仍扣原设备 | `probe_launch_device` | 见下 |
+| 第一次 launch 就是跨设备时 GAP 事件不进错 context；跨设备 launch 算活动 | `probe_launch_device`（改成当前设备 1 先 launch） | 见下 |
+| 库有没有改变捕获能承受的操作 | `run_probes.sh`：`probe_capture_apis` 裸跑和挂库跑，输出做 diff | 完全一致 |
+
+`probe_capture_apis` 不再要求两张卡，单卡时用第二个 context 代替。
+
+#### `probe_capture_apis`（595，裸跑和挂库输出相同；当前 context 与被捕获 stream 不同）
+
+| 操作（GLOBAL 捕获中） | 返回 | End |
+|---|---|---|
+| 无 | 0 | 0 |
+| `cuStreamGetCtx`（捕获中的流） | 0 | 0 |
+| `cuStreamGetDevice`（捕获中的流） | 900 | **901，捕获被破坏** |
+| `cuStreamGetCtx`（另一个空闲流） | 0 | 0 |
+| `cuStreamGetDevice`（另一个空闲流） | 0 | 0（只有 595 的数据，库只把它当回退） |
+| push + `cuCtxGetDevice` + pop | 0 | 0 |
+| `cuCtxGetDevice` | 0 | 0 |
+| `cuMemAllocAsync`（另一个空闲流） | 900 | 901：驱动的 GLOBAL 语义，裸跑相同，不是库造成的 |
+| `cuMemAllocAsync`（捕获中的流） | 0 | 0 |
+
+#### `probe_launch_device`（kernel 约 22 ms，设备 0 限 10%、设备 1 限 100%；稳定性测 3 轮）
+
+| 指标 | 限 10/100 | 对照 100/100 |
+|---|---|---|
+| 空闲后 launch 调用耗时 | 222 ms（22 ms GPU + 200 ms 占空比，GAP 事件没被污染） | 0.007 ms |
+| 紧跟跨设备 launch 的 launch 调用耗时 | 0.003 ms（取多轮最快；个别轮碰到令牌桶 sleep，为 60 ms） | 0.003 ms |
+| 当前设备 0 / 1 / 0，launches/s | 4.6 / 4.6 / 4.6 | 44.3 / 44.1 / 43.9 |
+| 设备 1 当前下 update 后，launches/s | 4.6 | 43.8 |
+
+这个探针改了三次才可靠，记下来免得再踩：空 kernel 和 memset 在 5090 上压不出利用率，launch 速率反映不出限额（memset 图的 launch 调用本身就 25 ms）；kernel 大小的校准不能放在受限设备上（`rate_limiter` 的 sleep 落在墙钟和事件计时里，会选出过小的 n）；校准前要用相同网格预热一次，否则首次的模块加载和资源分配也会选出过小的 n。
+
+#### 变异验证（故意改坏库，确认用例变红）
+
+| 变异 | 结果 |
+|---|---|
+| M1 跨设备 launch 不打活动戳 | `probe_launch_device` 失败：紧跟的 launch 222 ms |
+| M2 跨设备 launch 也进 `gap_begin` | `probe_launch_device` 失败：空闲后只有 0.59 ms，GAP 事件进了错的 context，占空比永久失效（证实 6.12 那条是真问题） |
+| M3 update 覆盖记录的 context | [K] 失败 |
+| M4 per-thread 键不含 context | [AA] 失败（期望 96/64/0） |
+| M5 两个按位置取池的 hook 都不登记 | [V] 失败（期望 OOM，实际成功） |
+| 只去掉其中一个 | 不变红：两个 API 这里返回同一句柄，互相掩盖。第一版用例在分配前调了 `cuDevice*` 取池，连都去掉也不变红，已调整顺序 |
+
+没有做变异的：[Z]。它要防的是"对捕获中的流发查询"，而 595 上 `cuStreamGetCtx` 对捕获中的流是安全的，只有 550 才会破坏捕获，这台机器区分不出。
+
+#### 全量结果（HEAD 为本节提交）
+
+| 项 | 结果 |
+|---|---|
+| `make test`（双卡，含 PyTorch；两轮） | 32/32，跳过 3 个（mxnet、tensorflow×2 未安装）；第二轮含全部新用例 |
+| `CUDA_VISIBLE_DEVICES=0` 单卡视图，accounting 和 `_ptsz`、graph 准入 | 通过；需要两张卡的用例打印未运行 |
+| `make test-gpu-sanitize` | 5/5，无 ASan/UBSan 报告 |
+| `make test-nogpu`、`make test-sanitize` | 各 21 项通过 |
+| `make check`（本地，13.4 头文件）、cppcheck 2.13 | 通过；608 项、77 个 hook |
+| `probe_fork` | 60 次 fork，0 挂死，0 异常 |
+| `probe_reclaim` | 池被驱动回收（1216→0 MiB），重新 launch 被拒（返回 2） |
+| `torch_many_graphs`（1700 个真实 torch CUDAGraph） | 全部捕获、重捕获、释放；cost capacity=4096 count=0，capture 64/0 |
+| 6 个进程并发跑 accounting、graph 准入、VMM、pool 用例 3 轮（抢设备锁） | 无挂死（没有 timeout）。部分用例失败是预期的：账本共享，彼此算进用量 |
+
+表回收（`make test-probes`，容量和数量都达到期望）：
+
+| 模式 | N | 表 | capacity | count |
+|---|---|---|---|---|
+| exec / exec_multi / exec_update | 20000 / 3000 / 3000 | cost | 4096 | 0 |
+| ctx / ctx_not_current / ctx_multi | 100 | cost | 4096 | 0 |
+| primary_release / primary_reset | 50 | cost | 4096 | 0 |
+| capture | 100000 | capture | 64 | 0 |
+| capture_invalidated / _stream_destroyed | 5000 | capture | 64 | 0 |
+| capture_wrong_thread | 3000 | capture | 64 | 0 |
+| capture_ctx_destroyed / _other_ctx_destroyed / _begin_ctx_destroyed | 100 | capture | 64 | 0 |
+| capture_thread_exit | 5000 | capture | 64 | 1（线程 id 复用，稳定在 1） |
+| pool / pool_get | 10000 / 100000 | pool | 64 | 0 / 1 |
+
+`probe_graph_throttle`（6000 个存活 graph，空 kernel）：不加载库和限 100 都是 244256 launches/s；限 10 时约 38770，首尾一致（首 41173，末 38774）。
+
+#### TSan（一次性，未入库：把 `-fsanitize=address,undefined` 换成 `thread` 构建库，只有库被插桩）
+
+`test_graph_mem_admission` 和 `test_alloc_async_accounting` 全部用例通过，`detect_deadlocks=1` 下**没有锁顺序或死锁报告**。各有一条 data race，都不是这个分支引入的（`git blame`）：
+
+| 位置 | 判断 |
+|---|---|
+| `rate_limiter` 读令牌桶 vs watcher 的 CAS | 有意的无锁设计，读到旧值只影响一轮 |
+| `get_used_gpu_virt_memory` vs `retire_capture_records` | 误报：两边都持跨进程文件锁，TSan 不认识 |
+
+TSan 只覆盖这两个测试程序，不包含 fork，也不覆盖多进程。
+
+#### 没有验证的
+
+- 550、580 上这次的提交；570 见下。`stream_device()` 现在走的路径就是 550 上一直走的路径，且 6.6 已在 570/580 上测过这些查询是安全的，但整体回归没有在旧驱动上重跑。
+- vLLM 本身。
