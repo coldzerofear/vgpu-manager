@@ -19,7 +19,7 @@
  *   [G] after a trim returns the pool's pages, a launched exec is checked again
  *   [H] a graph allocating on two devices is checked on each (needs 2 GPUs)
  *   [I] graphs past what a fixed table of 256 held are still checked
- *   [J] a context teardown gives its execs' records back
+ *   [J] graphs stay checked in a process cycling contexts
  *
  * Each case trims the graph pool first so it starts with nothing reserved.
  * Built twice (_ptsz variant) so the per-thread-default-stream hooks are
@@ -475,10 +475,9 @@ static int many_live_graphs(void) {
 }
 
 /* --------------------------------------------------------------------- [J] */
-/* A context taking its execs with it gives their records back: nothing else
- * ever would, and a process cycling contexts would run the table full of dead
- * execs. Shows only against a table of bounded size, and that is the point of
- * the case: 300 cycles were enough for the fixed one. */
+/* Graphs stay checked in a process cycling contexts, whose execs go with them and
+ * are never destroyed. With a growable table this cannot see a leak of records, only
+ * what one would break: probe_churn's table stats are what catch that. */
 static int context_teardown_frees_records(CUcontext main_ctx) {
   for (int i = 0; i < 300; i++) {
     CUcontext c = NULL;
@@ -514,7 +513,7 @@ int main(void) {
   RUN_CASE("[G] a trim makes the next launch checked again", trim_rechecks());
   RUN_CASE("[H] a graph allocating on two devices is checked on each", multi_device_checked());
   RUN_CASE("[I] graphs past what a fixed table of 256 held are still checked", many_live_graphs());
-  RUN_CASE("[J] a context teardown gives its records back", context_teardown_frees_records(ctx));
+  RUN_CASE("[J] graphs stay checked in a process cycling contexts", context_teardown_frees_records(ctx));
 #undef RUN_CASE
   trim_pool();
   cuStreamDestroy(g_stream);

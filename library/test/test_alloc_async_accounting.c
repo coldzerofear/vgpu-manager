@@ -1260,6 +1260,31 @@ static int pool_table_overflow(CUdevice dev) {
     if (cuMemPoolDestroy(pools[i]) != CUDA_SUCCESS) failed++;
   }
   CUmemoryPool again = NULL;
+  /* The records must be there, not just the fallback to the current context: pools on
+   * the other device, past the table's first size, still checked there. */
+  int count = 0;
+  cuDeviceGetCount(&count);
+  if (count > 1) {
+    CUdevice other;
+    CHECK_DRV_API(cuDeviceGet(&other, dev == 0 ? 1 : 0));
+    CUcontext octx = NULL, here = NULL;
+    CHECK_DRV_API(cuCtxGetCurrent(&here));
+    CHECK_DRV_API(cuDevicePrimaryCtxRetain(&octx, other));
+    made = 0;
+    for (int i = 0; i < POOLS; i++) {
+      if (pool_on(other, &pools[i]) != CUDA_SUCCESS) break;
+      made++;
+    }
+    size_t chunk = headroom_of(octx, here) / 4;
+    CUdeviceptr filler = fill_ctx(octx, here, chunk / 2);
+    if (made > 0) {
+      failed += expect_pool_alloc("pool on the other device (it is full)", pools[made - 1], chunk, s,
+                                  CUDA_ERROR_OUT_OF_MEMORY);
+    }
+    free_ctx(octx, here, filler);
+    for (int i = 0; i < made; i++) cuMemPoolDestroy(pools[i]);
+    cuDevicePrimaryCtxRelease(other);
+  }
   CHECK_DRV_API(pool_on(dev, &again));
   failed += expect_pool_alloc("cuMemAllocFromPoolAsync (after destroying them)", again, 1 << 20, s, CUDA_SUCCESS);
   cuMemPoolDestroy(again);
@@ -1303,12 +1328,15 @@ static int capture_of_other_context_is_retired(CUdevice dev, CUcontext back) {
  * displaced, which must retire its charges, as nothing else ever could. */
 static CUcontext g_y_ctx;
 static size_t g_y_chunk;
+static int g_y_errors;
 static void *open_capture_and_exit(void *arg) {
   (void)arg;
   cuCtxSetCurrent(g_y_ctx);
-  cuStreamBeginCapture(CU_STREAM_PER_THREAD, CU_STREAM_CAPTURE_MODE_RELAXED);
   CUdeviceptr dptr = 0;
-  cuMemAllocAsync(&dptr, g_y_chunk, CU_STREAM_PER_THREAD);
+  if (cuStreamBeginCapture(CU_STREAM_PER_THREAD, CU_STREAM_CAPTURE_MODE_RELAXED) != CUDA_SUCCESS ||
+      cuMemAllocAsync(&dptr, g_y_chunk, CU_STREAM_PER_THREAD) != CUDA_SUCCESS) {
+    __atomic_add_fetch(&g_y_errors, 1, __ATOMIC_RELAXED);
+  }
   return NULL;
 }
 
@@ -1328,6 +1356,14 @@ static int thread_exit_mid_capture(CUcontext ctx) {
   long long after = ledger_used_self();
   printf("  ledger after 20 threads: %.0f MiB (one capture of %.0f MiB still on record)\n",
          MIB(after - before), MIB(g_y_chunk));
+  if (g_y_errors != 0) {
+    printf("  FAIL: %d threads could not capture\n", g_y_errors);
+    return 1;
+  }
+  if (after - before < (long long)g_y_chunk) {
+    printf("  FAIL: the capture on record was not charged\n");
+    return 1;
+  }
   if (after - before > (long long)g_y_chunk) {
     printf("  FAIL: %.0f MiB charged by captures whose threads are gone\n", MIB(after - before));
     return 1;
