@@ -18,6 +18,8 @@
  *   [F] a larger graph after a smaller one: only the pool's growth is checked
  *   [G] after a trim returns the pool's pages, a launched exec is checked again
  *   [H] a graph allocating on two devices is checked on each (needs 2 GPUs)
+ *   [I] graphs past what a fixed table of 256 held are still checked
+ *   [J] a context teardown gives its execs' records back
  *
  * Each case trims the graph pool first so it starts with nothing reserved.
  * Built twice (_ptsz variant) so the per-thread-default-stream hooks are
@@ -407,6 +409,89 @@ static int multi_device_checked(void) {
   return failed;
 }
 
+/* A hand-built alloc-node graph's exec, with its graph gone. */
+static CUgraphExec hand_exec(size_t bytes) {
+  CUgraph g = NULL;
+  if (cuGraphCreate(&g, 0) != CUDA_SUCCESS) return NULL;
+  CUDA_MEM_ALLOC_NODE_PARAMS ap;
+  memset(&ap, 0, sizeof(ap));
+  ap.poolProps.allocType = CU_MEM_ALLOCATION_TYPE_PINNED;
+  ap.poolProps.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  ap.poolProps.location.id = g_dev;
+  ap.bytesize = bytes;
+  CUgraphNode an = NULL, fn = NULL;
+  CUgraphExec ex = NULL;
+  if (cuGraphAddMemAllocNode(&an, g, NULL, 0, &ap) != CUDA_SUCCESS ||
+      cuGraphAddMemFreeNode(&fn, g, &an, 1, ap.dptr) != CUDA_SUCCESS ||
+      cuGraphInstantiateWithFlags(&ex, g, 0) != CUDA_SUCCESS) {
+    ex = NULL;
+  }
+  cuGraphDestroy(g);
+  return ex;
+}
+
+/* The big graph must be refused with the headroom taken, however many graphs
+ * came before it. */
+static int big_graph_is_refused(const char *what) {
+  size_t need = headroom() / 3;
+  CUgraphExec big = hand_exec(need);
+  if (big == NULL) { printf("  FAIL: could not build the big graph\n"); return 1; }
+  CUdeviceptr filler = fill_leaving(need / 2);
+  CUresult r = cuGraphLaunch(big, g_stream);
+  cuStreamSynchronize(g_stream);
+  describe(what, r);
+  int failed = r != CUDA_ERROR_OUT_OF_MEMORY;
+  if (failed) printf("  FAIL: the graph was not checked\n");
+  if (filler) cuMemFree(filler);
+  cuGraphExecDestroy(big);
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [I] */
+/* Past what a fixed table of 256 held, a graph went unthrottled and unchecked.
+ * 600 because the driver itself refuses alloc nodes at about 1000; the growth of
+ * the table past its first size is exercised in test/nogpu/test_slot_table.c. */
+static int many_live_graphs(void) {
+  enum { LIVE = 600 };
+  trim_pool();
+  static CUgraphExec ex[LIVE];
+  int made = 0;
+  for (int i = 0; i < LIVE; i++) {
+    ex[i] = hand_exec(1 << 20);
+    if (ex[i] == NULL) break;
+    made++;
+  }
+  printf("  %d live graphs\n", made);
+  int failed = made != LIVE;
+  failed += big_graph_is_refused("cuGraphLaunch (after them, headroom taken)");
+  /* An early one still has its record. */
+  CUresult r = cuGraphLaunch(ex[0], g_stream);
+  cuStreamSynchronize(g_stream);
+  describe("cuGraphLaunch (the first of them)", r);
+  if (r != CUDA_SUCCESS) failed++;
+  for (int i = 0; i < made; i++) cuGraphExecDestroy(ex[i]);
+  trim_pool();
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [J] */
+/* A context taking its execs with it gives their records back: nothing else
+ * ever would, and a process cycling contexts would run the table full of dead
+ * execs. Shows only against a table of bounded size, and that is the point of
+ * the case: 300 cycles were enough for the fixed one. */
+static int context_teardown_frees_records(CUcontext main_ctx) {
+  for (int i = 0; i < 300; i++) {
+    CUcontext c = NULL;
+    CHECK_DRV_API(CUCTX_CREATE(&c, 0, g_dev));
+    CUgraphExec ex = hand_exec(1 << 20);
+    if (ex == NULL) { printf("  FAIL: could not build a graph\n"); return 1; }
+    CHECK_DRV_API(cuCtxDestroy(c));
+  }
+  CHECK_DRV_API(cuCtxSetCurrent(main_ctx));
+  trim_pool();
+  return big_graph_is_refused("cuGraphLaunch (after 300 context lifetimes)");
+}
+
 int main(void) {
   if (!preloaded()) {
     printf("SKIP (needs LD_PRELOAD=libvgpu-control.so and a memory limit)\n");
@@ -428,6 +513,8 @@ int main(void) {
   RUN_CASE("[F] only the pool's growth is checked", growth_only());
   RUN_CASE("[G] a trim makes the next launch checked again", trim_rechecks());
   RUN_CASE("[H] a graph allocating on two devices is checked on each", multi_device_checked());
+  RUN_CASE("[I] graphs past what a fixed table of 256 held are still checked", many_live_graphs());
+  RUN_CASE("[J] a context teardown gives its records back", context_teardown_frees_records(ctx));
 #undef RUN_CASE
   trim_pool();
   cuStreamDestroy(g_stream);

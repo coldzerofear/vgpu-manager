@@ -64,7 +64,7 @@
  *   [V] cuMemAllocFromPoolAsync is checked on the device of its pool, not of the
  *       stream or the current context (needs two devices).
  *
- *   [W] more pools than the library's table holds, and its slots coming back.
+ *   [W] more pools than the table starts with, and its slots coming back.
  *
  *   [H] [I] [J] a capture left open when its context goes -- cuCtxDestroy, a
  *       primary-context reset, the release of its last reference. The driver
@@ -1234,9 +1234,8 @@ static int pool_alloc_uses_pool_device(CUdevice dev, CUcontext ctx) {
 }
 
 /* --------------------------------------------------------------------- [W] --
- * More pools than the library's table holds: allocation goes on (falling back
- * to the current context for those it missed), and destroying pools frees the
- * table for later ones. */
+ * More pools than the table starts with (64): it grows, allocation goes on, and
+ * destroying pools gives the slots back. */
 static int pool_table_overflow(CUdevice dev) {
   { int _pre = can_assert(); if (_pre != 0) return _pre; }
   enum { POOLS = 80 };
@@ -1321,9 +1320,8 @@ static int concurrent_captures_retire(CUcontext ctx) {
   return failed;
 }
 
-/* [N] More captures open at once than the registry has slots (64): the
- * overflow falls back to the lookup at end of capture, and every capture that
- * ends normally still gives its charge back. */
+/* [N] More captures open at once than the registry's first size (64): it grows,
+ * and every capture gives its charge back. */
 static int registry_overflow_retires(void) {
   { int _pre = can_assert(); if (_pre != 0) return _pre; }
   size_t freeb = 0;
@@ -1537,11 +1535,11 @@ int main(void) {
            destroyed_stream_is_retired());
   RUN_CASE("[V] a pool allocation is checked on the pool's device",
            pool_alloc_uses_pool_device(device, ctx));
-  RUN_CASE("[W] more pools than the table holds",
+  RUN_CASE("[W] more pools than the table starts with",
            pool_table_overflow(device));
   RUN_CASE("[M] concurrent captures across threads, some invalidated, all released",
            concurrent_captures_retire(ctx));
-  RUN_CASE("[N] more captures open at once than the registry holds are released",
+  RUN_CASE("[N] more captures open at once than the registry starts with are released",
            registry_overflow_retires());
   RUN_CASE("[O] per-thread default stream captured by two threads at once",
            per_thread_stream_captures_retire(ctx));

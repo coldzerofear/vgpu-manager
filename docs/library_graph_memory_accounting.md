@@ -106,8 +106,8 @@ T2 也是 6.1 节"不能把记账持有到首次 launch"的实证：持有的话
   多 stream 并发 launch 与分配不释放的 graph 会低估，作为已知边界。
 - 手工 graph 的 alloc node 在创建时各自检查、不累加；upload/launch 时按整个 graph 的总量（扣除池已预留）再检查一次。
 - alloc node 跨多个设备的 graph 逐卡检查、每张卡检查完立即放锁（6.5）：检查到 launch 之间别的进程若在已检查的卡上分配，会低估（仅多卡 graph 的首次映射）。
-- 登记表满（同时超过 64 个进行中的捕获）时退回到结束时查询，此时被作废的捕获仍会遗留记账，直到 context 拆除或进程退出。
-  此时捕获内的异步分配也按当前 context 查卡（6.6）；接入捕获的 stream 同样按当前 context 查卡。
+- 捕获登记表可增长（6.9），只有内存耗尽写不进去时才退回到结束时查询，此时被作废的捕获仍会遗留记账，直到 context 拆除或进程退出，捕获内的异步分配也按当前 context 查卡。接入捕获的 stream 同样按当前 context 查卡（6.6）。
+- 导入的池、host 位置的池按当前 context 查卡（6.7）。
 - `cuDevicePrimaryCtxRelease` 的"查状态 → retain"之间若另一线程释放了最后一个引用，retain 会重新创建 primary context，随即被撤销的 release 销毁；记账结果不受影响。
 
 ## 6. 空窗 B：研究与实现
@@ -488,3 +488,81 @@ than that of the specified hStream"，`probe_pool2`（不加载本库）证实�
 hook 一致性（606 项，hook 75 个，比 main 多 6 个：4 个池相关、2 个 `cuStreamDestroy`）、ABI 签名、session 路径、导出符号通过，`make test-nogpu` 20 项通过。
 `make cppcheck` 在这台机器（cppcheck 2.7）上报 2 处 `uninitvar`（`walk_graph_cost` 的 `type`、`loader.c` 的 `device_count`），main 上同样有且位置对应，不是这次引入的；CI 用的版本没有核对。
 host 位置的池未实测，走回退。
+
+### 6.8 槽位容量分析（2026-11-05，提交 a2538e2 上的数据；V100，驱动 580.178.04。改造见 6.9）
+
+三张表都是固定大小、循环有界，写满**不会内存越界**，后果是功能退化：
+
+| 表 | 占用方 | 写满后 |
+|---|---|---|
+| `GRAPH_COST_CACHE_SIZE`=256 | 每个有 kernel 或 alloc node 的存活 exec 一项 | 新 exec 不限流（tokens=1）、不做显存准入，只告警一次 |
+| `CAPTURE_REG_SLOTS`=64 | 每个进行中的捕获一项 | 该捕获被作废时记账留到 context 销毁；捕获内异步分配按当前 context 查卡 |
+| `POOL_DEV_SLOTS`=64 | 每个已知的内存池一项 | 该池回退到当前 context 查卡 |
+
+**实测 `probe_cache`（限额 4096 MiB，1 GiB 的 graph，余量 512 MiB，launch）：**
+
+| 存活 graph 数 | 结果 |
+|---|---|
+| 200、256 | 返回 OOM（正确） |
+| 257、300 | **返回成功，越限映射**（告警 `graph cost cache full`） |
+
+**缺陷：context 销毁不回收成本缓存槽位。** 缓存项只在 `cuGraphExecDestroy` 成功时释放，而 context 销毁时驱动直接回收 exec，应用不会再调用它。
+循环"建 context、建 exec、销毁 context"：100 次后准入正常；300 次后没有任何存活 graph，表却已满，launch 同样越限。陈旧项本身无害（同地址的新 exec 会覆盖或清除），但占着槽位。
+
+**线性扫描的开销**（`bench2` 式分批计时，中位数，ns/次；组间噪声约 ±100）：
+
+| 表大小 / 存活数 | 命中第一项 | 命中最后一项 | 未命中（全表扫描） |
+|---|---|---|---|
+| 256 / 16 | 699 | 686 | 1740 |
+| 256 / 64 | 674 | 733 | 1698 |
+| 256 / 128 | 703 | 815 | 1581 |
+| 256 / 256 | 673 | 847 | 1751 |
+| 4096 / 0（变体，只改宏） | - | - | 3404（256 表同条件 1541） |
+
+末项比首项多约 170 ns；只把宏改成 4096，**每个不进缓存的 graph 的每次 launch 多约 1.9 µs**，launch 本身才约 1.5 µs。所以不能只调大宏，要换成 O(1) 查找。缓存项现在约 280 字节，主要是 16 项的设备列表。
+
+**实际用量：**
+- vLLM 默认 `FULL_AND_PIECEWISE`：每个 piecewise 子模块（约每层一个）、每个 capture size 各捕获一个 graph，再加 full 模式的 decode graph。按源码推算上限：子模块数 × size 数 + decode size 数；
+  默认 size 列表 `[1,2,4] + range(8,256,8) + range(256,513,16)` 共 51 项，32 层模型约 33×51+51 ≈ 1700，LoRA 还可能翻倍。子模块确切数量和分发键未逐行核实，是上限估算，未跑 vLLM 实测。
+- 捕获是一个接一个进行的：PyTorch、vLLM 同时进行的捕获数约等于线程数。[N] 已验证同时 80 个捕获（超过 64）记账全部释放。
+
+**驱动自身的限制**（`probe_many`）：每 graph 一个 2 MiB alloc node，第 1011 个 `cuGraphAddMemAllocNode` 返回 OOM，不加载本库时相同（free 15832 MiB），不是本库造成的，原因未查。
+
+### 6.9 三张表改成可增长哈希表（2026-11-05）
+
+`include/slot_table.h`：纯头文件、零配置静态初始化（库禁止 constructor，同 `vmem_table.h`），三张表共用。开放寻址 + 线性探测 + Fibonacci 哈希；负载超过 70% 翻倍；删除用向后移位，不留墓碑；
+内存不足或到上限时继续用现有大小，满了才拒绝写入。fork 子进程放弃旧表（不读、不写、不释放）：别的线程可能正在扩容，继承的状态不可信；每代 fork 泄漏一份副本，换来不碰写时复制页。
+
+| 表 | 初始槽数 | 上限 | 表项 |
+|---|---|---|---|
+| graph 成本（原 `GRAPH_COST_CACHE_SIZE`） | 4096 | 1 << 20 | 单卡信息内联，约 64 字节（原约 280）；跨卡 graph 的设备列表单独分配 |
+| 捕获登记（原 `CAPTURE_REG_SLOTS`） | 64 | 1 << 16 | 键是 stream，per-thread 默认 stream 再加线程；NULL 映射成对应的特殊句柄 |
+| 池（原 `POOL_DEV_SLOTS`） | 64 | 1 << 16 | 池 → 设备 |
+
+回收 bug 的修复：成本表项记录 instantiate 时的当前 context，`cuCtxDestroy`、`cuDevicePrimaryCtxReset`、`cuDevicePrimaryCtxRelease`（最后一个引用）时一起清扫。
+
+**已完成的验证：**
+- `test_slot_table`（无 GPU，新增）：增长、key2、随机操作对比模型、高负载下的 `retire_if`、到上限和内存不足、句柄分散、abandon、8 线程。ASan+UBSan 通过。
+  改坏 5 处（删除的移位条件、删除不清格、`retire_if` 不重看当前格、不按 70% 扩容、不留空格）全部能抓到；其中 `retire_if` 那处最初抓不到（等差句柄不冲突），补了高负载随机句柄的用例。
+  随机对齐句柄 2800 个放进 4096 槽，最长探测 40。
+- 静态检查：hook 一致性（606 项，hook 75 个）、ABI 签名、session 路径、导出符号通过；`make test-nogpu` 21 项通过；`make test-sanitize` 21 项通过；cppcheck 仍是 6.7 的 2 处。
+- 用例有效性（驱动 580）：新增的 [I]（600 个存活 graph）、[J]（300 次 context 循环）在旧提交 a2538e2 上都失败（graph 未被检查）。
+- launch 开销（`probe_cache`，驱动 580，3 组，ns/次）：
+
+  | 存活 graph | a2538e2 未命中 / 首项 / 末项 | 本次 未命中 / 首项 / 末项 |
+  |---|---|---|
+  | 0 | 1690–1760 / - / - | 1570–1593 / - / - |
+  | 256 | 1774–1822 / 671–705 / 845–878 | 1621–1664 / 689–703 / 693–721 |
+  | 900 | 1696–1764 / 685–710 / 813–868 | 1579–1626 / 676–694 / 676–693 |
+
+- 真实 kernel（`probe_kern`，驱动 580，`CUDA_CORE_LIMIT=10`，6000 个存活 graph，一边 instantiate 一边另一线程并发 launch，单次运行）：
+
+  | | 第一个 graph | 第 6000 个 graph |
+  |---|---|---|
+  | a2538e2 | 4373 次/s | **32339 次/s（未限流）** |
+  | 本次 | 12615 次/s | 13491 次/s（与第一个一致） |
+
+  两次运行都没有崩溃，随后 fork 子进程正常退出、父进程继续 launch。a2538e2 与本次"第一个 graph"的差距（4373 对 12615）没有重复测量，原因未查，可能是限流控制器的状态；要拿到更多数据才能判断限流的绝对精度有没有变化。
+
+**未完成（测试机中途被回收）：** 这版代码没有跑完 GPU 回归。550、570、580 上的全量 `run_all_tests`（含 PyTorch）、[I]、[J]、[N]、[V]、[W] 以及 `reclaim.sh` 在新代码上的结果都没有拿到。上一版 a2538e2 的全量结果（6.7）不能代表这一版。也没有实际跑 vLLM 核对 graph 数量。
+下次有 GPU 时要跑：`run_all_tests`（单卡、双卡，三个驱动）、`test_graph_mem_admission(_ptsz)`、`test_alloc_async_accounting(_ptsz)`、`reclaim.sh`，并把 `probe_kern` 重复几次看第一个 graph 的差距。
