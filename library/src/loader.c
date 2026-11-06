@@ -470,6 +470,10 @@ entry_t cuda_library_entry[] = {
     {.name = "cuStreamGetCtx_v2"},
     {.name = "cuStreamGetCtx_ptsz"},
     {.name = "cuStreamGetCtx_v2_ptsz"},
+    {.name = "cuStreamGetDevice"},
+    {.name = "cuStreamGetDevice_ptsz"},
+    {.name = "cuMemGetDefaultMemPool"},
+    {.name = "cuMemGetMemPool"},
     {.name = "cuGreenCtxStreamCreate"},
     {.name = "cuStreamIsCapturing"},
     {.name = "cuStreamIsCapturing_ptsz"},
@@ -2114,6 +2118,8 @@ void cleanup_vmem_nodes(int pid) {
  }
 }
 
+extern void log_graph_table_stats(void);
+
 // Cleaning operation when the processing program exits
 void exit_cleanup_handler() {
  static int cleanup_done = 0;
@@ -2124,6 +2130,7 @@ void exit_cleanup_handler() {
  int pid = getpid();
  LOGGER(INFO, "process program %d exits", pid);
  cleanup_vmem_nodes(pid);
+ log_graph_table_stats();
 }
 
 /* Saved host sigaction state so we can chain to JVM shutdown hooks, the

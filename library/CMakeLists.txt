@@ -41,11 +41,31 @@ if (${USE_ORIGINAL})
     add_definitions(-DUSE_ORIGINAL)
 endif ()
 
+# ---------------------------------------------------------------------------
+# Sanitizers (CI: the GPU-less tests run twice, once plain and once here).
+#
+# This library's correctness lives in mmap'd shared regions, file locks,
+# atomics and fork handling, where a wrong offset or a missed bound is a
+# silent memory error rather than a failed assertion. ASan+UBSan turn those
+# into a failing test. Deliberately global rather than per-target: the test
+# executables link the same sources the .so is built from, and sanitizing
+# only one side is how ODR/ABI mismatches appear.
+#
+# Up here because add_compile_options() only reaches targets created after it:
+# below add_library(vgpu-control) it silently left the library itself out.
+# ---------------------------------------------------------------------------
+option(VGPU_SANITIZE "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+if(VGPU_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 # controller related
 add_library(vgpu-control SHARED
     include/hook.h
     include/array_size.h
     include/vmem_table.h
+    include/slot_table.h
     include/cgroup_match.h
     include/cuda-subset.h
     include/nvml-subset.h
@@ -99,6 +119,17 @@ target_compile_options(vgpu-control PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>
 # virt_mem_tool executables below are unaffected (they contain main()
 # which must stay externally visible regardless).
 set(VGPU_EXPORTS_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/deploy/libvgpu-control.exports.ld)
+# ASan's own start-up calls dlsym. With ours exported it lands in instrumented
+# code before the shadow memory exists and crashes, so a sanitized library keeps
+# the interceptor to itself. For testing only: code reaching CUDA through dlsym
+# (the CUDA runtime, for one) then bypasses the hooks.
+if(VGPU_SANITIZE)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${VGPU_EXPORTS_SCRIPT})
+    file(READ ${VGPU_EXPORTS_SCRIPT} _vgpu_exports)
+    string(REGEX REPLACE "\n[ \t]*dlsym;" "\n" _vgpu_exports "${_vgpu_exports}")
+    set(VGPU_EXPORTS_SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/libvgpu-control.sanitize.exports.ld)
+    file(WRITE ${VGPU_EXPORTS_SCRIPT} "${_vgpu_exports}")
+endif()
 target_link_options(vgpu-control PRIVATE
     "LINKER:--version-script=${VGPU_EXPORTS_SCRIPT}")
 # Re-link if the version script changes — CMake does not infer this
@@ -128,21 +159,6 @@ endif()
 # ---------------------------------------------------------------------------
 option(VGPU_RUN_HOOK_CHECKS "Run hack/check_*.* during build" ON)
 
-# ---------------------------------------------------------------------------
-# Sanitizers (CI: the GPU-less tests run twice, once plain and once here).
-#
-# This library's correctness lives in mmap'd shared regions, file locks,
-# atomics and fork handling, where a wrong offset or a missed bound is a
-# silent memory error rather than a failed assertion. ASan+UBSan turn those
-# into a failing test. Deliberately global rather than per-target: the test
-# executables link the same sources the .so is built from, and sanitizing
-# only one side is how ODR/ABI mismatches appear.
-# ---------------------------------------------------------------------------
-option(VGPU_SANITIZE "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
-if(VGPU_SANITIZE)
-    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
-    add_link_options(-fsanitize=address,undefined)
-endif()
 
 if(VGPU_RUN_HOOK_CHECKS)
     find_package(Python3 COMPONENTS Interpreter)
@@ -345,6 +361,13 @@ if(BUILD_SM_NODE_TESTS)
     target_include_directories(test_vmem_table PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+    # Header-only: the growable table behind the graph cost cache, the capture
+    # registry and the pool table.
+    add_executable(test_slot_table test/nogpu/test_slot_table.c)
+    target_include_directories(test_slot_table PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(test_slot_table PRIVATE pthread)
+
     # Header-only: the CUDA array descriptor sizing, against the byte sizes
     # and zero-extent rules quoted from cuda.h in include/array_size.h.
     add_executable(test_array_size test/nogpu/test_array_size.c)
@@ -468,6 +491,7 @@ foreach(vgpu_nogpu_test
         test_delta_step
         test_array_size
         test_vmem_table
+        test_slot_table
         test_delta_campaign
         test_delta_gen_campaign
         test_delta_gen_hard

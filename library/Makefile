@@ -12,6 +12,8 @@
 #   make check-abi-signatures    classify versioned APIs against a real <cuda.h>
 #   make test-nogpu              run the GPU-less tests (no GPU, no CUDA needed)
 #   make test-sanitize           the same tests under ASan+UBSan
+#   make test-gpu-sanitize       the driver-API GPU tests against an instrumented library
+#   make test-probes             long-running reclaim, fork and throttle probes (GPU)
 #   make check-exports           verify ABI-conflict symbol exports on the built .so
 #   make test                    build and run the smoke tests under test/
 #   make help                    show this listing
@@ -214,6 +216,26 @@ test-nogpu: build-tests ## Run the GPU-less checks (no GPU, no CUDA needed).
 test-sanitize: ## Run the GPU-less checks under ASan+UBSan (no GPU, no CUDA needed).
 	$(MAKE) -f $(lastword $(MAKEFILE_LIST)) test-nogpu \
 	    SANITIZE=ON WITH_CUDA_TOOLS=$(WITH_CUDA_TOOLS) BUILD_DIR=$(LIBRARY_DIR)build-asan
+	@# These tests do not load the library, so nothing else here would notice it no
+	@# longer being instrumented, or crashing at load by exporting dlsym, until someone
+	@# ran test-gpu-sanitize on a GPU.
+	@# grep -c, not -q: pipefail would take the SIGPIPE of an early exit for a failure.
+	@nm -D $(LIBRARY_DIR)build-asan/libvgpu-control.so | grep -c ' U __asan_' >/dev/null || \
+	    { echo 'FAIL: the sanitized library is not instrumented'; exit 1; }
+	@! nm -D --defined-only $(LIBRARY_DIR)build-asan/libvgpu-control.so | grep -cw dlsym >/dev/null || \
+	    { echo 'FAIL: the sanitized library exports dlsym'; exit 1; }
+
+# The hooks themselves under ASan+UBSan, on a GPU. The tests stay plain; only the
+# library is instrumented. See test/run_gpu_sanitize.sh for what it does not cover.
+.PHONY: test-gpu-sanitize
+test-gpu-sanitize: build-tests ## Run the driver-API GPU tests against an instrumented library.
+	$(MAKE) -f $(lastword $(MAKEFILE_LIST)) build \
+	    SANITIZE=ON WITH_CUDA_TOOLS=OFF BUILD_DIR=$(LIBRARY_DIR)build-asan
+	$(BASH) $(BUILD_DIR)/test/run_gpu_sanitize.sh $(BUILD_DIR)/test $(LIBRARY_DIR)build-asan/libvgpu-control.so
+
+.PHONY: test-probes
+test-probes: build-tests ## Run the long-running reclaim, fork and throttle probes (GPU).
+	$(BASH) $(BUILD_DIR)/test/probes/run_probes.sh $(BUILD_DIR)/test/probes $(SO_FILE)
 
 test: test-nogpu ## Build then run all tests with LD_PRELOAD of libvgpu-control.so.
 	TEST_DEVICE_ID=$(TEST_DEVICE_ID) \

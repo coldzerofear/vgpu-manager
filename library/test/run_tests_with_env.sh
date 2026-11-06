@@ -21,9 +21,11 @@ if [[ -z "${TEST_DIR}" || -z "${VGPU_SO}" ]]; then
   exit 2
 fi
 
-# Get the UUID of the specified GPU
+# Configure every GPU the host has: the library is fatal on a CUDA device the
+# config does not list, and a multi-GPU test needs them all. device_index only
+# picks the GPU the single-GPU tests run on.
 if command -v nvidia-smi &>/dev/null; then
-  echo "Detecting GPU ${DEVICE_INDEX} UUID..."
+  echo "Detecting GPU UUIDs..."
   # Do not let a failing nvidia-smi abort the run. With `set -o errexit` and
   # `pipefail` a non-zero exit here killed the script before the fallback below
   # could run -- making that fallback dead code and reporting the problem as a
@@ -41,14 +43,14 @@ if command -v nvidia-smi &>/dev/null; then
           echo "[WARN]       without reloading nvidia.ko. Reload the driver or reboot." >&2 ;;
     esac
   else
-    GPU_UUID="$(printf '%s\n' "${nvidia_out}" | sed -n "$((DEVICE_INDEX + 1))p")"
+    GPU_UUID="$(printf '%s\n' "${nvidia_out}" | paste -sd, -)"
   fi
   if [[ -z "${GPU_UUID}" ]]; then
-    echo "[WARN] Could not get UUID for GPU ${DEVICE_INDEX}, trying indexed format..."
+    echo "[WARN] Could not get the GPU UUIDs, trying indexed format..."
     # Fallback: NVIDIA_VISIBLE_DEVICES also accepts index numbers
     GPU_UUID="${DEVICE_INDEX}"
   fi
-  echo "Using GPU UUID: ${GPU_UUID}"
+  echo "Using GPU UUIDs: ${GPU_UUID}"
   export NVIDIA_VISIBLE_DEVICES="${GPU_UUID}"
 else
   echo "[WARN] nvidia-smi not found, using device index directly"

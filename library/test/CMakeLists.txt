@@ -139,6 +139,26 @@ if(CU_TESTS)
     endif()
 endif()
 
+# ---- probes: run by hand or by `make test-probes`, never by run_all_tests.sh --
+# Their own directory, so the runner's test_* glob does not pick them up.
+set(_PROBE_BIN_DIR ${TEST_BIN_DIR}/probes)
+file(GLOB C_PROBES "${TEST_SRC_DIR}/probes/probe_*.c")
+foreach(src ${C_PROBES})
+    get_filename_component(name ${src} NAME_WE)
+    add_executable(${name} ${src})
+    vgpu_configure_c_test(${name})
+    set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${_PROBE_BIN_DIR})
+endforeach()
+file(GLOB CU_PROBES "${TEST_SRC_DIR}/probes/probe_*.cu")
+if(CU_PROBES AND CUDA_FOUND)
+    foreach(src ${CU_PROBES})
+        get_filename_component(name ${src} NAME_WE)
+        cuda_add_executable(${name} ${src})
+        target_link_libraries(${name} pthread)
+        set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${_PROBE_BIN_DIR})
+    endforeach()
+endif()
+
 # ---- copy python smoke tests + runner into build dir ----------------------
 add_custom_target(vgpu_copy_test_scripts ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -147,5 +167,12 @@ add_custom_target(vgpu_copy_test_scripts ALL
             ${TEST_SRC_DIR}/run_all_tests.sh ${TEST_BIN_DIR}/run_all_tests.sh
     COMMAND ${CMAKE_COMMAND} -E copy
             ${TEST_SRC_DIR}/run_tests_with_env.sh ${TEST_BIN_DIR}/run_tests_with_env.sh
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${TEST_SRC_DIR}/run_gpu_sanitize.sh ${TEST_BIN_DIR}/run_gpu_sanitize.sh
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${TEST_BIN_DIR}/probes
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${TEST_SRC_DIR}/probes/run_probes.sh ${TEST_BIN_DIR}/probes/run_probes.sh
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${TEST_SRC_DIR}/probes/torch_many_graphs.py ${TEST_BIN_DIR}/probes/torch_many_graphs.py
     COMMENT "[vgpu] stage python/ + run_all_tests.sh into test build dir"
     VERBATIM)
