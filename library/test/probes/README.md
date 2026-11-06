@@ -5,7 +5,7 @@ runs them. `make test-probes` builds and runs them; they need a GPU, take severa
 minutes, and on a bare host need root for the reclaim probe's pid list.
 
 The results these were written for are in `docs/library_graph_memory_accounting.md`
-(6.5 to 6.13).
+(6.5 to 6.14).
 
 | Probe | Question | Passes when |
 |---|---|---|
@@ -15,6 +15,8 @@ The results these were written for are in `docs/library_graph_memory_accounting.
 | `probe_capture_apis` | Which stream queries does a capture survive on this driver? Run it on a new driver: the library's rule of never asking during a capture rests on this. Runs on one device too, with a second context | Prints the table; fails if a query that must be safe breaks a capture, or if the library changes any line of it |
 | `probe_graph_throttle` | Is every graph charged to the core limit, however many live, while the table grows under load? | Read the rates: all about equal and far below the rate without the library |
 | `probe_launch_device` | Is a graph launch charged to the exec's device with another device current, also after an update there? Do the gap events stay in their context, and does such a launch count as activity on its device? | Checked: no rate above 3x the first, a launch after an idle gap waits out its duty cycle, one right after a launch from the other device does not. Run with both limits at 100 for the rate to compare with |
+| `probe_pool_reuse` | How the graph pool reuses memory inside a graph and across graphs, and whether the library's checks agree. Run by hand, with and without the library: see 6.14 for the commands and the known refusals | Prints; `recapture` returns 1 when the second capture is refused |
+| `torch_pool_reuse.py` | The same two questions with real torch graphs, on the `cudaMallocAsync` backend | Prints |
 | `torch_many_graphs.py` | Real `CUDAGraph` objects at the number vLLM's piecewise mode keeps | Completes, and `table stats` shows the cost table empty |
 
 Interpreting `table stats`: capacity never shrinks, so it reads as the high-water mark.
