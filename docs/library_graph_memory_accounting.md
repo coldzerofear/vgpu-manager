@@ -103,7 +103,7 @@ T2 也是 6.1 节"不能把记账持有到首次 launch"的实证：持有的话
 ## 5. 已知边界
 
 - **空窗 B**（捕获结束/手工加完节点到首次 upload/launch 之间 graph 显存不在记账也不在 NVML）：由 upload/launch 时的准入检查覆盖（第 6 节），
-  多 stream 并发 launch 与分配不释放的 graph 会低估，作为已知边界。
+  多 stream 并发 launch、graph 内依赖无关的并行分支与分配不释放的 graph 会低估，作为已知边界（6.14）。
 - 手工 graph 的 alloc node 在创建时各自检查、不累加；upload/launch 时按整个 graph 的总量（扣除池已预留）再检查一次。
 - alloc node 跨多个设备的 graph 逐卡检查、每张卡检查完立即放锁（6.5）：检查到 launch 之间别的进程若在已检查的卡上分配，会低估（仅多卡 graph 的首次映射）。
 - 捕获登记表可增长（6.9），只有内存耗尽写不进去时才退回到结束时查询，此时被作废的捕获仍会遗留记账，直到 context 拆除或进程退出，捕获内的异步分配也按当前 context 查卡。接入捕获的 stream 同样按当前 context 查卡（6.6）。
@@ -836,7 +836,7 @@ TSan 只覆盖这两个测试程序，不包含 fork，也不覆盖多进程。
 
 ### 6.14 graph 池复用与两处误报 OOM（2026-11-06，RTX 3080 10 GiB，驱动 595.84，CUDA 13.0，main c405ed7，torch 2.15.0+cu132）
 
-复查同类问题时发现两个疑点，这里是实测结果。"每个存活 graph 都按完整大小记账"这种累加我们没有，见 6.4 的 T2；这两处是相近的症状：物理显存够，却报 OOM。**都还没有修。**
+复查同类问题时发现两个疑点，这里是实测结果。"每个存活 graph 都按完整大小记账"这种累加我们没有，见 6.4 的 T2；这两处是相近的症状：物理显存够，却报 OOM。两处都已修复，见本节末尾。下面"问题 1""问题 2"的表是修复前 main 的行为。
 
 探针：`test/probes/probe_pool_reuse.c`（手工图和捕获）、`test/probes/torch_pool_reuse.py`（真实 torch graph，从源码目录直接运行）。
 
@@ -907,7 +907,80 @@ TSan 只覆盖这两个测试程序，不包含 fork，也不覆盖多进程。
 
 只影响 graph 内有 alloc 节点的负载：`cudaMallocAsync` 后端、直接用 `cuMemAllocAsync` 或内存节点的程序。PyTorch 默认 allocator 不受影响，上面最后一行就是证据。两者都是偏严的错误（拒绝合法请求），不会让容器超限。Warp、mjlab 是否属于这一类没有验证。
 
-#### 修法的方向（未实施）
+#### 修复（分支 fix/graph-pool-false-oom）
 
-- 问题 1：捕获时只检查池放不下的部分，`max(0, 本捕获累计 + 请求 − 池预留)`。launch 时的检查仍然兜底。
-- 问题 2：不能改成峰值。可以在 instantiate 遍历节点时按上表的模型模拟（沿依赖关系判断 free 是否是 alloc 的祖先），节点太多或判断不了就退回总和。需要先在 550/570/580 上复测这张表，模型不同的驱动上应继续用总和。
+取舍：多算会让没超限的任务 OOM、服务不可用；少算的部分映射后 NVML 能看到，再次分配和新进程都会被限住。所以**宁可少算**，但能准就准。
+
+| | 修法 | 代价 |
+|---|---|---|
+| 问题 1 | 捕获内的 `cuMemAllocAsync`、`cuMemAllocFromPoolAsync` 和 `cuGraphAddMemAllocNode` 改为检查 `NVML + 账本 + 请求 − min(池预留, 本进程捕获记账 + 请求)`。普通分配不变 | 捕获内每次分配多一次属性查询和一次记账表扫描，只在池非空时扫描 |
+| 问题 2 | `include/graph_pool_sim.h`：instantiate 遍历节点时按节点顺序模拟驱动的分配器（选能放下的最小空闲块、切分、合并、不原地扩展、按 32 MiB 取整），得到 `need`。内存不足时退回总和；驱动没有 `cuGraphMemFreeNodeGetParams` 时同样是总和 | 只在 instantiate 走一次，launch 热路径不变；没有 alloc 节点的 graph 没有额外开销 |
+
+没有做依赖可达性分析（代价大，收益只在并行分支）。
+
+**模型准确度**，`probe_pool_reuse model`，随机序列（最多同时 4 GiB，大小 1–900 MiB，一条依赖线），600 个序列离线比较各种策略：
+
+| 估算 | 完全一致 | 偏高（平均） | 偏低（平均，最差） |
+|---|---|---|---|
+| 总和（修复前） | 35 | 565 例（2405 MiB） | 0 |
+| 峰值 | 81 | 0 | 519 例（336，1568 MiB） |
+| first-fit | 424 | 67 例（137 MiB） | 109 例（231，1312 MiB） |
+| **best-fit（采用）** | **440** | **52 例（87 MiB）** | **108 例（226，1312 MiB）** |
+| worst-fit | 405 | 97 例（212 MiB） | 98 例（251，1312 MiB） |
+| last-fit | 424 | 75 例（183 MiB） | 101 例（223，1312 MiB） |
+| 从高地址切分（各策略） | 373–418 | 更多 | 相近 |
+| 取整的余量不可复用（各策略） | 362–404 | 更多 | 略少 |
+
+上机复核 300 个序列：219 个完全一致，21 个偏高（平均 58，最差 256 MiB），60 个偏低（平均 237，最差 1312 MiB）。这是专门挑的碎片化序列；上面表里的结构化形状全部精确，已写入 `test/nogpu/test_graph_pool_sim.c`。
+
+#### 修复后的结果
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| 限额 4096，recapture 2048 | 第二次捕获返回 2 | 通过，池 2048 → 2048 |
+| 限额 4096，refill 2048（节点、池内分配） | 都返回 2 | 都通过，池不增长 |
+| 限额 2048，`inner 16 256` 依次分配释放 | 返回 2 | 通过，池 256 MiB |
+| 限额 2048，`inner 16 256` 同时持有 | 返回 2 | **仍返回 2**（正确） |
+| torch 限额 4096，recapture 3×1500 | 第 2 次捕获失败 | 全部成功，池 1504 MiB |
+| torch 限额 2048，链式 12×256 / 6×256 | 回放 OOM | 成功，池 512 MiB |
+| torch 对照（recapture 3×1000、限额 6144） | 成功 | 成功，池不变 |
+
+新增用例：`test_graph_mem_admission` [L]（空闲池算数，但只到池的大小：同一捕获的第二块、超过池加余量的请求仍被拒）、[M]（链式不按总和；同时持有和递增序列仍被拒）、[N]（本捕获已记的也算在池内）；`test_graph_pool_sim`（实测表逐项比对，2000 轮随机序列的不变量：块不重叠且总量等于 top，top 介于峰值和取整总和之间）。
+
+变异验证（`test_graph_mem_admission`）：
+
+| 变异 | 结果 |
+|---|---|
+| 不折扣（等于 main） | [L]、[N] 失败 |
+| 忽略捕获记账 C | [N] 失败 |
+| 吸收量不以池大小为上限 | [L] 失败：第二块放过了 |
+| 不看 free 节点（等于总和） | [M] 失败 |
+
+#### 全量结果（RTX 3080 10 GiB，单卡）
+
+| 项 | 595.84（CUDA 13.0 工具链，torch 2.15.0+cu132） | 580.178.04（同一工具链，无 torch） |
+|---|---|---|
+| `make test` / `run_tests_with_env.sh` | 32/32，跳过 3 个未安装的框架 | 30/30，torch 也跳过：cu132 需要更新的驱动 |
+| `make test-gpu-sanitize` | 5/5，无报告 | 5/5，无报告 |
+| `make test-sanitize`（无 GPU） | 22 项 | — |
+| `probe_capture_apis`，含新增的 `cuDeviceGetGraphMemAttribute` | 捕获不受影响，挂库输出相同 | 相同 |
+| `probe_pool_reuse` 形状表、300 个随机序列 | 见上 | **全部和 595 相同** |
+| `make check`（本地 13.4 头文件）、cppcheck | 通过；608 项，77 个 hook | — |
+
+TSan（一次性，换 `-fsanitize=thread` 构建；这台 7.0 内核要 `vm.mmap_rnd_bits=28` 和 `setarch -R`）：`test_graph_mem_admission`、`test_alloc_async_accounting` 全部通过，没有锁顺序或死锁报告。data race 报告都在已有位置：令牌桶的无锁读，以及 ledger（读写都持跨进程文件锁，TSan 不认识）。
+
+这轮还修了两处测试本身的问题，都不是库的问题：
+
+- `test_graph_mem_admission` [I] 写死 600 个存活 graph。驱动对存活 alloc 节点的限制因卡而异：不加载库时 RTX 3080 在 618 个 1 MiB 的 graph 处返回 2，518 个时 256 MiB 的节点就失败，418 个时 3000 MiB 仍能成功（V100 约 1010）。main 的库在这张卡上同样失败。改成 300，仍超过当初固定表的 256。
+- `probe_churn primary_release` 单卡时不是最后一个引用，execs 留着是对的（count=50）。改成需要两张卡。
+
+顺带确认的：`PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync` 下，捕获中真正超限时 torch 会 terminate（析构里的 free 抛 `cudaErrorStreamCaptureInvalidated`）。main 和修复后相同，是 torch 的行为。
+
+#### 已知边界和没有验证的
+
+- 依赖无关的并行分支、并发 launch：按节点顺序模拟会低估（两条线各 256，实际 512，估算 256）。映射后 NVML 能看到。
+- 捕获打开期间的**普通**分配（别的线程的 `cuMemAlloc`）还是 `NVML + 捕获记账`，和池重复计算：只在捕获窗口内，可能偏严。
+- 空闲的 graph 池对普通分配仍然算占用，那是真实占用（6.5）。
+- **570、550 没有验证**：这台机器内核 7.0，这两个驱动的模块编不过。捕获中查 `cuDeviceGetGraphMemAttribute` 的安全性和复用模型只在 580、595 上测过。如果旧驱动的模型不同，偏差方向由上表决定，少算有 NVML 兜底。
+- 跨卡路径没有上 GPU（这台只有一张卡）：[H]、`exec_multi`、`ctx_multi` 打印跳过。每张卡一个模拟器，逻辑上互不相关，但没有跑过。
+- Warp、mjlab、vLLM 本身没有跑。
