@@ -255,7 +255,8 @@ static const struct {
   {"ctx", m_ctx, 0},
   {"ctx_not_current", m_ctx_not_current, 0},
   {"ctx_multi", m_ctx_multi, 1},
-  {"primary_release", m_primary_release, 0},
+  /* On one device this is not the last reference, and its execs stay, rightly. */
+  {"primary_release", m_primary_release, 1},
   {"primary_reset", m_primary_reset, 0},
   {"capture", m_capture, 0},
   {"capture_invalidated", m_capture_invalidated, 0},

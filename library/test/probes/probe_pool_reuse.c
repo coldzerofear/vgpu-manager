@@ -13,14 +13,18 @@
  *                   and cuMemAllocFromPoolAsync in a capture.
  *
  * blocks B_MIB      What the reuse does with blocks of different sizes.
+ * model N           N random sequences on one dependency line: the library's estimate
+ *                   (include/graph_pool_sim.h) against what the pool came to.
  *
  * Usage: probe_pool_reuse recapture X_MIB | inner N B_MIB | shapes B_MIB | blocks B_MIB |
- *        refill X_MIB
+ *        refill X_MIB | model N
  */
 #include <cuda.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "../../include/graph_pool_sim.h"
 
 #define MIB(x) ((double)(x) / 1048576.0)
 #define CHECK(call)                                                            \
@@ -237,6 +241,66 @@ static int blocks(int b) {
   return 0;
 }
 
+/* Compares by trimming, launching and reading the pool, so it is done without a limit. */
+static int model(int rounds) {
+  static const size_t kLive = 4096;  /* MiB alive at most */
+  int exact = 0, over = 0, under = 0;
+  double worst_over = 0, worst_under = 0, total_over = 0, total_under = 0;
+  srand(4242);
+  for (int round = 0; round < rounds; round++) {
+    CUgraph g;
+    CUgraphNode prev = NULL;
+    graph_pool_sim_t sim;
+    CUdeviceptr live[64];
+    size_t size[64];
+    int nlive = 0;
+    size_t live_mib = 0;
+    int small = round % 3 == 0;
+    graph_pool_sim_init(&sim);
+    CHECK(cuGraphCreate(&g, 0));
+    int ops = 2 + rand() % 40;
+    for (int op = 0; op < ops || nlive > 0; op++) {
+      size_t mib = (size_t)(small ? 1 + rand() % 64 : 1 + rand() % 900);
+      if (op < ops && nlive < 64 && live_mib + mib <= kLive && (nlive == 0 || rand() % 2 == 0)) {
+        CUDA_MEM_ALLOC_NODE_PARAMS p;
+        CUgraphNode n;
+        params(&p, mib << 20);
+        CHECK(cuGraphAddMemAllocNode(&n, g, prev != NULL ? &prev : NULL, prev != NULL ? 1 : 0, &p));
+        prev = n;
+        live[nlive] = p.dptr;
+        size[nlive++] = mib;
+        live_mib += mib;
+        graph_pool_sim_alloc(&sim, (uint64_t)p.dptr, mib << 20);
+      } else if (nlive > 0) {
+        int pick = rand() % nlive;
+        CUgraphNode n;
+        CHECK(cuGraphAddMemFreeNode(&n, g, &prev, 1, live[pick]));
+        prev = n;
+        graph_pool_sim_free(&sim, (uint64_t)live[pick]);
+        live_mib -= size[pick];
+        live[pick] = live[--nlive];
+        size[pick] = size[nlive];
+      }
+    }
+    trim();
+    CUgraphExec e;
+    CHECK(cuGraphInstantiateWithFlags(&e, g, 0));
+    CHECK(cuGraphLaunch(e, g_s));
+    CHECK(cuStreamSynchronize(g_s));
+    double pool = MIB(reserved()), est = MIB(sim.top);
+    if (pool == est) exact++;
+    else if (est > pool) { over++; total_over += est - pool; if (est - pool > worst_over) worst_over = est - pool; }
+    else { under++; total_under += pool - est; if (pool - est > worst_under) worst_under = pool - est; }
+    graph_pool_sim_destroy(&sim);
+    CHECK(cuGraphExecDestroy(e));
+    CHECK(cuGraphDestroy(g));
+  }
+  printf("%d sequences: %d exact, %d over (worst %.0f, average %.0f MiB), %d under (worst %.0f, average %.0f MiB)\n",
+         rounds, exact, over, worst_over, over ? total_over / over : 0, under, worst_under, under ? total_under / under : 0);
+  trim();
+  return 0;
+}
+
 static int refill(size_t x) {
   CUgraph a = capture_one(x);
   if (a == NULL) return 2;
@@ -285,6 +349,7 @@ int main(int argc, char **argv) {
   if (strcmp(argv[1], "recapture") == 0) return recapture((size_t)atol(argv[2]) << 20);
   if (strcmp(argv[1], "inner") == 0 && argc == 4) return inner(atoi(argv[2]), (size_t)atol(argv[3]) << 20);
   if (strcmp(argv[1], "blocks") == 0) return blocks(atoi(argv[2]));
+  if (strcmp(argv[1], "model") == 0) return model(atoi(argv[2]));
   if (strcmp(argv[1], "shapes") == 0) return shapes(atoi(argv[2]));
   if (strcmp(argv[1], "refill") == 0) return refill((size_t)atol(argv[2]) << 20);
   return 2;

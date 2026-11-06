@@ -21,6 +21,9 @@
  *   [I] graphs past what a fixed table of 256 held are still checked
  *   [J] graphs stay checked in a process cycling contexts
  *   [K] a cuGraphExecUpdate under another context leaves the exec's record with its own
+ *   [L] an idle pool counts for what is captured next, and only as far as it goes
+ *   [M] temporaries reused inside a graph are not checked as their sum
+ *   [N] what one capture already charged counts as held by the pool too
  *
  * Each case trims the graph pool first so it starts with nothing reserved.
  * Built twice (_ptsz variant) so the per-thread-default-stream hooks are
@@ -450,10 +453,12 @@ static int big_graph_is_refused(const char *what) {
 
 /* --------------------------------------------------------------------- [I] */
 /* Past what a fixed table of 256 held, a graph went unthrottled and unchecked.
- * 600 because the driver itself refuses alloc nodes at about 1000; the growth of
- * the table past its first size is exercised in test/nogpu/test_slot_table.c. */
+ * 300 because the driver itself refuses alloc nodes past a number that depends on the
+ * card, about 1000 on a V100 and 600 on an RTX 3080, and fewer with big ones among them;
+ * the growth of the table past its first size is exercised in
+ * test/nogpu/test_slot_table.c. */
 static int many_live_graphs(void) {
-  enum { LIVE = 600 };
+  enum { LIVE = 300 };
   trim_pool();
   static CUgraphExec ex[LIVE];
   int made = 0;
@@ -530,6 +535,221 @@ static int update_keeps_owner(void) {
   return failed;
 }
 
+/* --------------------------------------------------------------------- [L] */
+/* A graph bigger than half of the headroom, run, and the same again: the pool holds the
+ * second, which used to be refused while being captured. What the pool cannot hold is
+ * still refused, in the same capture and past what it has. */
+static int idle_pool_counts(void) {
+  trim_pool();
+  size_t x = headroom() * 2 / 3;
+  int failed = 0;
+  CUgraph g = captured_graph(x);
+  if (g == NULL) { printf("  FAIL: could not build the first graph\n"); return 1; }
+  CUgraphExec first = NULL;
+  CHECK_DRV_API(cuGraphInstantiateWithFlags(&first, g, 0));
+  cuGraphDestroy(g);
+  CUresult r = launch_and_wait(first);
+  describe("cuGraphLaunch (first graph)", r);
+  if (r != CUDA_SUCCESS) failed = 1;
+  size_t pool = pool_reserved();
+
+  g = captured_graph(x);
+  if (g == NULL) {
+    printf("  FAIL: refused while capturing what the idle pool holds\n");
+    failed = 1;
+  } else {
+    CUgraphExec second = NULL;
+    CHECK_DRV_API(cuGraphInstantiateWithFlags(&second, g, 0));
+    cuGraphDestroy(g);
+    r = launch_and_wait(second);
+    describe("cuGraphLaunch (second graph)", r);
+    if (r != CUDA_SUCCESS || pool_reserved() != pool) failed = 1;
+    cuGraphExecDestroy(second);
+  }
+  CUgraphExec node = hand_exec(x);
+  if (node == NULL) {
+    printf("  FAIL: refused an alloc node the idle pool holds\n");
+    failed = 1;
+  } else {
+    r = launch_and_wait(node);
+    describe("cuGraphLaunch (hand-built graph)", r);
+    if (r != CUDA_SUCCESS || pool_reserved() != pool) failed = 1;
+    cuGraphExecDestroy(node);
+  }
+
+  /* Two at once in one capture: the pool holds one. */
+  CUdeviceptr a = 0, b = 0;
+  CUgraph two = NULL;
+  CHECK_DRV_API(cuStreamBeginCapture(g_stream, CU_STREAM_CAPTURE_MODE_RELAXED));
+  CUresult ra = cuMemAllocAsync(&a, x, g_stream);
+  CUresult rb = cuMemAllocAsync(&b, x, g_stream);
+  describe("capture: cuMemAllocAsync (the pool holds it)", ra);
+  describe("capture: cuMemAllocAsync (it does not)", rb);
+  if (ra == CUDA_SUCCESS) cuMemFreeAsync(a, g_stream);
+  if (rb == CUDA_SUCCESS) cuMemFreeAsync(b, g_stream);
+  cuStreamEndCapture(g_stream, &two);
+  if (two != NULL) cuGraphDestroy(two);
+  if (ra != CUDA_SUCCESS || rb != CUDA_ERROR_OUT_OF_MEMORY) {
+    printf("  FAIL: expected the first to fit and the second to be refused\n");
+    failed = 1;
+  }
+
+  /* Past the pool and the headroom together. */
+  CUdeviceptr big = 0;
+  CUgraph over = NULL;
+  size_t past = pool + headroom() + (64u << 20);
+  CHECK_DRV_API(cuStreamBeginCapture(g_stream, CU_STREAM_CAPTURE_MODE_RELAXED));
+  r = cuMemAllocAsync(&big, past, g_stream);
+  describe("capture: cuMemAllocAsync (past pool and headroom)", r);
+  if (r == CUDA_SUCCESS) cuMemFreeAsync(big, g_stream);
+  cuStreamEndCapture(g_stream, &over);
+  if (over != NULL) cuGraphDestroy(over);
+  if (r != CUDA_ERROR_OUT_OF_MEMORY) failed = 1;
+
+  cuGraphExecDestroy(first);
+  trim_pool();
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [M] */
+/* A graph of sizes[n], each freed before the next allocation if chained, or all held. */
+static CUgraphExec sized_graph(const size_t *sizes, int n, int chained) {
+  CUgraph g = NULL;
+  CUgraphNode prev = NULL;
+  CUdeviceptr ptrs[32];
+  CUgraphExec ex = NULL;
+  if (cuGraphCreate(&g, 0) != CUDA_SUCCESS) return NULL;
+  for (int i = 0; i < n; i++) {
+    CUDA_MEM_ALLOC_NODE_PARAMS ap;
+    memset(&ap, 0, sizeof(ap));
+    ap.poolProps.allocType = CU_MEM_ALLOCATION_TYPE_PINNED;
+    ap.poolProps.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    ap.poolProps.location.id = g_dev;
+    ap.bytesize = sizes[i];
+    CUgraphNode an = NULL;
+    if (cuGraphAddMemAllocNode(&an, g, prev ? &prev : NULL, prev ? 1 : 0, &ap) != CUDA_SUCCESS ||
+        (chained && cuGraphAddMemFreeNode(&an, g, &an, 1, ap.dptr) != CUDA_SUCCESS)) {
+      cuGraphDestroy(g);
+      return NULL;
+    }
+    prev = an;
+    ptrs[i] = ap.dptr;
+  }
+  for (int i = 0; !chained && i < n; i++) {
+    CUgraphNode fn = NULL;
+    if (cuGraphAddMemFreeNode(&fn, g, &prev, 1, ptrs[i]) != CUDA_SUCCESS) {
+      cuGraphDestroy(g);
+      return NULL;
+    }
+    prev = fn;
+  }
+  if (cuGraphInstantiateWithFlags(&ex, g, 0) != CUDA_SUCCESS) ex = NULL;
+  cuGraphDestroy(g);
+  return ex;
+}
+
+/* The launch's result, with what the pool came to if it went through. */
+static CUresult launch_sized(const char *what, const size_t *sizes, int n, int chained, size_t *pool) {
+  trim_pool();
+  CUgraphExec ex = sized_graph(sizes, n, chained);
+  if (ex == NULL) { printf("  %s: could not build\n", what); return CUDA_ERROR_UNKNOWN; }
+  CUresult r = launch_and_wait(ex);
+  *pool = pool_reserved();
+  describe(what, r);
+  printf("  pool %.0f MiB\n", MIB(*pool));
+  cuGraphExecDestroy(ex);
+  trim_pool();
+  return r;
+}
+
+static int temporaries_are_reused(void) {
+  trim_pool();
+  size_t room = headroom();
+  size_t b = room / 4;
+  size_t same[8] = {b, b, b, b, b, b, b, b};   /* the sum is twice the headroom */
+  size_t pool = 0;
+  int failed = 0;
+  if (launch_sized("cuGraphLaunch (8 in turn)", same, 8, 1, &pool) != CUDA_SUCCESS) {
+    printf("  FAIL: checked as their sum\n");
+    failed = 1;
+  }
+  if (pool >= 2 * b) { printf("  FAIL: expected about one block\n"); failed = 1; }
+
+  /* Captured, the way an application's temporaries get there. */
+  CUgraph g = NULL;
+  CUresult bad = CUDA_SUCCESS;
+  CHECK_DRV_API(cuStreamBeginCapture(g_stream, CU_STREAM_CAPTURE_MODE_RELAXED));
+  for (int i = 0; i < 8 && bad == CUDA_SUCCESS; i++) {
+    CUdeviceptr d = 0;
+    bad = cuMemAllocAsync(&d, b, g_stream);
+    if (bad == CUDA_SUCCESS) {
+      cuMemsetD8Async(d, 1, b, g_stream);
+      cuMemFreeAsync(d, g_stream);
+    }
+  }
+  cuStreamEndCapture(g_stream, &g);
+  describe("capture: 8 in turn", bad);
+  if (bad != CUDA_SUCCESS || g == NULL) {
+    failed = 1;
+  } else {
+    CUgraphExec ex = NULL;
+    CHECK_DRV_API(cuGraphInstantiateWithFlags(&ex, g, 0));
+    CUresult r = launch_and_wait(ex);
+    describe("cuGraphLaunch (captured, 8 in turn)", r);
+    if (r != CUDA_SUCCESS) {
+      printf("  FAIL: checked as their sum\n");
+      failed = 1;
+    }
+    cuGraphExecDestroy(ex);
+  }
+  if (g != NULL) cuGraphDestroy(g);
+
+  /* These do need more than the headroom. */
+  if (launch_sized("cuGraphLaunch (8 held at once)", same, 8, 0, &pool) != CUDA_ERROR_OUT_OF_MEMORY) {
+    printf("  FAIL: a graph holding all of them must be refused\n");
+    failed = 1;
+  }
+  size_t growing[3] = {room / 6, room / 3, room * 3 / 4};
+  if (launch_sized("cuGraphLaunch (growing sizes)", growing, 3, 1, &pool) != CUDA_ERROR_OUT_OF_MEMORY) {
+    printf("  FAIL: growing sizes take their sum, each fitting does not make it fit\n");
+    failed = 1;
+  }
+  trim_pool();
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [N] */
+/* A pool of two blocks holds two allocations of one capture: its charge for the first
+ * is in the pool as well, and is not counted again for the second. */
+static int capture_charges_in_pool(void) {
+  trim_pool();
+  size_t y = headroom() * 45 / 100;
+  size_t both[2] = {y, y};
+  CUgraphExec ex = sized_graph(both, 2, 0);
+  if (ex == NULL) { printf("  FAIL: could not build the graph\n"); return 1; }
+  CUresult r = launch_and_wait(ex);
+  describe("cuGraphLaunch (two at once)", r);
+  cuGraphExecDestroy(ex);
+  int failed = r != CUDA_SUCCESS;
+  CUdeviceptr a = 0, b = 0;
+  CUgraph g = NULL;
+  CHECK_DRV_API(cuStreamBeginCapture(g_stream, CU_STREAM_CAPTURE_MODE_RELAXED));
+  CUresult ra = cuMemAllocAsync(&a, y, g_stream);
+  CUresult rb = cuMemAllocAsync(&b, y, g_stream);
+  describe("capture: first of two", ra);
+  describe("capture: second of two", rb);
+  if (ra == CUDA_SUCCESS) cuMemFreeAsync(a, g_stream);
+  if (rb == CUDA_SUCCESS) cuMemFreeAsync(b, g_stream);
+  cuStreamEndCapture(g_stream, &g);
+  if (g != NULL) cuGraphDestroy(g);
+  if (ra != CUDA_SUCCESS || rb != CUDA_SUCCESS) {
+    printf("  FAIL: refused what the pool holds\n");
+    failed = 1;
+  }
+  trim_pool();
+  return failed;
+}
+
 int main(void) {
   if (!preloaded()) {
     printf("SKIP (needs LD_PRELOAD=libvgpu-control.so and a memory limit)\n");
@@ -554,6 +774,9 @@ int main(void) {
   RUN_CASE("[I] graphs past what a fixed table of 256 held are still checked", many_live_graphs());
   RUN_CASE("[J] graphs stay checked in a process cycling contexts", context_teardown_frees_records(ctx));
   RUN_CASE("[K] an update under another context leaves the exec's record", update_keeps_owner());
+  RUN_CASE("[L] an idle pool counts for what is captured next", idle_pool_counts());
+  RUN_CASE("[M] temporaries reused inside a graph are not checked as their sum", temporaries_are_reused());
+  RUN_CASE("[N] what one capture already charged counts as held by the pool", capture_charges_in_pool());
 #undef RUN_CASE
   trim_pool();
   cuStreamDestroy(g_stream);

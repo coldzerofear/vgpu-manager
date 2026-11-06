@@ -1029,6 +1029,9 @@ void free_gpu_virt_memory_by_graph(CUgraph graph);
  */
 void free_gpu_virt_memory_by_ctx(CUcontext ctx);
 
+/* Bytes this process has charged to captures still open on the host device. */
+size_t get_captured_gpu_virt_memory(int host_index);
+
 int get_gpu_virt_memory_type(CUdeviceptr dptr);
 
 /* Results of device_pid_in_same_container() (src/util.c). Three-valued because

@@ -38,6 +38,7 @@
 #include "include/array_size.h"
 #include "include/cgroup_match.h"
 #include "include/slot_table.h"
+#include "include/graph_pool_sim.h"
 
 #define DEVICE_BATCH_SIZE        4
 
@@ -344,11 +345,31 @@ static int load_limited_memory_view(CUdevice device, int *host_index,
                                     int *lock_fd, size_t *used,
                                     size_t *vmem_used);
 
-static memory_path_t prepare_memory_allocation(CUdevice device,
-                                               size_t request_size,
-                                               int allow_uva,
-                                               int *host_index,
-                                               int *lock_fd) {
+/* What of a graph allocation the device's idle graph pool would hold. NVML reports the
+ * pool, and a captured or hand-built allocation takes its memory from it when the graph
+ * is mapped, so counting it in full refuses what is already there: capture a graph, run
+ * it, capture another of the same size. The pool holds this allocation and the ones
+ * charged to open captures, as far as it goes. Their overlap with the pool, if they
+ * were to run at once, is for graph_mem_admit() to check. */
+static size_t graph_pool_absorbs(CUdevice device, int host_index, size_t request_size) {
+  cuuint64_t reserved = 0;
+  if (!CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceGetGraphMemAttribute) ||
+      CUDA_INTERNAL_CHECK(cuda_library_entry, cuDeviceGetGraphMemAttribute, device,
+                          CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT, &reserved) != CUDA_SUCCESS ||
+      reserved == 0) {
+    return 0;
+  }
+  size_t wanted = get_captured_gpu_virt_memory(host_index);
+  wanted = wanted > SIZE_MAX - request_size ? SIZE_MAX : wanted + request_size;
+  return wanted < (size_t)reserved ? wanted : (size_t)reserved;
+}
+
+static memory_path_t prepare_allocation(CUdevice device,
+                                        size_t request_size,
+                                        int allow_uva,
+                                        int in_graph,
+                                        int *host_index,
+                                        int *lock_fd) {
   size_t used = 0;
   size_t vmem_used = 0;
 
@@ -360,13 +381,18 @@ static memory_path_t prepare_memory_allocation(CUdevice device,
    * memory_oversold and real_memory must be read as a consistent set, or
    * OOM/UVA routing could mix a new total with an old oversold flag. */
   device_t d = get_device_snapshot(*host_index);
-  if ((used + vmem_used + request_size) > d.total_memory) {
+  size_t absorbed = in_graph ? graph_pool_absorbs(device, *host_index, request_size) : 0;
+  size_t wanted = used + vmem_used + request_size;
+  wanted = wanted > absorbed ? wanted - absorbed : 0;
+  if (wanted > d.total_memory) {
     // It is necessary to check and clean up virtual memory usage
     if (vmem_used > 0 && (used + request_size) <= d.total_memory) {
       check_cleanup_vmem_nodes_by_device(*host_index);
       get_used_gpu_virt_memory((void *)&vmem_used, *host_index);
+      wanted = used + vmem_used + request_size;
+      wanted = wanted > absorbed ? wanted - absorbed : 0;
     }
-    if ((used + vmem_used + request_size) > d.total_memory) {
+    if (wanted > d.total_memory) {
       return MEMORY_PATH_OOM;
     }
   }
@@ -382,6 +408,14 @@ static memory_path_t prepare_memory_allocation(CUdevice device,
   }
 
   return MEMORY_PATH_GPU;
+}
+
+static memory_path_t prepare_memory_allocation(CUdevice device,
+                                               size_t request_size,
+                                               int allow_uva,
+                                               int *host_index,
+                                               int *lock_fd) {
+  return prepare_allocation(device, request_size, allow_uva, 0, host_index, lock_fd);
 }
 
 static int load_limited_memory_view(CUdevice device,
@@ -2089,6 +2123,13 @@ static CUresult async_alloc_device(CUstream stream, int ptsz, CUdevice *device) 
   return CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, device);
 }
 
+/* An allocation on a stream in capture comes out of the graph pool: graph_pool_absorbs(). */
+static memory_path_t prepare_async_allocation(CUdevice device, size_t request_size, int allow_uva,
+                                              CUstream stream, int ptsz, int *host_index, int *lock_fd) {
+  return prepare_allocation(device, request_size, allow_uva, stream_is_capturing(stream, ptsz),
+                            host_index, lock_fd);
+}
+
 static void capture_reg_reset_after_fork(void) {
   slot_table_abandon(&g_capture_reg);
   pthread_mutex_init(&g_capture_reg_lock, NULL);
@@ -3760,7 +3801,7 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  path = prepare_memory_allocation(device, request_size, 1, &host_index, &lock_fd);
+  path = prepare_async_allocation(device, request_size, 1, hStream, __CUDA_API_IS_PTSZ, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
@@ -3843,7 +3884,7 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  path = prepare_memory_allocation(device, request_size, 1, &host_index, &lock_fd);
+  path = prepare_async_allocation(device, request_size, 1, hStream, 1, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
@@ -4532,16 +4573,16 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
  * cuMemAlloc's device is. */
 typedef struct {
   int dev;          /* CUDA ordinal, 0 <= dev < MAX_DEVICE_COUNT */
-  size_t need;      /* bytes of its alloc nodes, saturating */
+  size_t need;      /* what they take from the pool: include/graph_pool_sim.h */
 } graph_mem_dev_t;
 typedef struct {
   int n;                                  /* entries in use in d[] */
   graph_mem_dev_t d[MAX_DEVICE_COUNT];    /* one per device, distinct dev */
 } graph_mem_t;
 
-/* Adds bytes on dev, merging with the device's entry. Devices outside the
- * library's range are ignored, as cuMemAlloc on them is not limited either. */
-static void graph_mem_add(graph_mem_t *mem, int dev, size_t bytes) {
+/* An alloc node on dev. Devices outside the library's range are ignored, as cuMemAlloc
+ * on them is not limited either. sims[] goes with mem->d[]. */
+static void graph_mem_alloc(graph_mem_t *mem, graph_pool_sim_t *sims, int dev, CUdeviceptr dptr, size_t bytes) {
   if (dev < 0 || dev >= MAX_DEVICE_COUNT) return;
   int i = 0;
   while (i < mem->n && mem->d[i].dev != dev) i++;
@@ -4549,10 +4590,18 @@ static void graph_mem_add(graph_mem_t *mem, int dev, size_t bytes) {
     if (mem->n >= MAX_DEVICE_COUNT) return;   /* unreachable: dev values are distinct */
     mem->d[i].dev = dev;
     mem->d[i].need = 0;
+    graph_pool_sim_init(&sims[i]);
     mem->n++;
   }
-  size_t *need = &mem->d[i].need;
-  *need = *need > SIZE_MAX - bytes ? SIZE_MAX : *need + bytes;
+  graph_pool_sim_alloc(&sims[i], (uint64_t)dptr, bytes);
+  mem->d[i].need = sims[i].top;
+}
+
+/* A free node. Of memory allocated elsewhere, it makes nothing available to this graph. */
+static void graph_mem_free(const graph_mem_t *mem, graph_pool_sim_t *sims, CUdeviceptr dptr) {
+  for (int i = 0; i < mem->n; i++) {
+    if (graph_pool_sim_free(&sims[i], (uint64_t)dptr)) return;
+  }
 }
 
 /* One live exec. Growable (include/slot_table.h), because vLLM's default piecewise
@@ -4584,7 +4633,7 @@ static void graph_cost_after_fork(void) {
 
 extern CUresult _cuGraphKernelNodeGetParams(CUgraphNode hNode, CUDA_KERNEL_NODE_PARAMS *nodeParams);
 
-static void walk_graph_cost(CUgraph graph, int64_t *tokens, graph_mem_t *mem) {
+static void walk_graph_nodes(CUgraph graph, int64_t *tokens, graph_mem_t *mem, graph_pool_sim_t *sims) {
   if (unlikely(!graph)) return;
   /* Driver-availability guard: CUDA_INTERNAL_CHECK calls fn_ptr directly
    * without a NULL check, and cuGraphInstantiate succeeding doesn't
@@ -4626,7 +4675,7 @@ static void walk_graph_cost(CUgraph graph, int64_t *tokens, graph_mem_t *mem) {
         CUgraph child = NULL;
         if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphChildGraphNodeGetGraph,
                                 nodes[i], &child) == CUDA_SUCCESS) {
-          walk_graph_cost(child, tokens, mem);
+          walk_graph_nodes(child, tokens, mem, sims);
         }
       } else if (type == CU_GRAPH_NODE_TYPE_MEM_ALLOC &&
                  CUDA_FIND_ENTRY(cuda_library_entry, cuGraphMemAllocNodeGetParams)) {
@@ -4637,12 +4686,27 @@ static void walk_graph_cost(CUgraph graph, int64_t *tokens, graph_mem_t *mem) {
           continue;
         }
         if (params.poolProps.location.type == CU_MEM_LOCATION_TYPE_DEVICE) {
-          graph_mem_add(mem, params.poolProps.location.id, params.bytesize);
+          graph_mem_alloc(mem, sims, params.poolProps.location.id, params.dptr, params.bytesize);
+        }
+      } else if (type == CU_GRAPH_NODE_TYPE_MEM_FREE &&
+                 CUDA_FIND_ENTRY(cuda_library_entry, cuGraphMemFreeNodeGetParams)) {
+        CUdeviceptr dptr = 0;
+        if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphMemFreeNodeGetParams,
+                                nodes[i], &dptr) == CUDA_SUCCESS) {
+          graph_mem_free(mem, sims, dptr);
         }
       }
     }
   }
   free(nodes);
+}
+
+/* Node by node in the driver's order, which creation order fixes: a node's dependencies
+ * have to exist before it. An order that says otherwise only leaves frees unmatched. */
+static void walk_graph_cost(CUgraph graph, int64_t *tokens, graph_mem_t *mem) {
+  graph_pool_sim_t sims[MAX_DEVICE_COUNT];
+  walk_graph_nodes(graph, tokens, mem, sims);
+  for (int i = 0; i < mem->n; i++) graph_pool_sim_destroy(&sims[i]);
 }
 
 static void graph_cost_store_mem(graph_cost_entry_t *e, const graph_mem_t *mem) {
@@ -4781,11 +4845,13 @@ static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph, int update) 
  *
  * So the check happens at the mapping itself, on each device the allocations
  * reside on (their pool location, not the current context), like cuMemAlloc.
- * The pool grows by about need - reserved (CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT):
- * exact for a first launch, a launch after a trim, and graphs replayed in
+ * The pool grows by about need - reserved (CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT),
+ * need being what the graph's allocations take with their reuse (include/graph_pool_sim.h):
+ * close for a first launch, a launch after a trim, and graphs replayed in
  * sequence on one stream; it under-estimates graphs launched concurrently on
- * several streams and graphs whose allocations are left unfreed, which keep
- * their pages (a known boundary: NVML counts the overshoot afterwards).
+ * several streams, parallel branches inside a graph, and graphs whose allocations
+ * are left unfreed, which keep their pages. A known boundary, on purpose: NVML counts
+ * the overshoot afterwards, while over-estimating refuses a graph that fits.
  *
  * The pool is queried on every upload/launch (~10 ns, RTX 2080 Ti) rather than
  * trusting an earlier one: besides cuDeviceGraphMemTrim, the driver itself
@@ -5206,7 +5272,7 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
     goto DONE;
   }
   size_t request_size = bytesize;
-  path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
+  path = prepare_async_allocation(device, request_size, 0, hStream, __CUDA_API_IS_PTSZ, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
@@ -5259,7 +5325,7 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
     goto DONE;
   }
   size_t request_size = bytesize;
-  path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
+  path = prepare_async_allocation(device, request_size, 0, hStream, 1, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
@@ -5296,8 +5362,8 @@ DONE:
   return ret;
 }
 
-/* An explicit graph allocation, checked against the limit like
- * cuMemAllocFromPoolAsync but never charged: the node only fixes a virtual
+/* An explicit graph allocation, checked against the limit like a captured one
+ * (graph_pool_absorbs) but never charged: the node only fixes a virtual
  * address, physical memory is mapped from the device's graph pool at
  * cuGraphUpload or cuGraphLaunch (RTX 3080: not at the node, nor at
  * instantiation), where graph_mem_admit() checks the whole graph's
@@ -5319,7 +5385,7 @@ CUresult cuGraphAddMemAllocNode(CUgraphNode *phGraphNode, CUgraph hGraph,
     goto CALL;
   }
   CUdevice device = (CUdevice)nodeParams->poolProps.location.id;
-  path = prepare_memory_allocation(device, nodeParams->bytesize, 0, &host_index, &lock_fd);
+  path = prepare_allocation(device, nodeParams->bytesize, 0, 1, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
