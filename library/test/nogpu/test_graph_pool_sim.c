@@ -42,7 +42,7 @@ static size_t run(const char *script, const int *mib) {
 static void measured(void) {
   static const struct {
     const char *what, *script;
-    int mib[5];
+    int mib[6];
     size_t pool;
   } cases[] = {
     {"chain of the same size", "a0f0a1f1a2f2a3f3", {256, 256, 256, 256}, 256},
@@ -60,6 +60,9 @@ static void measured(void) {
     {"small, large, small", "a0f0a1f1a2f2", {256, 512, 256}, 768},
     {"small, large, small, large", "a0f0a1f1a2f2a3f3", {256, 512, 256, 512}, 768},
     {"rounded up", "a0f0", {1800}, 1824},
+    /* Best fit: the small hole for the small block, so the big one still fits. With the
+     * first fit the 128 would go into the 512 and the 448 would need a step of its own. */
+    {"best fit", "a0a1a2a3f0f2a4a5f4f5f1f3", {512, 32, 256, 32, 128, 448}, 832},
   };
   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
     size_t got = run(cases[i].script, cases[i].mib);
@@ -136,6 +139,37 @@ static void measured_dags(void) {
   }
 }
 
+/* Rules of the tags themselves, beyond the measured shapes. */
+static void tags(void) {
+  /* The later free's tag wins a merge: a node depending only on the earlier one cannot
+   * use the merged block, one depending on the later can. */
+  static const dag_op_t merged[] = {
+    {'a',0,256,0,{0}}, {'a',0,256,1,{0}}, {'f',0,0,1,{1}}, {'f',1,0,1,{2}},
+    {'a',0,512,1,{2}},  /* after the first free only: the merged block is not its */
+    {'f',4,0,1,{4}},
+  };
+  int none[2] = {-1, -1};
+  size_t got = run_dag(merged, 6, none);
+  EXPECT(got == 1024, "a merged block went to a node not after its later free: %zu", got);
+  static const dag_op_t merged_ok[] = {
+    {'a',0,256,0,{0}}, {'a',0,256,1,{0}}, {'f',0,0,1,{1}}, {'f',1,0,1,{2}},
+    {'a',0,512,1,{3}}, {'f',4,0,1,{4}},
+  };
+  got = run_dag(merged_ok, 6, none);
+  EXPECT(got == 512, "a node after the later free did not get the merged block: %zu", got);
+  /* The rest of a step is anyone's while it stands alone. */
+  static const dag_op_t rest[] = {
+    {'a',0,16,0,{0}}, {'a',0,8,0,{0}}, {'f',0,0,1,{0}}, {'f',1,0,1,{1}},
+  };
+  got = run_dag(rest, 4, none);
+  EXPECT(got == 32, "a parallel node did not use the rest of the step: %zu", got);
+  /* A node and itself: what the model asks when two ops share a child graph's index. */
+  graph_pool_sim_t s;
+  graph_pool_sim_init(&s);
+  EXPECT(graph_pool_sim_reaches(&s, 3, 3) == 1, "a node does not reach itself");
+  graph_pool_sim_destroy(&s);
+}
+
 static void edges(void) {
   graph_pool_sim_t s;
   graph_pool_sim_init(&s);
@@ -162,7 +196,32 @@ static void edges(void) {
   graph_pool_sim_destroy(&s);
 }
 
+static int cmp_range(const void *a, const void *b) {
+  const size_t *x = (const size_t *)a, *y = (const size_t *)b;
+  return x[0] < y[0] ? -1 : x[0] > y[0];
+}
+
 static void check_invariants(const graph_pool_sim_t *s, size_t peak, size_t rounded_sum) {
+  /* Every byte below the top in exactly one block, live or freed. */
+  size_t n = s->nfreed + s->nlive;
+  size_t *r = (size_t *)malloc((n ? n : 1) * 2 * sizeof(*r));
+  if (r != NULL) {
+    for (size_t i = 0; i < s->nfreed; i++) { r[2 * i] = s->freed[i].off; r[2 * i + 1] = s->freed[i].size; }
+    for (size_t i = 0; i < s->nlive; i++) { r[2 * (s->nfreed + i)] = s->live[i].off; r[2 * (s->nfreed + i) + 1] = s->live[i].size; }
+    qsort(r, n, 2 * sizeof(*r), cmp_range);
+    size_t at = 0;
+    for (size_t i = 0; i < n; i++) {
+      if (r[2 * i + 1] == 0) continue;
+      EXPECT(r[2 * i] == at, "a gap or an overlap at %zu (block at %zu)", at, r[2 * i]);
+      at = r[2 * i] + r[2 * i + 1];
+    }
+    EXPECT(at == s->top || n == 0, "blocks end at %zu, top %zu", at, s->top);
+    free(r);
+  }
+  /* Without dependencies, two freed neighbours are always one block. */
+  for (size_t i = 0; s->depends == NULL && i + 1 < s->nfreed; i++) {
+    EXPECT(s->freed[i].off + s->freed[i].size != s->freed[i + 1].off, "freed neighbours left apart");
+  }
   size_t total = 0, last_end = 0;
   for (size_t i = 0; i < s->nfreed; i++) {
     EXPECT(s->freed[i].size != 0, "an empty freed block");
@@ -219,6 +278,7 @@ static void random_traffic(void) {
 int main(void) {
   measured();
   measured_dags();
+  tags();
   edges();
   random_traffic();
   return g_failed;

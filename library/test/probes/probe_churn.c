@@ -277,6 +277,39 @@ static void m_held_ctx(void) {
   COUNT_FAILURE(cuMemFree(p));
 }
 
+/* ---- the records of graphs running on several streams ---- */
+/* Two streams of a context of its own, each running a graph, then the context going:
+ * the events behind the launches go with it and must be forgotten, not destroyed. */
+static void m_running_ctx(void) {
+  CUcontext x = new_context();
+  CUstream s1, s2;
+  CUgraph g;
+  CUgraphExec e;
+  CUgraphNode prev = NULL;
+  CHECK(cuStreamCreate(&s1, 0));
+  CHECK(cuStreamCreate(&s2, 0));
+  CHECK(cuGraphCreate(&g, 0));
+  add_alloc_free(g, g_dev, &prev);
+  CHECK(cuGraphInstantiateWithFlags(&e, g, 0));
+  COUNT_FAILURE(cuGraphLaunch(e, s1));
+  COUNT_FAILURE(cuGraphLaunch(e, s2));
+  COUNT_FAILURE(cuGraphLaunch(e, s1));
+  COUNT_FAILURE(cuCtxDestroy(x));
+  cuCtxSetCurrent(g_ctx);
+}
+
+/* Streams coming and going while graphs run on them. */
+static void m_running_streams(void) {
+  CUstream s;
+  CHECK(cuStreamCreate(&s, 0));
+  static CUgraphExec e;
+  if (e == NULL) e = make_exec(g_dev, 0);
+  COUNT_FAILURE(cuGraphLaunch(e, s));
+  COUNT_FAILURE(cuGraphLaunch(e, g_stream));
+  COUNT_FAILURE(cuStreamDestroy(s));
+  COUNT_FAILURE(cuStreamSynchronize(g_stream));
+}
+
 /* ---- the pool table ---- */
 static void m_pool(void) { COUNT_FAILURE(cuMemPoolDestroy(make_pool())); }
 
@@ -310,6 +343,8 @@ static const struct {
   {"capture_thread_exit", m_capture_thread_exit, 0},
   {"held", m_held, 0},
   {"held_ctx", m_held_ctx, 0},
+  {"running_ctx", m_running_ctx, 0},
+  {"running_streams", m_running_streams, 0},
   {"pool", m_pool, 0},
   {"pool_get", m_pool_get, 0},
 };

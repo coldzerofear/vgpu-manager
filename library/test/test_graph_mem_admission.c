@@ -27,7 +27,9 @@
  *       ([L] and [N] run in each capture mode: global, thread-local, relaxed)
  *   [O] blocks a graph leaves allocated are not lent out again until freed
  *   [P] the pool memory of a graph still running on another stream is not either
- *   [Q] parallel branches of one graph do not reuse each other's blocks
+ *   [Q] parallel branches of one graph do not reuse each other's blocks, with more than
+ *       64 free nodes too
+ *   [R] none of it disturbs another thread's capture in global mode
  *
  * Each case trims the graph pool first so it starts with nothing reserved.
  * Built twice (_ptsz variant) so the per-thread-default-stream hooks are
@@ -37,6 +39,7 @@
  *   LD_PRELOAD=<build>/libvgpu-control.so CUDA_MEM_LIMIT=4096m ./test_graph_mem_admission
  */
 #include <cuda.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -792,6 +795,11 @@ static CUgraphExec freeing_graph(CUdeviceptr dptr) {
   return ex;
 }
 
+/* Frees a block that a failed expectation may have left unallocated: no early return. */
+static void free_quietly(CUdeviceptr p) {
+  if (p != 0) cuMemFree(p);
+}
+
 static int expect_launch(const char *what, CUgraphExec ex, CUresult want) {
   CUresult r = launch_and_wait(ex);
   describe(what, r);
@@ -815,14 +823,14 @@ static int held_blocks_count(void) {
 
   failed += expect_launch("cuGraphLaunch (first unfreed graph)", u1, CUDA_SUCCESS);
   failed += expect_launch("cuGraphLaunch (second, the first's block held)", u2, CUDA_ERROR_OUT_OF_MEMORY);
-  CHECK_DRV_API(cuMemFree(p1));
+  free_quietly(p1);
   failed += expect_launch("cuGraphLaunch (second, after cuMemFree)", u2, CUDA_SUCCESS);
-  CHECK_DRV_API(cuMemFree(p2));
+  free_quietly(p2);
 
   failed += expect_launch("cuGraphLaunch (first again)", u1, CUDA_SUCCESS);
-  CHECK_DRV_API(cuMemFreeAsync(p1, g_stream));
+  cuMemFreeAsync(p1, g_stream);
   failed += expect_launch("cuGraphLaunch (second, after cuMemFreeAsync)", u2, CUDA_SUCCESS);
-  CHECK_DRV_API(cuMemFree(p2));
+  free_quietly(p2);
 
   /* Given back by another graph's free node, when that graph runs. */
   failed += expect_launch("cuGraphLaunch (first again)", u1, CUDA_SUCCESS);
@@ -830,19 +838,44 @@ static int held_blocks_count(void) {
   if (freer == NULL) {
     printf("  FAIL: could not build the freeing graph\n");
     failed++;
+    free_quietly(p1);
   } else {
     failed += expect_launch("cuGraphLaunch (second, before the free node ran)", u2, CUDA_ERROR_OUT_OF_MEMORY);
     failed += expect_launch("cuGraphLaunch (the graph freeing the first's block)", freer, CUDA_SUCCESS);
     failed += expect_launch("cuGraphLaunch (second, after it)", u2, CUDA_SUCCESS);
-    CHECK_DRV_API(cuMemFree(p2));
+    free_quietly(p2);
     cuGraphExecDestroy(freer);
   }
 
+  /* Freed in a capture: a free node, which gives the block back only when it runs. */
+  failed += expect_launch("cuGraphLaunch (first again)", u1, CUDA_SUCCESS);
+  CUgraph captured = NULL;
+  CUgraphExec captured_freer = NULL;
+  if (cuStreamBeginCapture(g_stream, CU_STREAM_CAPTURE_MODE_RELAXED) == CUDA_SUCCESS) {
+    CUresult f = cuMemFreeAsync(p1, g_stream);
+    if (cuStreamEndCapture(g_stream, &captured) != CUDA_SUCCESS || f != CUDA_SUCCESS ||
+        cuGraphInstantiateWithFlags(&captured_freer, captured, 0) != CUDA_SUCCESS) {
+      captured_freer = NULL;
+    }
+    if (captured != NULL) cuGraphDestroy(captured);
+  }
+  if (captured_freer == NULL) {
+    printf("  FAIL: could not capture the free\n");
+    failed++;
+    free_quietly(p1);
+  } else {
+    failed += expect_launch("cuGraphLaunch (second, the free only captured)", u2, CUDA_ERROR_OUT_OF_MEMORY);
+    failed += expect_launch("cuGraphLaunch (the captured free)", captured_freer, CUDA_SUCCESS);
+    failed += expect_launch("cuGraphLaunch (second, after it ran)", u2, CUDA_SUCCESS);
+    free_quietly(p2);
+    cuGraphExecDestroy(captured_freer);
+  }
+
   /* An upload maps the block but does not hold it: the pool still lends it out. */
-  CHECK_DRV_API(cuGraphUpload(u1, g_stream));
-  CHECK_DRV_API(cuStreamSynchronize(g_stream));
+  if (cuGraphUpload(u1, g_stream) != CUDA_SUCCESS) failed++;
+  cuStreamSynchronize(g_stream);
   failed += expect_launch("cuGraphLaunch (second, the first only uploaded)", u2, CUDA_SUCCESS);
-  CHECK_DRV_API(cuMemFree(p2));
+  free_quietly(p2);
   cuGraphExecDestroy(u1);
   cuGraphExecDestroy(u2);
 
@@ -854,7 +887,7 @@ static int held_blocks_count(void) {
   } else {
     failed += expect_launch("cuGraphLaunch (auto-free)", af, CUDA_SUCCESS);
     failed += expect_launch("cuGraphLaunch (auto-free, again)", af, CUDA_SUCCESS);
-    CHECK_DRV_API(cuMemFree(pa));
+    free_quietly(pa);
     cuGraphExecDestroy(af);
   }
 
@@ -883,7 +916,7 @@ static int held_blocks_count(void) {
   } else {
     printf("  alloc node (that context gone, its block not)    -> refused\n");
   }
-  CHECK_DRV_API(cuMemFree(px));
+  free_quietly(px);
   u3 = unfreed_graph(x, 0, &p3);
   if (u3 == NULL) {
     printf("  FAIL: refused after the block was freed from this context\n");
@@ -904,8 +937,20 @@ static void CUDA_CB hold_stream(void *arg) {
   for (int i = 0; !g_release && i < 30000; i++) usleep(1000);
 }
 
+static void hold(CUstream s) {
+  g_release = 0;
+  if (cuLaunchHostFunc(s, hold_stream, NULL) != CUDA_SUCCESS) g_release = 1;
+}
+
+static void release(void) {
+  g_release = 1;
+  cuCtxSynchronize();
+}
+
 /* A graph on another stream that has not run yet keeps its pool memory: the next one
- * there needs its own. On the same stream, or once the first is done, it is reused. */
+ * there needs its own. On the same stream, once the first is done, or for the same exec,
+ * it is reused. Run before any case launches on a second stream: the first part is the
+ * moment a second stream appears, when what ran before counts as finished. */
 static int running_graph_counts(void) {
   trim_pool();
   size_t x = headroom() * 2 / 3;
@@ -918,27 +963,43 @@ static int running_graph_counts(void) {
   if (a == NULL || b == NULL) { printf("  FAIL: could not build the graphs\n"); return 1; }
   failed += expect_launch("cuGraphLaunch (first, to have the pool)", a, CUDA_SUCCESS);
 
-  g_release = 0;
-  CHECK_DRV_API(cuLaunchHostFunc(g_stream, hold_stream, NULL));
-  CHECK_DRV_API(cuGraphLaunch(a, g_stream));
-  CUresult r = cuGraphLaunch(b, other);
-  describe("cuGraphLaunch (another stream, the first not run)", r);
-  if (r != CUDA_ERROR_OUT_OF_MEMORY) { printf("  FAIL: expected it refused\n"); failed++; }
-  g_release = 1;
-  CHECK_DRV_API(cuCtxSynchronize());
-  r = cuGraphLaunch(b, other);
-  cuStreamSynchronize(other);
-  describe("cuGraphLaunch (another stream, the first done)", r);
-  if (r != CUDA_SUCCESS) failed++;
+  hold(g_stream);
+  CUresult r = cuGraphLaunch(a, g_stream);
+  CUresult rb = cuGraphLaunch(b, other);
+  release();
+  describe("cuGraphLaunch (a second stream, first seen now)", rb);
+  if (r != CUDA_SUCCESS || rb != CUDA_SUCCESS) {
+    printf("  FAIL: expected both through: until a second stream, no event is kept\n");
+    failed++;
+  }
+  trim_pool();
+  failed += expect_launch("cuGraphLaunch (first again, the pool back)", a, CUDA_SUCCESS);
 
-  g_release = 0;
-  CHECK_DRV_API(cuLaunchHostFunc(g_stream, hold_stream, NULL));
-  CHECK_DRV_API(cuGraphLaunch(a, g_stream));
-  r = cuGraphLaunch(b, g_stream);
-  describe("cuGraphLaunch (same stream, the first not run)", r);
-  if (r != CUDA_SUCCESS) failed++;
-  g_release = 1;
-  CHECK_DRV_API(cuCtxSynchronize());
+  hold(g_stream);
+  r = cuGraphLaunch(a, g_stream);
+  rb = cuGraphLaunch(b, other);
+  release();
+  describe("cuGraphLaunch (another stream, the first not run)", rb);
+  if (r != CUDA_SUCCESS || rb != CUDA_ERROR_OUT_OF_MEMORY) { printf("  FAIL: expected it refused\n"); failed++; }
+  rb = cuGraphLaunch(b, other);
+  cuStreamSynchronize(other);
+  describe("cuGraphLaunch (another stream, the first done)", rb);
+  if (rb != CUDA_SUCCESS) failed++;
+
+  hold(g_stream);
+  r = cuGraphLaunch(a, g_stream);
+  rb = cuGraphLaunch(b, g_stream);
+  release();
+  describe("cuGraphLaunch (same stream, the first not run)", rb);
+  if (r != CUDA_SUCCESS || rb != CUDA_SUCCESS) failed++;
+
+  hold(g_stream);
+  r = cuGraphLaunch(a, g_stream);
+  rb = cuGraphLaunch(a, other);
+  release();
+  describe("cuGraphLaunch (same exec on another stream, not run)", rb);
+  if (r != CUDA_SUCCESS || rb != CUDA_SUCCESS) failed++;
+
   cuGraphExecDestroy(a);
   cuGraphExecDestroy(b);
   cuStreamDestroy(other);
@@ -954,7 +1015,8 @@ static int parallel_branches_count(void) {
   size_t x = headroom() * 2 / 3;
   printf("  pool %.0f MiB, headroom %.0f MiB\n", MIB(pool_reserved()), MIB(headroom()));
   int failed = 0;
-  for (int chained = 0; chained < 2; chained++) {
+  for (int round = 0; round < 4; round++) {
+    int chained = round % 2, padded = round >= 2;
     CUgraph g = NULL;
     CUgraphNode a0, f0, a1, f1;
     CUDA_MEM_ALLOC_NODE_PARAMS p0, p1;
@@ -965,6 +1027,16 @@ static int parallel_branches_count(void) {
     p0.bytesize = x;
     p1 = p0;
     CHECK_DRV_API(cuGraphCreate(&g, 0));
+    /* A line of its own with 70 small blocks: more free nodes than one word of bits. */
+    CUgraphNode prev = NULL;
+    for (int k = 0; padded && k < 70; k++) {
+      CUDA_MEM_ALLOC_NODE_PARAMS pk = p0;
+      CUgraphNode ak, fk;
+      pk.bytesize = 2u << 20;
+      CHECK_DRV_API(cuGraphAddMemAllocNode(&ak, g, prev ? &prev : NULL, prev ? 1 : 0, &pk));
+      CHECK_DRV_API(cuGraphAddMemFreeNode(&fk, g, &ak, 1, pk.dptr));
+      prev = fk;
+    }
     CHECK_DRV_API(cuGraphAddMemAllocNode(&a0, g, NULL, 0, &p0));
     CHECK_DRV_API(cuGraphAddMemFreeNode(&f0, g, &a0, 1, p0.dptr));
     CHECK_DRV_API(cuGraphAddMemAllocNode(&a1, g, chained ? &f0 : NULL, chained ? 1 : 0, &p1));
@@ -973,10 +1045,81 @@ static int parallel_branches_count(void) {
     CHECK_DRV_API(cuGraphInstantiateWithFlags(&ex, g, 0));
     cuGraphDestroy(g);
     trim_pool();
-    failed += expect_launch(chained ? "cuGraphLaunch (chained)" : "cuGraphLaunch (parallel branches)",
-                            ex, chained ? CUDA_SUCCESS : CUDA_ERROR_OUT_OF_MEMORY);
+    static const char *const what[4] = {"cuGraphLaunch (parallel branches)", "cuGraphLaunch (chained)",
+                                        "cuGraphLaunch (parallel, 70 more free nodes)",
+                                        "cuGraphLaunch (chained, 70 more free nodes)"};
+    failed += expect_launch(what[round], ex, chained ? CUDA_SUCCESS : CUDA_ERROR_OUT_OF_MEMORY);
     cuGraphExecDestroy(ex);
   }
+  trim_pool();
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [R] */
+typedef struct {
+  CUcontext ctx;
+  CUstream stream;
+  volatile int phase;   /* 1 capture open, 2 may end */
+  CUresult alloc, end;
+} capture_thread_t;
+
+static void *capture_in_global_mode(void *arg) {
+  capture_thread_t *t = (capture_thread_t *)arg;
+  CUgraph g = NULL;
+  CUdeviceptr d = 0;
+  cuCtxSetCurrent(t->ctx);
+  t->end = cuStreamBeginCapture(t->stream, CU_STREAM_CAPTURE_MODE_GLOBAL);
+  if (t->end == CUDA_SUCCESS) {
+    t->alloc = cuMemAllocAsync(&d, 1u << 20, t->stream);
+    if (t->alloc == CUDA_SUCCESS) cuMemFreeAsync(d, t->stream);
+  }
+  t->phase = 1;
+  for (int i = 0; t->phase != 2 && i < 20000; i++) usleep(1000);
+  if (t->end == CUDA_SUCCESS) t->end = cuStreamEndCapture(t->stream, &g);
+  if (g != NULL) cuGraphDestroy(g);
+  return NULL;
+}
+
+/* With events in use on this device ([P] ran on two streams), a launch while another
+ * thread captures in global mode must leave that capture intact. Recording an event on
+ * a stream is among what a global capture forbids: without the check the other thread's
+ * end returned 901 (RTX 2080 Ti, 595). A graph launched into a capture is refused by the
+ * driver itself (900), library or not, so there is nothing of that to test. */
+static int captures_left_alone(CUcontext ctx) {
+  trim_pool();
+  size_t one[1] = {headroom() / 8};
+  int failed = 0;
+  CUstream other = NULL, cap = NULL;
+  CHECK_DRV_API(cuStreamCreate(&other, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuStreamCreate(&cap, CU_STREAM_NON_BLOCKING));
+  CUgraphExec a = sized_graph(one, 1, 1);
+  if (a == NULL) { printf("  FAIL: could not build the graph\n"); return 1; }
+  /* Records with events behind them, on two streams. */
+  launch_and_wait(a);
+  cuGraphLaunch(a, other);
+  cuStreamSynchronize(other);
+
+  capture_thread_t t;
+  memset(&t, 0, sizeof(t));
+  t.ctx = ctx;
+  t.stream = cap;
+  pthread_t th;
+  pthread_create(&th, NULL, capture_in_global_mode, &t);
+  for (int i = 0; t.phase != 1 && i < 20000; i++) usleep(1000);
+  CUresult r1 = cuGraphLaunch(a, g_stream);
+  t.phase = 2;
+  pthread_join(th, NULL);
+  cuCtxSynchronize();
+  describe("cuGraphLaunch while another thread captures (global)", r1);
+  describe("cuStreamEndCapture of that thread", t.end);
+  if (t.alloc != CUDA_SUCCESS || t.end != CUDA_SUCCESS) {
+    printf("  FAIL: the other thread's capture was broken\n");
+    failed++;
+  }
+
+  cuGraphExecDestroy(a);
+  cuStreamDestroy(other);
+  cuStreamDestroy(cap);
   trim_pool();
   return failed;
 }
@@ -1018,9 +1161,11 @@ int main(void) {
   }
   g_mode = CU_STREAM_CAPTURE_MODE_RELAXED;
   RUN_CASE("[M] temporaries reused inside a graph are not checked as their sum", temporaries_are_reused());
+  /* [P] first of the cases using a second stream: it starts with the device's first. */
+  RUN_CASE("[P] the pool memory of a graph running on another stream is not lent out", running_graph_counts());
   RUN_CASE("[O] blocks a graph leaves allocated are not lent out again", held_blocks_count());
-  RUN_CASE("[P] the pool memory of a graph running on another stream is not either", running_graph_counts());
   RUN_CASE("[Q] parallel branches do not reuse each other's blocks", parallel_branches_count());
+  RUN_CASE("[R] an open capture is left alone", captures_left_alone(ctx));
 #undef RUN_CASE
   trim_pool();
   cuStreamDestroy(g_stream);

@@ -95,7 +95,11 @@ static inline int graph_pool_sim_reaches(const graph_pool_sim_t *s, int earlier,
 }
 
 /* Two neighbours merge into one block, tagged with the later free, if one free depends on
- * the other. Returns the tag, or 0 with *merged unset if they stay apart. */
+ * the other. Returns the tag, or 0 with *merged unset if they stay apart. The rest of a
+ * step the pool grew by (GRAPH_POOL_ANY_NODE) merges into a freed neighbour and takes
+ * its tag, so nodes not after that free can no longer use it: up to a grain more than
+ * if it stayed apart, but closer to the driver on random graphs (345 against 258 of
+ * 600 exact, docs/library_graph_memory_accounting.md 6.15). */
 static inline int graph_pool_sim_merge_tag(const graph_pool_sim_t *s, int a, int b, int *merged) {
   if (graph_pool_sim_reaches(s, a, b)) { *merged = b; return 1; }
   if (graph_pool_sim_reaches(s, b, a)) { *merged = a; return 1; }

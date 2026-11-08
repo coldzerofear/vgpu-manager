@@ -240,6 +240,12 @@ static int blocks(int b) {
   shape("B, then B + 64 MiB", "a0f0a1f1", near_big);
   shape("B, 2B, B", "a0f0a1f1a2f2", two_then_one);
   shape("B, 2B, B, 2B", "a0f0a1f1a2f2a3f3", pair);
+  {
+    /* Holes of 2B and B with live blocks between them, then B/2 and 7B/4: the smallest
+     * hole that fits takes B/2, so 7B/4 still fits the 2B one (test_graph_pool_sim). */
+    int holes[6] = {b * 2, b / 8, b, b / 8, b / 2, b * 7 / 4};
+    shape("best fit: 2B, B holes, then B/2, 7B/4", "a0a1a2a3f0f2a4a5f4f5f1f3", holes);
+  }
   return 0;
 }
 
