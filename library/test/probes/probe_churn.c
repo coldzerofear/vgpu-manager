@@ -235,6 +235,48 @@ static void m_capture_thread_exit(void) {
   pthread_join(t, NULL);
 }
 
+/* ---- the table of blocks graphs left allocated ---- */
+static CUgraphExec unfreed_exec(CUdeviceptr *dptr) {
+  CUgraph g;
+  CUgraphExec e;
+  CUgraphNode n;
+  CUDA_MEM_ALLOC_NODE_PARAMS a;
+  memset(&a, 0, sizeof(a));
+  a.poolProps.allocType = CU_MEM_ALLOCATION_TYPE_PINNED;
+  a.poolProps.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  a.poolProps.location.id = g_dev;
+  a.bytesize = 1 << 20;
+  CHECK(cuGraphCreate(&g, 0));
+  CHECK(cuGraphAddMemAllocNode(&n, g, NULL, 0, &a));
+  CHECK(cuGraphInstantiateWithFlags(&e, g, 0));
+  CHECK(cuGraphDestroy(g));
+  *dptr = a.dptr;
+  return e;
+}
+
+static void m_held(void) {
+  CUdeviceptr p;
+  CUgraphExec e = unfreed_exec(&p);
+  COUNT_FAILURE(cuGraphLaunch(e, g_stream));
+  COUNT_FAILURE(cuStreamSynchronize(g_stream));
+  COUNT_FAILURE(cuGraphExecDestroy(e));
+  COUNT_FAILURE(cuMemFree(p));
+}
+
+static void m_held_ctx(void) {
+  CUcontext x = new_context();
+  CUstream s;
+  CUdeviceptr p;
+  CHECK(cuStreamCreate(&s, 0));
+  CUgraphExec e = unfreed_exec(&p);
+  COUNT_FAILURE(cuGraphLaunch(e, s));
+  COUNT_FAILURE(cuStreamSynchronize(s));
+  COUNT_FAILURE(cuCtxDestroy(x));
+  cuCtxSetCurrent(g_ctx);
+  /* The block outlives its context; freed from another. */
+  COUNT_FAILURE(cuMemFree(p));
+}
+
 /* ---- the pool table ---- */
 static void m_pool(void) { COUNT_FAILURE(cuMemPoolDestroy(make_pool())); }
 
@@ -266,6 +308,8 @@ static const struct {
   {"capture_other_ctx_destroyed", m_capture_other_ctx_destroyed, 0},
   {"capture_begin_ctx_destroyed", m_capture_begin_ctx_destroyed, 0},
   {"capture_thread_exit", m_capture_thread_exit, 0},
+  {"held", m_held, 0},
+  {"held_ctx", m_held_ctx, 0},
   {"pool", m_pool, 0},
   {"pool_get", m_pool_get, 0},
 };

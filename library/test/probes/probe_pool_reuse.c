@@ -15,9 +15,11 @@
  * blocks B_MIB      What the reuse does with blocks of different sizes.
  * model N           N random sequences on one dependency line: the library's estimate
  *                   (include/graph_pool_sim.h) against what the pool came to.
+ * dagmodel N        N random graphs of up to three lines with edges across: the estimate
+ *                   with dependencies, and by node order alone, against the pool.
  *
  * Usage: probe_pool_reuse recapture X_MIB | inner N B_MIB | shapes B_MIB | blocks B_MIB |
- *        refill X_MIB | model N
+ *        refill X_MIB | model N | dagmodel N
  */
 #include <cuda.h>
 #include <stdio.h>
@@ -270,13 +272,13 @@ static int model(int rounds) {
         live[nlive] = p.dptr;
         size[nlive++] = mib;
         live_mib += mib;
-        graph_pool_sim_alloc(&sim, (uint64_t)p.dptr, mib << 20);
+        graph_pool_sim_alloc(&sim, (uint64_t)p.dptr, mib << 20, op);
       } else if (nlive > 0) {
         int pick = rand() % nlive;
         CUgraphNode n;
         CHECK(cuGraphAddMemFreeNode(&n, g, &prev, 1, live[pick]));
         prev = n;
-        graph_pool_sim_free(&sim, (uint64_t)live[pick]);
+        graph_pool_sim_free(&sim, (uint64_t)live[pick], op);
         live_mib -= size[pick];
         live[pick] = live[--nlive];
         size[pick] = size[nlive];
@@ -297,6 +299,130 @@ static int model(int rounds) {
   }
   printf("%d sequences: %d exact, %d over (worst %.0f, average %.0f MiB), %d under (worst %.0f, average %.0f MiB)\n",
          rounds, exact, over, worst_over, over ? total_over / over : 0, under, worst_under, under ? total_under / under : 0);
+  trim();
+  return 0;
+}
+
+/* ---- random graphs with dependencies */
+#define DAG_MAX 96
+static unsigned char g_reach[DAG_MAX][DAG_MAX];   /* g_reach[a][b]: b depends on a */
+static int dag_depends(void *ctx, int a, int b) {
+  (void)ctx;
+  return a >= 0 && b >= 0 && a < DAG_MAX && b < DAG_MAX && g_reach[a][b];
+}
+
+typedef struct { double worst_over, worst_under, sum_over, sum_under; int exact, over, under; } tally_t;
+static void tally(tally_t *t, double est, double pool) {
+  if (est == pool) t->exact++;
+  else if (est > pool) { t->over++; t->sum_over += est - pool; if (est - pool > t->worst_over) t->worst_over = est - pool; }
+  else { t->under++; t->sum_under += pool - est; if (pool - est > t->worst_under) t->worst_under = pool - est; }
+}
+static void tally_print(const char *what, const tally_t *t, int n) {
+  printf("  %-22s %d/%d exact, %d over (worst %.0f, average %.0f MiB), %d under (worst %.0f, average %.0f MiB)\n",
+         what, t->exact, n, t->over, t->worst_over, t->over ? t->sum_over / t->over : 0,
+         t->under, t->worst_under, t->under ? t->sum_under / t->under : 0);
+}
+
+static int dagmodel(int rounds) {
+  tally_t dag = {0}, order = {0}, sum = {0};
+  srand(777);
+  for (int round = 0; round < rounds; round++) {
+    CUgraph g;
+    CUgraphNode nodes[DAG_MAX];
+    CUdeviceptr dptr[DAG_MAX];
+    int is_alloc[DAG_MAX], freed[DAG_MAX], line_last[3] = {-1, -1, -1}, line_of[DAG_MAX];
+    size_t bytes[DAG_MAX];
+    int lines = 1 + rand() % 3, n = 0;
+    size_t live_mib = 0, total_mib = 0;
+    memset(g_reach, 0, sizeof(g_reach));
+    CHECK(cuGraphCreate(&g, 0));
+    int ops = 4 + rand() % 40;
+    for (int op = 0; op < ops && n < DAG_MAX - 1; op++) {
+      int line = rand() % lines;
+      CUgraphNode deps[3];
+      int dep_idx[3], nd = 0;
+      if (line_last[line] >= 0) dep_idx[nd++] = line_last[line];
+      if (n > 0 && rand() % 5 == 0) {   /* an edge across */
+        int other = rand() % n;
+        if (nd == 0 || other != dep_idx[0]) dep_idx[nd++] = other;
+      }
+      /* a live allocation to free, if any; on another line, depend on it */
+      int victim = -1;
+      if (rand() % 2) {
+        for (int k = 0; k < n; k++) {
+          if (is_alloc[k] && !freed[k] && (victim < 0 || rand() % 3 == 0)) victim = k;
+        }
+      }
+      size_t mib = (size_t)(1 + rand() % 700);
+      if (victim < 0 && live_mib + mib > 4096) continue;
+      if (victim >= 0) {
+        int reached = 0;
+        for (int j = 0; j < nd; j++) reached |= dep_idx[j] == victim || g_reach[victim][dep_idx[j]];
+        if (!reached && nd < 3) dep_idx[nd++] = victim;
+      }
+      for (int j = 0; j < nd; j++) deps[j] = nodes[dep_idx[j]];
+      if (victim >= 0) {
+        CHECK(cuGraphAddMemFreeNode(&nodes[n], g, nd ? deps : NULL, nd, dptr[victim]));
+        is_alloc[n] = 0;
+        freed[victim] = 1;
+        dptr[n] = dptr[victim];
+        live_mib -= bytes[victim] >> 20;
+      } else {
+        CUDA_MEM_ALLOC_NODE_PARAMS p;
+        params(&p, mib << 20);
+        CHECK(cuGraphAddMemAllocNode(&nodes[n], g, nd ? deps : NULL, nd, &p));
+        is_alloc[n] = 1;
+        dptr[n] = p.dptr;
+        bytes[n] = mib << 20;
+        live_mib += mib;
+        total_mib += mib;
+      }
+      freed[n] = 0;
+      line_of[n] = line;
+      for (int j = 0; j < nd; j++) {
+        g_reach[dep_idx[j]][n] = 1;
+        for (int a = 0; a < n; a++) if (g_reach[a][dep_idx[j]]) g_reach[a][n] = 1;
+      }
+      line_last[line] = n;
+      n++;
+    }
+    (void)line_of;
+    graph_pool_sim_t with_deps, by_order;
+    graph_pool_sim_init(&with_deps);
+    graph_pool_sim_init(&by_order);
+    graph_pool_sim_set_depends(&with_deps, dag_depends, NULL);
+    for (int k = 0; k < n; k++) {
+      if (is_alloc[k]) {
+        graph_pool_sim_alloc(&with_deps, dptr[k], bytes[k], k);
+        graph_pool_sim_alloc(&by_order, dptr[k], bytes[k], k);
+      } else {
+        graph_pool_sim_free(&with_deps, dptr[k], k);
+        graph_pool_sim_free(&by_order, dptr[k], k);
+      }
+    }
+    trim();
+    CUgraphExec e;
+    CHECK(cuGraphInstantiateWithFlags(&e, g, 0));
+    CHECK(cuGraphLaunch(e, g_s));
+    CHECK(cuStreamSynchronize(g_s));
+    double pool = MIB(reserved());
+    tally(&dag, MIB(with_deps.top), pool);
+    tally(&order, MIB(by_order.top), pool);
+    double rounded = 0;
+    for (int k = 0; k < n; k++) if (is_alloc[k]) rounded += MIB(graph_pool_round(bytes[k]));
+    tally(&sum, rounded, pool);
+    graph_pool_sim_destroy(&with_deps);
+    graph_pool_sim_destroy(&by_order);
+    CHECK(cuGraphExecDestroy(e));
+    CHECK(cuGraphDestroy(g));
+    /* blocks never freed in the graph stay allocated: give them back */
+    for (int k = 0; k < n; k++) if (is_alloc[k] && !freed[k]) CHECK(cuMemFree(dptr[k]));
+    (void)total_mib;
+  }
+  printf("%d random graphs:\n", rounds);
+  tally_print("with dependencies", &dag, rounds);
+  tally_print("by node order", &order, rounds);
+  tally_print("sum", &sum, rounds);
   trim();
   return 0;
 }
@@ -350,6 +476,7 @@ int main(int argc, char **argv) {
   if (strcmp(argv[1], "inner") == 0 && argc == 4) return inner(atoi(argv[2]), (size_t)atol(argv[3]) << 20);
   if (strcmp(argv[1], "blocks") == 0) return blocks(atoi(argv[2]));
   if (strcmp(argv[1], "model") == 0) return model(atoi(argv[2]));
+  if (strcmp(argv[1], "dagmodel") == 0) return dagmodel(atoi(argv[2]));
   if (strcmp(argv[1], "shapes") == 0) return shapes(atoi(argv[2]));
   if (strcmp(argv[1], "refill") == 0) return refill((size_t)atol(argv[2]) << 20);
   return 2;

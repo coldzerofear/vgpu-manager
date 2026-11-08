@@ -73,6 +73,8 @@ churn capture_other_ctx_destroyed   100 capture   64 0
 churn capture_begin_ctx_destroyed   100 capture   64 0
 # Thread ids come back, so one record; the point is it stays at one.
 churn capture_thread_exit          5000 capture   64 1
+churn held                        10000 held      64 0
+churn held_ctx                      100 held      64 0
 churn pool                        10000 pool      64 0
 churn pool_get                   100000 pool      64 2
 

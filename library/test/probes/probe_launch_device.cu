@@ -68,7 +68,7 @@ static double timed_launch_ms(cudaGraphExec_t e, cudaStream_t s) {
 
 /* On device 1, which has no limit: on device 0 the throttling's sleeps would count, by
  * any clock. After a first launch of the same size, which also loads the module and sets
- * up the kernel's resources. */
+ * up the kernel's resources, and twice over, as an idle card clocks up only once busy. */
 static int size_kernel(double *kernel_ms) {
   unsigned *buf;
   cudaStream_t s;
@@ -77,13 +77,22 @@ static int size_kernel(double *kernel_ms) {
   CHECK(cudaStreamCreate(&s));
   kernel<<<4096, 256, 0, s>>>(buf, 1);
   CHECK(cudaStreamSynchronize(s));
+  /* An idle card starts at a low clock: a size is kept once it measures the same twice. */
   int n = 1000;
   for (; n < (1 << 28); n *= 2) {
     double start = now();
     kernel<<<4096, 256, 0, s>>>(buf, n);
     CHECK(cudaStreamSynchronize(s));
     *kernel_ms = (now() - start) * 1000;
-    if (*kernel_ms >= 20) break;
+    if (*kernel_ms < 20) continue;
+    start = now();
+    kernel<<<4096, 256, 0, s>>>(buf, n);
+    CHECK(cudaStreamSynchronize(s));
+    double again = (now() - start) * 1000;
+    if (again >= 20) {
+      *kernel_ms = again;
+      break;
+    }
   }
   CHECK(cudaStreamDestroy(s));
   CHECK(cudaFree(buf));
@@ -96,8 +105,8 @@ int main() {
   int count = 0, failed = 0, n;
   unsigned *buf;
   cudaStream_t s;
-  cudaGraph_t g;
-  cudaGraphExec_t e;
+  cudaGraph_t g, lg;
+  cudaGraphExec_t e, light;
   double kernel_ms = 0;
   CHECK(cudaGetDeviceCount(&count));
   if (count < 2) {
@@ -112,11 +121,17 @@ int main() {
   kernel<<<4096, 256, 0, s>>>(buf, n);
   CHECK(cudaStreamEndCapture(s, &g));
   CHECK(cudaGraphInstantiateWithFlags(&e, g, 0));
+  /* Launched with device 1 current: it only has to be a launch, and must not empty the
+   * token bucket of a small card, which would make the next launch wait for that. */
+  CHECK(cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed));
+  kernel<<<1, 32, 0, s>>>(buf, 1);
+  CHECK(cudaStreamEndCapture(s, &lg));
+  CHECK(cudaGraphInstantiateWithFlags(&light, lg, 0));
   printf("kernel: %.1f ms\n", kernel_ms);
 
   /* First of all, while the gap events do not exist yet. */
   CHECK(cudaSetDevice(1));
-  CHECK(cudaGraphLaunch(e, s));
+  CHECK(cudaGraphLaunch(light, s));
   CHECK(cudaStreamSynchronize(s));
   CHECK(cudaSetDevice(0));
   double idle = 1e9, busy = 1e9;
@@ -129,7 +144,7 @@ int main() {
   for (int i = 0; i < 5; i++) {
     usleep(kPastGapUs);
     CHECK(cudaSetDevice(1));
-    CHECK(cudaGraphLaunch(e, s));
+    CHECK(cudaGraphLaunch(light, s));
     CHECK(cudaStreamSynchronize(s));
     CHECK(cudaSetDevice(0));
     double ms = timed_launch_ms(e, s);
