@@ -323,7 +323,7 @@ static void test_churn_leaves_nothing_behind(void) {
     if (got != NULL) {
       got->bytes = (size_t)round;
     } else {
-      vmem_table_insert(&table, make(dptr, (size_t)round, MEMORY_TYPE_ASYNC_BRIDGE, NULL, 0));
+      vmem_table_insert(&table, make(dptr, (size_t)round, MEMORY_TYPE_UVA_ASYNC, NULL, 0));
     }
     CHECK(vmem_table_count(&table) <= 7, "churn grew the table to %zu",
           vmem_table_count(&table));

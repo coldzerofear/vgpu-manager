@@ -3881,17 +3881,9 @@ ALLOCATED_TO_GPU:
       goto DONE;
     }
   } else if (ret == CUDA_SUCCESS && lock_fd >= 0) {
-    if (!stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
-      /* Bridge the allocation into the shared view before the lock is dropped,
-       * so a concurrent allocator counts it while it is still in flight. */
-      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_ASYNC_BRIDGE, host_index);
-      unlock_gpu_device(lock_fd);
-      lock_fd = -1;
-      /* Switching from capture to synchronous operation, off the device lock. */
-      CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
-      /* Release internal accounting only once NVML is guaranteed to see it. */
-      free_gpu_virt_memory(*dptr);
-    } else {
+    /* Outside a capture nothing is charged: the driver has the memory by the time the
+     * call returns, however busy the stream, and NVML reports it (docs 6.16). */
+    if (stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
       /* Charge the capture so that several allocations inside one capture
        * accumulate against the limit. Chargeable only while the owning graph is
        * known, because that is what lets cuStreamEndCapture retire it. */
@@ -3963,17 +3955,9 @@ ALLOCATED_TO_GPU:
       goto DONE;
     }
   } else if (ret == CUDA_SUCCESS && lock_fd >= 0) {
-    if (!stream_is_capturing(hStream, 1)) {
-      /* Bridge the allocation into the shared view before the lock is dropped,
-       * so a concurrent allocator counts it while it is still in flight. */
-      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_ASYNC_BRIDGE, host_index);
-      unlock_gpu_device(lock_fd);
-      lock_fd = -1;
-      /* Switching from capture to synchronous operation, off the device lock. */
-      CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
-      /* Release internal accounting only once NVML is guaranteed to see it. */
-      free_gpu_virt_memory(*dptr);
-    } else {
+    /* Outside a capture nothing is charged: the driver has the memory by the time the
+     * call returns, however busy the stream, and NVML reports it (docs 6.16). */
+    if (stream_is_capturing(hStream, 1)) {
       /* Charge the capture so that several allocations inside one capture
        * accumulate against the limit. Chargeable only while the owning graph is
        * known, because that is what lets cuStreamEndCapture retire it. */
@@ -5942,17 +5926,9 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync), dptr, bytesize, pool, hStream);
   if (ret == CUDA_SUCCESS && lock_fd >= 0) {
-    if (!stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
-      /* Bridge the allocation into the shared view before the lock is dropped,
-       * so a concurrent allocator counts it while it is still in flight. */
-      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_ASYNC_BRIDGE, host_index);
-      unlock_gpu_device(lock_fd);
-      lock_fd = -1;
-      /* Switching from capture to synchronous operation, off the device lock. */
-      CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
-      /* Release internal accounting only once NVML is guaranteed to see it. */
-      free_gpu_virt_memory(*dptr);
-    } else {
+    /* Outside a capture nothing is charged: the driver has the memory by the time the
+     * call returns, however busy the stream, and NVML reports it (docs 6.16). */
+    if (stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
       /* Charge the capture so that several allocations inside one capture
        * accumulate against the limit. Chargeable only while the owning graph is
        * known, because that is what lets cuStreamEndCapture retire it. */
@@ -5996,17 +5972,9 @@ CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocFromPoolAsync_ptsz, dptr, bytesize, pool, hStream);
   // Confirm successful locking and waive the cost of unopened containers
   if (ret == CUDA_SUCCESS && lock_fd >= 0) {
-    if (!stream_is_capturing(hStream, 1)) {
-      /* Bridge the allocation into the shared view before the lock is dropped,
-       * so a concurrent allocator counts it while it is still in flight. */
-      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_ASYNC_BRIDGE, host_index);
-      unlock_gpu_device(lock_fd);
-      lock_fd = -1;
-      /* Switching from capture to synchronous operation, off the device lock. */
-      CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
-      /* Release internal accounting only once NVML is guaranteed to see it. */
-      free_gpu_virt_memory(*dptr);
-    } else {
+    /* Outside a capture nothing is charged: the driver has the memory by the time the
+     * call returns, however busy the stream, and NVML reports it (docs 6.16). */
+    if (stream_is_capturing(hStream, 1)) {
       /* Charge the capture so that several allocations inside one capture
        * accumulate against the limit. Chargeable only while the owning graph is
        * known, because that is what lets cuStreamEndCapture retire it. */
