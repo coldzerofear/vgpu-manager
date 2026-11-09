@@ -1177,3 +1177,50 @@ main 上若两个不释放的 graph 都先建好、再依次 launch，同样绕�
 新增用例 [S]：一个线程反复开始/结束 global 捕获（最多 2000 次），主线程同时在两个 stream 上 launch 带分配的 graph，要求所有捕获都正常结束。
 
 本地验证：库编译无警告，`make check`（含 cppcheck）通过，`test_graph_pool_sim` 在 ASan/UBSan 下通过，GPU 用例与探针在普通和 `_ptsz` 两种定义下编译无错误。**GPU 上的全量回归、[S] 与变异验证待补。**
+
+#### 库额外发起的 CUDA 调用与别的线程的捕获（2026-11-09，RTX 3080 10 GiB，驱动 595.84）
+
+第三轮复核之后，按同一类问题把整个库扫了一遍：库在 hook 里替应用多做的调用，会不会弄坏**别的线程**正开着的 global 模式捕获。先测驱动规则（`xt` 探针，不加载库）：
+
+另一个线程开着 global 捕获时，本线程调用：
+
+| 调用 | 返回 | 对方结束捕获 |
+|---|---|---|
+| 什么都不做 | — | 0 |
+| `cuEventRecord`（本线程的流） | 0 | 0 |
+| `cuEventCreate`、`cuMemGetInfo` | 0 | 0 |
+| `cuStreamSynchronize`、`cuStreamQuery`（本线程的流） | 900 | **901** |
+| `cuEventQuery`、`cuEventSynchronize` | 900 | **901** |
+| `cuMemAllocAsync`、`cuMemFreeAsync`（本线程的流） | 900 | **901** |
+| `cuMemAlloc`、`cuMemFree`、`cuMemAllocManaged`、`cuMemFree`（托管） | 900 | **901** |
+
+据此修正两处之前的说法：弄坏捕获的是 `cuEventQuery` 而不是 `cuEventRecord`（6.15 的变异里，打破 [R] 的那次也经过了查询）；以及，别的线程开着 global 捕获时，应用自己的异步/同步分配和释放就会被驱动拒绝。
+
+另测 `cuMemAllocAsync` 何时对 NVML 可见：
+
+| 情形 | NVML |
+|---|---|
+| 空池，流被挂住，调用返回后 | 602 → 1626 MiB（已可见） |
+| 池里留着 1 GiB，从中分配 | 1626 → 1626 |
+| 另一个被挂住的流上有 1 GiB 待释放，在别的流上分配 | 1626 → 2650（当场扩池） |
+
+结论（逐处）：
+
+| 位置 | 库多做了什么 | 结论 |
+|---|---|---|
+| 非捕获的 `cuMemAllocAsync`/`cuMemAllocFromPoolAsync` 之后 `cuStreamSynchronize`（为让 NVML 看见再退掉过渡记账） | 同步 | 不会多弄坏捕获：别的线程开着 global 捕获时，应用的这次分配本身就被拒（900），走不到同步。但同步本身是多余的：595 上调用返回时 NVML 已可见。去掉它要先在旧驱动上测过，本次不改 |
+| 超分 UVA 内存的 `cuMemFreeAsync` 改为同步后 `cuMemFree` | 同步、释放 | 同上：应用原本的 `cuMemFreeAsync` 也会被拒，结果不比不用库更糟。不改 |
+| 算力占空比：空闲后第一次 launch 的 `gap_end` 里 `cuEventSynchronize` | 同步 | **会**：应用自己的 launch 是允许的，库加的同步把对方弄坏。已修：有捕获打开时不走占空比，`gap_end` 在 `g_capture_gate` 读锁下再查一次，sleep 在锁外 |
+| 在途记录的 `cuEventQuery` | 查询 | 已在 6.15 修（有捕获打开时不查） |
+
+验证（RTX 3080 单卡，595.84，无 torch）：
+
+| 项 | 结果 |
+|---|---|
+| `test_graph_mem_admission` 及 `_ptsz`（含 [R] 的空闲后 launch、[S]） | 通过；[S] 2000 次捕获 0 次被破坏，但同期 launch 只有 31 到 85 次（捕获跑得快），对竞争窗口的压力有限 |
+| 拿掉占空比路径上的捕获检查 | [R] 变红，对方结束捕获返回 901 |
+| `make test` | 单卡 30 项：除上面两个当时待修的用例外全部通过；这两个修正后单独通过，未再跑一次完整 `make test` |
+| `make test-gpu-sanitize` | 5/5，无报告 |
+| 未做 | 读写锁的 TSan；拿掉读写锁的变异（竞争不确定，难以稳定复现）；旧驱动上的同样测试 |
+
+中途的用例问题，记下来免得再踩：[S] 第一版在循环里调 `cuStreamSynchronize`，这本身就是 global 捕获禁止的调用，破坏捕获的是用例自己。[Q] 的 70 个小节点放在大节点之前时，这张卡上第二个大节点偶尔被库拒绝（OOM）；隔离实验里小节点不改变用量，两个大节点也都通过，最可能是 trim 之后池预留已归零而 NVML 尚未更新的短暂时序，**没有证实**。小节点已挪到大节点之后。这类时序不是本分支引入的：任何释放后紧接分配都可能碰到。

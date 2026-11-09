@@ -1019,6 +1019,7 @@ static int parallel_branches_count(void) {
   int failed = 0;
   for (int round = 0; round < 4; round++) {
     int chained = round % 2, padded = round >= 2;
+    trim_pool();   /* what the last round's launch left would count against these nodes */
     CUgraph g = NULL;
     CUgraphNode a0, f0, a1, f1;
     CUDA_MEM_ALLOC_NODE_PARAMS p0, p1;
@@ -1029,7 +1030,12 @@ static int parallel_branches_count(void) {
     p0.bytesize = x;
     p1 = p0;
     CHECK_DRV_API(cuGraphCreate(&g, 0));
-    /* A line of its own with 70 small blocks: more free nodes than one word of bits. */
+    CHECK_DRV_API(cuGraphAddMemAllocNode(&a0, g, NULL, 0, &p0));
+    CHECK_DRV_API(cuGraphAddMemFreeNode(&f0, g, &a0, 1, p0.dptr));
+    CHECK_DRV_API(cuGraphAddMemAllocNode(&a1, g, chained ? &f0 : NULL, chained ? 1 : 0, &p1));
+    CHECK_DRV_API(cuGraphAddMemFreeNode(&f1, g, &a1, 1, p1.dptr));
+    /* A line of its own with 70 small blocks, more free nodes than one word of bits. After
+     * the big nodes: their own checks would count these on some cards. */
     CUgraphNode prev = NULL;
     for (int k = 0; padded && k < 70; k++) {
       CUDA_MEM_ALLOC_NODE_PARAMS pk = p0;
@@ -1039,10 +1045,6 @@ static int parallel_branches_count(void) {
       CHECK_DRV_API(cuGraphAddMemFreeNode(&fk, g, &ak, 1, pk.dptr));
       prev = fk;
     }
-    CHECK_DRV_API(cuGraphAddMemAllocNode(&a0, g, NULL, 0, &p0));
-    CHECK_DRV_API(cuGraphAddMemFreeNode(&f0, g, &a0, 1, p0.dptr));
-    CHECK_DRV_API(cuGraphAddMemAllocNode(&a1, g, chained ? &f0 : NULL, chained ? 1 : 0, &p1));
-    CHECK_DRV_API(cuGraphAddMemFreeNode(&f1, g, &a1, 1, p1.dptr));
     CUgraphExec ex = NULL;
     CHECK_DRV_API(cuGraphInstantiateWithFlags(&ex, g, 0));
     cuGraphDestroy(g);
@@ -1083,9 +1085,9 @@ static void *capture_in_global_mode(void *arg) {
 }
 
 /* With events in use on this device ([P] ran on two streams), a launch while another
- * thread captures in global mode must leave that capture intact. Recording an event on
- * a stream is among what a global capture forbids: without the check the other thread's
- * end returned 901 (RTX 2080 Ti, 595). A graph launched into a capture is refused by the
+ * thread captures in global mode must leave that capture intact. Querying an event is
+ * among what a global capture forbids: without the check the other thread's end returned
+ * 901 (RTX 2080 Ti, 595). A graph launched into a capture is refused by the
  * driver itself (900), library or not, so there is nothing of that to test. */
 static int captures_left_alone(CUcontext ctx) {
   trim_pool();
@@ -1118,6 +1120,33 @@ static int captures_left_alone(CUcontext ctx) {
     printf("  FAIL: the other thread's capture was broken\n");
     failed++;
   }
+
+  /* The first launch after an idle gap, which the SM limit (CUDA_CORE_LIMIT under 100)
+   * measures with an event it synchronizes on: not with a capture open elsewhere. */
+  CUgraph eg = NULL;
+  CUgraphNode en = NULL;
+  CUgraphExec empty = NULL;
+  if (cuGraphCreate(&eg, 0) == CUDA_SUCCESS && cuGraphAddEmptyNode(&en, eg, NULL, 0) == CUDA_SUCCESS &&
+      cuGraphInstantiateWithFlags(&empty, eg, 0) == CUDA_SUCCESS) {
+    memset(&t, 0, sizeof(t));
+    t.ctx = ctx;
+    t.stream = cap;
+    pthread_create(&th, NULL, capture_in_global_mode, &t);
+    for (int i = 0; t.phase != 1 && i < 20000; i++) usleep(1000);
+    usleep(300 * 1000);   /* past the 200 ms gap threshold */
+    CUresult r2 = cuGraphLaunch(empty, g_stream);
+    t.phase = 2;
+    pthread_join(th, NULL);
+    cuCtxSynchronize();
+    describe("cuGraphLaunch after an idle gap, a capture open", r2);
+    describe("cuStreamEndCapture of that thread", t.end);
+    if (r2 != CUDA_SUCCESS || t.alloc != CUDA_SUCCESS || t.end != CUDA_SUCCESS) {
+      printf("  FAIL: the other thread's capture was broken\n");
+      failed++;
+    }
+    cuGraphExecDestroy(empty);
+  }
+  if (eg != NULL) cuGraphDestroy(eg);
 
   cuGraphExecDestroy(a);
   cuStreamDestroy(other);
@@ -1169,11 +1198,8 @@ static int captures_begun_during_launches(CUcontext ctx) {
   pthread_create(&th, NULL, capture_over_and_over, &t);
   int launches = 0;
   for (; launches < 4000 && t.captures < 2000; launches++) {
+    /* No synchronize here: it is among what the other thread's global capture forbids. */
     cuGraphLaunch(a, launches & 1 ? other : g_stream);
-    if (launches % 64 == 63) {
-      cuStreamSynchronize(g_stream);
-      cuStreamSynchronize(other);
-    }
   }
   t.stop = 1;
   pthread_join(th, NULL);

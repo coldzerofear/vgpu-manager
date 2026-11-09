@@ -2041,8 +2041,9 @@ static pthread_mutex_t g_capture_reg_lock = PTHREAD_MUTEX_INITIALIZER;
  * from then on the process counts as capturing, for capture_reg_any(). */
 static int g_capture_untracked;
 /* Held for writing across the beginning of a capture and its registration, for reading
- * across "is a capture open? then this event call": an event recorded while another
- * thread captures in global mode breaks that capture, so the two must not interleave.
+ * across "is a capture open? then this event call": cuEventQuery and cuEventSynchronize
+ * while another thread captures in global mode break that capture (900, and 901 at its
+ * end; driver 595), so the two must not interleave.
  * Writers first, where glibc offers it: a stream of launches must not hold a capture off. */
 #ifdef PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP
 static pthread_rwlock_t g_capture_gate = PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP;
@@ -2251,9 +2252,11 @@ static int gap_begin(int host_index, CUstream stream) {
     return 0;
   }
 
-  if (stream_is_capturing(stream, __CUDA_API_IS_PTSZ)) {
+  if (stream_is_capturing(stream, __CUDA_API_IS_PTSZ) || capture_reg_any()) {
     /* capturing (or query failed) -> don't inject events; if the symbol is
-     * absent the driver predates CUDA graphs, so there is nothing to guard. */
+     * absent the driver predates CUDA graphs, so there is nothing to guard.
+     * Nor with a capture open on another thread: gap_end's cuEventSynchronize
+     * would break it if global (900, and 901 at its end; RTX 3080, 595). */
     pthread_mutex_unlock(&g_gap_lock[host_index]);
     return 0;
   }
@@ -2272,15 +2275,24 @@ static int gap_begin(int host_index, CUstream stream) {
  * Always stamps last-launch and releases the lock. delay = gpu_ms*(100/dc-1). */
 static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
   uint64_t gpu_us = 0, sleep_us = 0;   /* stay 0 if measurement fails */
-  if (launch_ret == CUDA_SUCCESS &&
+  float gpu_ms = 0.0f;
+  int measured = 0;
+  /* A capture may have begun on another thread since gap_begin: checked again, with
+   * g_capture_gate held so that none begins until the measurement is done. The sleep
+   * comes after, unlocked: it must not hold a capture off. */
+  pthread_rwlock_rdlock(&g_capture_gate);
+  if (launch_ret == CUDA_SUCCESS && !capture_reg_any() &&
       CUDA_INTERNAL_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuEventRecord),
                          g_gap_end[host_index], stream) == CUDA_SUCCESS &&
       CUDA_INTERNAL_CALL(cuda_library_entry, cuEventSynchronize,
-                         g_gap_end[host_index]) == CUDA_SUCCESS) {
-    float gpu_ms = 0.0f;
-    if (CUDA_INTERNAL_CALL(cuda_library_entry, cuEventElapsedTime, &gpu_ms,
-                           g_gap_start[host_index], g_gap_end[host_index]) == CUDA_SUCCESS
-        && gpu_ms > 0.0f) {
+                         g_gap_end[host_index]) == CUDA_SUCCESS &&
+      CUDA_INTERNAL_CALL(cuda_library_entry, cuEventElapsedTime, &gpu_ms,
+                         g_gap_start[host_index], g_gap_end[host_index]) == CUDA_SUCCESS) {
+    measured = 1;
+  }
+  pthread_rwlock_unlock(&g_capture_gate);
+  if (measured) {
+    if (gpu_ms > 0.0f) {
       int dc = g_gap_dc[host_index];
       double sleep_ms = (double)gpu_ms * (100.0 / (double)dc - 1.0);
       if (sleep_ms > GAP_MAX_SLEEP_MS) sleep_ms = GAP_MAX_SLEEP_MS;
@@ -5171,8 +5183,8 @@ static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph, int update) 
  *            second stream on, an event goes behind each launch. What ran before that
  *            counts as finished: a little short at that one moment, never asked of the
  *            application's stream. Nothing of it is done while any capture is open in
- *            the process -- recording an event then broke another thread's global
- *            capture (901, driver 595); queries are kept out as well -- nor for the
+ *            the process -- querying an event then breaks another thread's global
+ *            capture (901, driver 595); recording one is left out with it -- nor for the
  *            per-thread default stream, one handle for as many streams as threads.
  *
  * Without these a launch was checked against the pool's whole reservation, and a
