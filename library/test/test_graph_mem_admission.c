@@ -30,6 +30,8 @@
  *   [Q] parallel branches of one graph do not reuse each other's blocks, with more than
  *       64 free nodes too
  *   [R] none of it disturbs another thread's capture in global mode
+ *   [S] nor when that thread begins captures while launches go on: the check and the
+ *       event calls must not straddle the beginning of a capture
  *
  * Each case trims the graph pool first so it starts with nothing reserved.
  * Built twice (_ptsz variant) so the per-thread-default-stream hooks are
@@ -1124,6 +1126,70 @@ static int captures_left_alone(CUcontext ctx) {
   return failed;
 }
 
+/* --------------------------------------------------------------------- [S] */
+typedef struct {
+  CUcontext ctx;
+  CUstream stream;
+  volatile int stop;
+  int captures, broken;
+} capture_loop_t;
+
+static void *capture_over_and_over(void *arg) {
+  capture_loop_t *t = (capture_loop_t *)arg;
+  cuCtxSetCurrent(t->ctx);
+  while (!t->stop && t->captures < 2000) {
+    CUgraph g = NULL;
+    CUdeviceptr d = 0;
+    if (cuStreamBeginCapture(t->stream, CU_STREAM_CAPTURE_MODE_GLOBAL) != CUDA_SUCCESS) {
+      t->broken++;
+      break;
+    }
+    if (cuMemAllocAsync(&d, 1u << 20, t->stream) == CUDA_SUCCESS) cuMemFreeAsync(d, t->stream);
+    if (cuStreamEndCapture(t->stream, &g) != CUDA_SUCCESS) t->broken++;
+    if (g != NULL) cuGraphDestroy(g);
+    t->captures++;
+  }
+  return NULL;
+}
+
+static int captures_begun_during_launches(CUcontext ctx) {
+  trim_pool();
+  size_t one[1] = {headroom() / 16};
+  int failed = 0;
+  CUstream other = NULL, cap = NULL;
+  CHECK_DRV_API(cuStreamCreate(&other, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuStreamCreate(&cap, CU_STREAM_NON_BLOCKING));
+  CUgraphExec a = sized_graph(one, 1, 1);
+  if (a == NULL) { printf("  FAIL: could not build the graph\n"); return 1; }
+  capture_loop_t t;
+  memset(&t, 0, sizeof(t));
+  t.ctx = ctx;
+  t.stream = cap;
+  pthread_t th;
+  pthread_create(&th, NULL, capture_over_and_over, &t);
+  int launches = 0;
+  for (; launches < 4000 && t.captures < 2000; launches++) {
+    cuGraphLaunch(a, launches & 1 ? other : g_stream);
+    if (launches % 64 == 63) {
+      cuStreamSynchronize(g_stream);
+      cuStreamSynchronize(other);
+    }
+  }
+  t.stop = 1;
+  pthread_join(th, NULL);
+  cuCtxSynchronize();
+  printf("  %d launches on two streams, %d captures alongside, %d broken\n", launches, t.captures, t.broken);
+  if (t.broken != 0) {
+    printf("  FAIL: captures were broken by launches on other streams\n");
+    failed = 1;
+  }
+  cuGraphExecDestroy(a);
+  cuStreamDestroy(other);
+  cuStreamDestroy(cap);
+  trim_pool();
+  return failed;
+}
+
 int main(void) {
   if (!preloaded()) {
     printf("SKIP (needs LD_PRELOAD=libvgpu-control.so and a memory limit)\n");
@@ -1166,6 +1232,7 @@ int main(void) {
   RUN_CASE("[O] blocks a graph leaves allocated are not lent out again", held_blocks_count());
   RUN_CASE("[Q] parallel branches do not reuse each other's blocks", parallel_branches_count());
   RUN_CASE("[R] an open capture is left alone", captures_left_alone(ctx));
+  RUN_CASE("[S] captures begun while launches go on are left alone", captures_begun_during_launches(ctx));
 #undef RUN_CASE
   trim_pool();
   cuStreamDestroy(g_stream);

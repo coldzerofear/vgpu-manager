@@ -197,7 +197,8 @@ static inline void graph_pool_sim_alloc(graph_pool_sim_t *s, uint64_t key, size_
 
 /* A free node, index node. Returns 1 if key is an allocation of this simulation. */
 static inline int graph_pool_sim_free(graph_pool_sim_t *s, uint64_t key, int node) {
-  /* Latest first: the usual graph frees what it allocated last. */
+  /* From the end: the usual graph frees what it allocated last (removal moves the last
+   * entry into the hole, so this is only roughly latest first). */
   for (size_t i = s->nlive; i-- > 0;) {
     if (s->live[i].key != key) continue;
     size_t off = s->live[i].off, size = s->live[i].size;
