@@ -225,7 +225,7 @@ static int inflight_case(CUstream stream, CUmemoryPool pool, const char *what) {
 
 /* [A] An allocation the stream has not reached counts against the limit at once, and is
  * not waited for. */
-static int inflight_allocation_is_charged(CUstream stream, CUdevice device) {
+static int async_allocation_counts_unwaited(CUstream stream, CUdevice device) {
   { int _pre = can_assert(); if (_pre != 0) return _pre; }   /* -1 skip, 1 fail */
   CUmemoryPool pool = NULL;
   int rc = inflight_case(stream, NULL, "cuMemAllocAsync (behind the parked stream)");
@@ -1738,7 +1738,7 @@ int main(void) {
     } while (0)
 
   RUN_CASE("[A] an async allocation behind a parked stream counts at once, unwaited",
-           inflight_allocation_is_charged(stream, device));
+           async_allocation_counts_unwaited(stream, device));
   RUN_CASE("[B] an allocation made during capture is charged, and released at end",
            capture_allocation_is_charged(stream));
   RUN_CASE("[C] repeated capture cycles do not accumulate charges",

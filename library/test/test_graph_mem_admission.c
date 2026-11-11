@@ -32,6 +32,12 @@
  *   [R] none of it disturbs another thread's capture in global mode
  *   [S] nor when that thread begins captures while launches go on: the check and the
  *       event calls must not straddle the beginning of a capture
+ *   [T] the first launch after an idle gap, waiting for its stream (SM limit under 100),
+ *       holds neither a capture beginning nor other launches off
+ *   [U] with a thread blocked enqueuing on a full stream, a capture beginning and a
+ *       launch whose event has to be made hold other launches off neither: the driver
+ *       makes those two wait until the stream drains, and what drains it may be one of
+ *       those other launches
  *
  * Each case trims the graph pool first so it starts with nothing reserved.
  * Built twice (_ptsz variant) so the per-thread-default-stream hooks are
@@ -45,6 +51,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "test_utils.h"
@@ -1216,6 +1223,205 @@ static int captures_begun_during_launches(CUcontext ctx) {
   return failed;
 }
 
+/* --------------------------------------------------------------------- [T] */
+static double now_s(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
+}
+
+typedef struct {
+  CUcontext ctx;
+  CUstream stream;
+  CUgraphExec exec;
+  volatile int done;
+  CUresult r;
+} launcher_t;
+
+static void *launch_in_thread(void *arg) {
+  launcher_t *l = (launcher_t *)arg;
+  cuCtxSetCurrent(l->ctx);
+  l->r = cuGraphLaunch(l->exec, l->stream);
+  l->done = 1;
+  return NULL;
+}
+
+/* Starts a global capture on another thread and waits up to limit_s for it to begin. */
+static double begin_capture_elsewhere(capture_thread_t *t, pthread_t *th, CUcontext ctx,
+                                      CUstream cap, double limit_s) {
+  memset(t, 0, sizeof(*t));
+  t->ctx = ctx;
+  t->stream = cap;
+  double t0 = now_s();
+  pthread_create(th, NULL, capture_in_global_mode, t);
+  while (t->phase != 1 && now_s() - t0 < limit_s) usleep(1000);
+  return now_s() - t0;
+}
+
+/* T1 makes the first launch after an idle gap on a parked stream, and waits for it (the
+ * SM limit's measurement); T2 then begins a global capture; T3 launches a graph with
+ * memory and only then lets the stream go. Waiting with the capture gate held, T2 waited
+ * for the stream, and T3 behind T2 (writers first): the three stuck until the host
+ * function gave up. Now none waits on another, and the capture survives. */
+static int gap_wait_holds_nothing(CUcontext ctx) {
+  const char *lim = getenv("CUDA_CORE_LIMIT");
+  if (lim == NULL || atoi(lim) <= 0 || atoi(lim) >= 100) {
+    printf("  SKIP (needs CUDA_CORE_LIMIT under 100: the gap path is not taken otherwise)\n");
+    return -1;
+  }
+  trim_pool();
+  size_t one[1] = {headroom() / 8};
+  int failed = 0;
+  CUstream other = NULL, cap = NULL;
+  CHECK_DRV_API(cuStreamCreate(&other, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuStreamCreate(&cap, CU_STREAM_NON_BLOCKING));
+  CUgraphExec a = sized_graph(one, 1, 1);
+  CUgraph eg = NULL;
+  CUgraphNode en = NULL;
+  CUgraphExec empty = NULL;
+  if (a == NULL || cuGraphCreate(&eg, 0) != CUDA_SUCCESS ||
+      cuGraphAddEmptyNode(&en, eg, NULL, 0) != CUDA_SUCCESS ||
+      cuGraphInstantiateWithFlags(&empty, eg, 0) != CUDA_SUCCESS) {
+    printf("  FAIL: could not build the graphs\n");
+    return 1;
+  }
+  launch_and_wait(a);
+  cuGraphLaunch(a, other);
+  cuStreamSynchronize(other);
+
+  hold(g_stream);
+  usleep(300 * 1000);   /* past the 200 ms gap threshold */
+  launcher_t t1 = {ctx, g_stream, empty, 0, CUDA_SUCCESS};
+  pthread_t th1, th2;
+  pthread_create(&th1, NULL, launch_in_thread, &t1);
+  usleep(200 * 1000);   /* T1 waits for its parked stream */
+  capture_thread_t t2;
+  double began = begin_capture_elsewhere(&t2, &th2, ctx, cap, 5.0);
+  double t0 = now_s();
+  CUresult r3 = cuGraphLaunch(a, other);
+  double took = now_s() - t0;
+  g_release = 1;   /* not release(): no synchronize while T2 captures */
+  for (double w = now_s(); t2.phase != 1 && now_s() - w < 40.0;) usleep(1000);
+  t2.phase = 2;
+  pthread_join(th2, NULL);
+  pthread_join(th1, NULL);
+  cuCtxSynchronize();
+  printf("  capture began after %.3f s, the launch behind it took %.3f s\n", began, took);
+  describe("cuGraphLaunch (T1, after the idle gap)", t1.r);
+  describe("cuGraphLaunch (T3, during the wait)", r3);
+  describe("cuStreamEndCapture (T2)", t2.end);
+  if (began > 2.0 || took > 2.0) {
+    printf("  FAIL: the capture or the launch waited for T1's stream\n");
+    failed++;
+  }
+  if (t1.r != CUDA_SUCCESS || r3 != CUDA_SUCCESS || t2.alloc != CUDA_SUCCESS || t2.end != CUDA_SUCCESS) {
+    printf("  FAIL: a launch failed or the capture was broken\n");
+    failed++;
+  }
+  cuGraphExecDestroy(empty);
+  cuGraphDestroy(eg);
+  cuGraphExecDestroy(a);
+  cuStreamDestroy(other);
+  cuStreamDestroy(cap);
+  trim_pool();
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [U] */
+typedef struct {
+  CUcontext ctx;
+  CUstream stream;
+  CUdeviceptr buf;
+  volatile int filled, stop;
+} filler_t;
+
+static void *fill_stream(void *arg) {
+  filler_t *f = (filler_t *)arg;
+  cuCtxSetCurrent(f->ctx);
+  while (!f->stop && cuMemsetD8Async(f->buf, 1, 4096, f->stream) == CUDA_SUCCESS) f->filled++;
+  return NULL;
+}
+
+/* In a context of its own, so that no event of an earlier case is there to reuse:
+ * F fills a parked stream until the driver blocks it (about 1000 operations, driver 595);
+ * T1 then launches a graph with memory on a new stream, whose event has to be made
+ * (cuEventCreate waits while F is blocked); T2 begins a global capture (so does
+ * cuStreamBeginCapture); T3 launches a graph with memory on a third, parked stream and
+ * then lets the streams go. T1 made the event with g_graph_use_lock held, and T2 began
+ * with the capture gate held for writing: either kept T3 out until the host function gave
+ * up. */
+static int full_stream_holds_nothing(void) {
+  CUcontext ctx2 = NULL, prev = NULL;
+  int failed = 0;
+  cuCtxGetCurrent(&prev);
+  CHECK_DRV_API(CUCTX_CREATE(&ctx2, 0, g_dev));
+  trim_pool();
+  size_t one[1] = {headroom() / 8};
+  CUstream s1 = NULL, s3 = NULL, s4 = NULL, cap = NULL;
+  CHECK_DRV_API(cuStreamCreate(&s1, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuStreamCreate(&s3, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuStreamCreate(&s4, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuStreamCreate(&cap, CU_STREAM_NON_BLOCKING));
+  CUdeviceptr buf = 0;
+  CHECK_DRV_API(cuMemAlloc(&buf, 4096));
+  CUgraphExec a1 = sized_graph(one, 1, 1), a3 = sized_graph(one, 1, 1);
+  if (a1 == NULL || a3 == NULL) { printf("  FAIL: could not build the graphs\n"); return 1; }
+
+  /* T3's stream parked with a launch behind it, its record busy so T1 cannot take it. */
+  hold(s1);
+  if (cuLaunchHostFunc(s3, hold_stream, NULL) != CUDA_SUCCESS) g_release = 1;
+  CUresult warm = cuGraphLaunch(a3, s3);
+  filler_t f = {ctx2, s1, buf, 0, 0};
+  pthread_t thf, th1, th2;
+  pthread_create(&thf, NULL, fill_stream, &f);
+  for (int last = -1, i = 0; i < 100 && f.filled != last; i++) { last = f.filled; usleep(100 * 1000); }
+  printf("  %d operations queued on the parked stream before the driver blocked the next\n", f.filled);
+
+  launcher_t t1 = {ctx2, s4, a1, 0, CUDA_SUCCESS};
+  pthread_create(&th1, NULL, launch_in_thread, &t1);
+  usleep(300 * 1000);
+  capture_thread_t t2;
+  double began = begin_capture_elsewhere(&t2, &th2, ctx2, cap, 0.3);
+  double t0 = now_s();
+  CUresult r3 = cuGraphLaunch(a3, s3);
+  double took = now_s() - t0;
+  int t1_waiting = !t1.done;
+  g_release = 1;
+  f.stop = 1;
+  for (double w = now_s(); t2.phase != 1 && now_s() - w < 40.0;) usleep(1000);
+  t2.phase = 2;
+  pthread_join(th2, NULL);
+  pthread_join(th1, NULL);
+  pthread_join(thf, NULL);
+  cuCtxSynchronize();
+  printf("  T1 %s, capture %s, T3's launch took %.3f s\n",
+         t1_waiting ? "was still in its launch" : "had returned",
+         began < 0.3 ? "began at once" : "waited for the stream (the driver)", took);
+  describe("cuGraphLaunch (T1, new stream)", t1.r);
+  describe("cuGraphLaunch (T3, while the stream is full)", r3);
+  describe("cuStreamEndCapture (T2)", t2.end);
+  if (took > 2.0) {
+    printf("  FAIL: T3's launch waited for the full stream\n");
+    failed++;
+  }
+  if (warm != CUDA_SUCCESS || t1.r != CUDA_SUCCESS || r3 != CUDA_SUCCESS ||
+      t2.alloc != CUDA_SUCCESS || t2.end != CUDA_SUCCESS) {
+    printf("  FAIL: a launch failed or the capture was broken\n");
+    failed++;
+  }
+  cuGraphExecDestroy(a1);
+  cuGraphExecDestroy(a3);
+  cuMemFree(buf);
+  cuStreamDestroy(s1);
+  cuStreamDestroy(s3);
+  cuStreamDestroy(s4);
+  cuStreamDestroy(cap);
+  trim_pool();
+  cuCtxSetCurrent(prev);
+  cuCtxDestroy(ctx2);
+  return failed;
+}
+
 int main(void) {
   if (!preloaded()) {
     printf("SKIP (needs LD_PRELOAD=libvgpu-control.so and a memory limit)\n");
@@ -1259,6 +1465,8 @@ int main(void) {
   RUN_CASE("[Q] parallel branches do not reuse each other's blocks", parallel_branches_count());
   RUN_CASE("[R] an open capture is left alone", captures_left_alone(ctx));
   RUN_CASE("[S] captures begun while launches go on are left alone", captures_begun_during_launches(ctx));
+  RUN_CASE("[T] an idle-gap launch waiting for its stream holds nothing off", gap_wait_holds_nothing(ctx));
+  RUN_CASE("[U] a full stream elsewhere holds no launch off", full_stream_holds_nothing());
 #undef RUN_CASE
   trim_pool();
   cuStreamDestroy(g_stream);

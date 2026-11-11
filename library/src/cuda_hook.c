@@ -224,6 +224,8 @@ static const struct timespec g_cycle = {
  * Design: docs/sm_core_limit_gap_throttle_design.md. */
 #define GAP_THRESHOLD_NS   (200LL * 1000000LL)   /* idle > 200ms => a "gap"   */
 #define GAP_MAX_SLEEP_MS   500.0                 /* clamp pathological spikes */
+#define GAP_POLL_MIN_US    20                    /* gap_end polls the end marker  */
+#define GAP_POLL_MAX_US    512                   /* from 20 us, doubling to this */
 
 /* Per-device thread mutex: protects the process-private cuEvent pair and the
  * g_gap_dc snapshot from concurrent launcher threads. NOT a cross-process
@@ -2040,16 +2042,38 @@ static pthread_mutex_t g_capture_reg_lock = PTHREAD_MUTEX_INITIALIZER;
 /* A capture begun that the registry could not take (no graph to key it by, or no room):
  * from then on the process counts as capturing, for capture_reg_any(). */
 static int g_capture_untracked;
-/* Held for writing across the beginning of a capture and its registration, for reading
- * across "is a capture open? then this event call": cuEventQuery and cuEventSynchronize
- * while another thread captures in global mode break that capture (900, and 901 at its
- * end; driver 595), so the two must not interleave.
+/* cuEventQuery and cuEventSynchronize while another thread captures in global mode break
+ * that capture (900, and 901 at its end; driver 595), so "is a capture open? then this
+ * event call" must not interleave with a capture beginning. Held for reading across the
+ * two; held for writing only to count a capture as beginning (g_capture_beginning), from
+ * before the driver begins it until it is registered.
+ * Nothing that can block is ever called under it, nor under the locks taken inside it:
+ * with another thread blocked enqueuing on a full stream, cuStreamBeginCapture,
+ * cuEventCreate / Destroy, cuEventRecord on that stream and cuMemAlloc all wait until
+ * the stream drains (driver 595), and if what drains it is a launch waiting here, that
+ * is forever (docs 6.17). cuEventQuery and cuEventElapsedTime return.
  * Writers first, where glibc offers it: a stream of launches must not hold a capture off. */
 #ifdef PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP
-static pthread_rwlock_t g_capture_gate = PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP;
+#define CAPTURE_GATE_INITIALIZER PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP
 #else
-static pthread_rwlock_t g_capture_gate = PTHREAD_RWLOCK_INITIALIZER;
+#define CAPTURE_GATE_INITIALIZER PTHREAD_RWLOCK_INITIALIZER
 #endif
+static pthread_rwlock_t g_capture_gate = CAPTURE_GATE_INITIALIZER;
+/* Captures between capture_announce() and capture_settled(). */
+static int g_capture_beginning;
+
+/* Before the driver begins a capture: from here on capture_reg_any() is 1, and any event
+ * call made under the gate before it has returned. */
+static void capture_announce(void) {
+  pthread_rwlock_wrlock(&g_capture_gate);
+  __atomic_add_fetch(&g_capture_beginning, 1, __ATOMIC_RELAXED);
+  pthread_rwlock_unlock(&g_capture_gate);
+}
+
+/* After the driver's answer, and the registration if it began one. */
+static void capture_settled(void) {
+  __atomic_sub_fetch(&g_capture_beginning, 1, __ATOMIC_RELEASE);
+}
 
 /* NULL means the default stream of the family: per-thread for _ptsz entries,
  * legacy otherwise, spelled out as its special handle since 0 is no key. Each context
@@ -2118,6 +2142,8 @@ static CUgraph capture_reg_graph(CUstream stream, int ptsz) {
  * then does less, never more. */
 static int capture_reg_any(void) {
   if (__atomic_load_n(&g_capture_untracked, __ATOMIC_RELAXED)) return 1;
+  /* Acquire: having seen the count drop, the registration made before it is seen too. */
+  if (__atomic_load_n(&g_capture_beginning, __ATOMIC_ACQUIRE)) return 1;
   pthread_mutex_lock(&g_capture_reg_lock);
   int any = g_capture_reg.count != 0;
   pthread_mutex_unlock(&g_capture_reg_lock);
@@ -2178,7 +2204,10 @@ static void capture_reg_reset_after_fork(void) {
   slot_table_abandon(&g_capture_reg);
   pthread_mutex_init(&g_capture_reg_lock, NULL);
   g_capture_untracked = 0;
-  pthread_rwlock_init(&g_capture_gate, NULL);
+  g_capture_beginning = 0;   /* only the forking thread lives on, and it was not beginning one */
+  /* Copied from the initializer, so that writers still come first in the child. */
+  static const pthread_rwlock_t fresh_gate = CAPTURE_GATE_INITIALIZER;
+  memcpy(&g_capture_gate, &fresh_gate, sizeof(g_capture_gate));
 }
 
 static int capture_reg_of_graph(void *cell, void *arg) {
@@ -2277,20 +2306,39 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
   uint64_t gpu_us = 0, sleep_us = 0;   /* stay 0 if measurement fails */
   float gpu_ms = 0.0f;
   int measured = 0;
-  /* A capture may have begun on another thread since gap_begin: checked again, with
-   * g_capture_gate held so that none begins until the measurement is done. The sleep
-   * comes after, unlocked: it must not hold a capture off. */
-  pthread_rwlock_rdlock(&g_capture_gate);
+  /* A capture may have begun on another thread since gap_begin, and cuEventQuery /
+   * cuEventSynchronize would break it if global (900, and 901 at its end). So the end
+   * marker is waited for by polling, each query with g_capture_gate held for reading
+   * and the check repeated; a capture beginning gives the measurement up. The gate is
+   * never held while waiting: a capture beginning on another thread would wait on this
+   * stream, and with writers first every launch behind it too -- forever, if the stream
+   * waits on one of them (docs 6.17). Nor across the record, which waits while another
+   * thread is blocked enqueuing on this stream; it does not disturb another thread's
+   * capture, and the check before it only spares the work when the result could not be
+   * read. The elapsed time comes from the events, so the polling does not change it;
+   * the sleep comes after, unlocked. g_gap_lock stays held throughout, as before:
+   * others only try it. */
   if (launch_ret == CUDA_SUCCESS && !capture_reg_any() &&
       CUDA_INTERNAL_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuEventRecord),
-                         g_gap_end[host_index], stream) == CUDA_SUCCESS &&
-      CUDA_INTERNAL_CALL(cuda_library_entry, cuEventSynchronize,
-                         g_gap_end[host_index]) == CUDA_SUCCESS &&
-      CUDA_INTERNAL_CALL(cuda_library_entry, cuEventElapsedTime, &gpu_ms,
-                         g_gap_start[host_index], g_gap_end[host_index]) == CUDA_SUCCESS) {
-    measured = 1;
+                         g_gap_end[host_index], stream) == CUDA_SUCCESS) {
+    useconds_t backoff_us = GAP_POLL_MIN_US;
+    for (;;) {
+      CUresult q = CUDA_ERROR_UNKNOWN;
+      pthread_rwlock_rdlock(&g_capture_gate);
+      if (!capture_reg_any()) {
+        q = CUDA_INTERNAL_CALL(cuda_library_entry, cuEventQuery, g_gap_end[host_index]);
+        if (q == CUDA_SUCCESS &&
+            CUDA_INTERNAL_CALL(cuda_library_entry, cuEventElapsedTime, &gpu_ms,
+                               g_gap_start[host_index], g_gap_end[host_index]) == CUDA_SUCCESS) {
+          measured = 1;
+        }
+      }
+      pthread_rwlock_unlock(&g_capture_gate);
+      if (q != CUDA_ERROR_NOT_READY) break;   /* done, failed, or a capture began */
+      usleep(backoff_us);
+      if (backoff_us < GAP_POLL_MAX_US) backoff_us *= 2;
+    }
   }
-  pthread_rwlock_unlock(&g_capture_gate);
   if (measured) {
     if (gpu_ms > 0.0f) {
       int dc = g_gap_dc[host_index];
@@ -5198,6 +5246,7 @@ typedef struct {
 #define GRAPH_RUN_DONE 0       /* nothing of it running, or not known to be */
 #define GRAPH_RUN_EVENT 1      /* an event behind its last launch */
 #define GRAPH_RUN_NO_EVENT 2   /* no event: its stream is the device's only one so far */
+#define GRAPH_RUN_PENDING 3    /* just launched, its event being recorded: counts as running */
 static graph_running_t g_graph_running[GRAPH_RUNNING_SLOTS];
 static uint64_t g_graph_running_seq;
 /* Per device: the stream of the last launch, and whether another one was ever seen. */
@@ -5206,9 +5255,16 @@ static struct {
   int ptsz, seen, several;
 } g_graph_streams[MAX_DEVICE_COUNT];
 /* Taken alone, inside g_graph_cost_lock or inside g_capture_gate (read), never the other
- * way round. Driver calls made under it (cuEventQuery, cuEventRecord, cuEventCreate /
- * Destroy) do not block. */
+ * way round. The only driver call made under it is cuEventQuery, which returns at once;
+ * cuEventRecord / Create / Destroy can wait on another thread's enqueue (see
+ * g_capture_gate), so they are made off it. */
 static pthread_mutex_t g_graph_use_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Around destroying a record's event off g_graph_use_lock, and around forgetting a
+ * context's records: an event is destroyed only while its context is known alive.
+ * Taken before g_graph_use_lock, never by a launch or an allocation. */
+static pthread_mutex_t g_graph_ev_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Bumped whenever a context's records are forgotten, under both locks. */
+static uint64_t g_graph_ctx_gen;
 
 static void graph_held_drop_locked(graph_held_t *e) {
   size_t *b = &g_graph_held_bytes[e->dev];
@@ -5270,11 +5326,14 @@ static void graph_held_release(CUdeviceptr dptr) {
 /* The context's events went with it: forgotten, not destroyed. Its held blocks did not. */
 static void graph_use_forget_ctx(CUcontext ctx) {
   if (ctx == NULL) return;
+  pthread_mutex_lock(&g_graph_ev_lock);
   pthread_mutex_lock(&g_graph_use_lock);
   for (int i = 0; i < GRAPH_RUNNING_SLOTS; i++) {
     if (g_graph_running[i].ctx == ctx) memset(&g_graph_running[i], 0, sizeof(g_graph_running[i]));
   }
+  g_graph_ctx_gen++;
   pthread_mutex_unlock(&g_graph_use_lock);
+  pthread_mutex_unlock(&g_graph_ev_lock);
 }
 
 /* A stream gone: its record must not be matched by a new stream at the same address.
@@ -5308,10 +5367,12 @@ static void graph_use_reset_after_fork(void) {
   memset(g_graph_streams, 0, sizeof(g_graph_streams));
   g_graph_held_count = 0;
   pthread_mutex_init(&g_graph_use_lock, NULL);
+  pthread_mutex_init(&g_graph_ev_lock, NULL);
 }
 
 /* 1 while the record's last launch has not finished on the GPU. */
 static int graph_running_busy_locked(graph_running_t *r) {
+  if (r->active == GRAPH_RUN_PENDING) return 1;
   if (r->active != GRAPH_RUN_EVENT) return 0;
   CUresult q = CUDA_INTERNAL_CALL(cuda_library_entry, cuEventQuery, r->ev);
   if (q == CUDA_ERROR_NOT_READY) return 1;
@@ -5365,8 +5426,32 @@ static size_t graph_pool_available(int dev, size_t reserved, CUstream stream, in
   return reserved > unavailable ? reserved - unavailable : 0;
 }
 
-/* After a launch on stream of a graph using need of the pool, with ctx current. */
+/* Destroys ev, of a context alive when gen was read, unless one has gone since: then it
+ * may have been this one, and its events went with it. Off g_graph_use_lock. */
+static void graph_event_destroy(CUevent ev, uint64_t gen) {
+  if (ev == NULL) return;
+  pthread_mutex_lock(&g_graph_ev_lock);
+  if (g_graph_ctx_gen == gen) {
+    if (CUDA_FIND_ENTRY(cuda_library_entry, cuEventDestroy_v2)) {
+      CUDA_INTERNAL_CALL(cuda_library_entry, cuEventDestroy_v2, ev);
+    } else {
+      CUDA_INTERNAL_CALL(cuda_library_entry, cuEventDestroy, ev);
+    }
+  }
+  pthread_mutex_unlock(&g_graph_ev_lock);
+}
+
+/* After a launch on stream of a graph using need of the pool, with ctx current. In three
+ * steps, so that no driver call that can wait is made under a lock a launch takes: the
+ * record is chosen and marked pending (counted as running) with the gate and
+ * g_graph_use_lock held; its event is made and recorded with neither; then it is put
+ * back, unless another launch took the record meanwhile. */
 static void graph_running_note(int dev, size_t need, CUstream stream, int ptsz, CUgraphExec exec, CUcontext ctx) {
+  pthread_rwlock_rdlock(&g_capture_gate);
+  if (capture_reg_any()) {   /* the slot search queries events: see g_capture_gate */
+    pthread_rwlock_unlock(&g_capture_gate);
+    return;
+  }
   pthread_mutex_lock(&g_graph_use_lock);
   graph_running_t *slot = NULL, *idle = NULL, *oldest = NULL;
   for (int i = 0; i < GRAPH_RUNNING_SLOTS && slot == NULL; i++) {
@@ -5389,46 +5474,52 @@ static void graph_running_note(int dev, size_t need, CUstream stream, int ptsz, 
   }
   graph_streams_note_locked(dev, stream, ptsz);
   int several = dev >= 0 && dev < MAX_DEVICE_COUNT && g_graph_streams[dev].several;
+  slot->stream = stream;
+  slot->ptsz = ptsz;
+  slot->exec = exec;
+  slot->dev = dev;
+  slot->need = need;
+  slot->seq = ++g_graph_running_seq;
   if (!several) {
-    slot->stream = stream;
-    slot->ptsz = ptsz;
-    slot->exec = exec;
-    slot->dev = dev;
-    slot->need = need;
-    slot->seq = ++g_graph_running_seq;
     if (slot->ev == NULL || slot->ctx == ctx) {
       slot->ctx = ctx;   /* an event, if any, stays with its own context */
     }
     slot->active = GRAPH_RUN_NO_EVENT;
     pthread_mutex_unlock(&g_graph_use_lock);
+    pthread_rwlock_unlock(&g_capture_gate);
     return;
   }
-  if (slot->ev != NULL && slot->ctx != ctx) {
-    /* Records are cleared when their context goes, so this context is alive. */
-    if (CUDA_FIND_ENTRY(cuda_library_entry, cuEventDestroy_v2)) {
-      CUDA_INTERNAL_CALL(cuda_library_entry, cuEventDestroy_v2, slot->ev);
-    } else {
-      CUDA_INTERNAL_CALL(cuda_library_entry, cuEventDestroy, slot->ev);
-    }
-    slot->ev = NULL;
-  }
-  if (slot->ev == NULL &&
-      CUDA_INTERNAL_CALL(cuda_library_entry, cuEventCreate, &slot->ev, CU_EVENT_DISABLE_TIMING) != CUDA_SUCCESS) {
-    slot->ev = NULL;
-  }
-  slot->stream = stream;
-  slot->ptsz = ptsz;
+  /* The event leaves the record while it is recorded, so nothing else queries or
+   * destroys it; one of another context is destroyed instead. */
+  CUevent ev = NULL, stale = NULL;
+  if (slot->ctx == ctx) ev = slot->ev;
+  else stale = slot->ev;
+  slot->ev = NULL;
   slot->ctx = ctx;
-  slot->exec = exec;
-  slot->dev = dev;
-  slot->need = need;
-  slot->seq = ++g_graph_running_seq;
-  /* A stream of another context than the current one refuses the event: not counted. */
-  int recorded = slot->ev != NULL &&
-      (ptsz ? CUDA_INTERNAL_CALL(cuda_library_entry, cuEventRecord_ptsz, slot->ev, stream)
-            : CUDA_INTERNAL_CALL(cuda_library_entry, cuEventRecord, slot->ev, stream)) == CUDA_SUCCESS;
-  slot->active = recorded ? GRAPH_RUN_EVENT : GRAPH_RUN_DONE;
+  slot->active = GRAPH_RUN_PENDING;
+  uint64_t seq = slot->seq, gen = g_graph_ctx_gen;
   pthread_mutex_unlock(&g_graph_use_lock);
+  pthread_rwlock_unlock(&g_capture_gate);
+
+  /* Records are cleared when their context goes, so stale's context was alive at gen. */
+  graph_event_destroy(stale, gen);
+  if (ev == NULL &&
+      CUDA_INTERNAL_CALL(cuda_library_entry, cuEventCreate, &ev, CU_EVENT_DISABLE_TIMING) != CUDA_SUCCESS) {
+    ev = NULL;
+  }
+  /* A stream of another context than the current one refuses the event: not counted. */
+  int recorded = ev != NULL &&
+      (ptsz ? CUDA_INTERNAL_CALL(cuda_library_entry, cuEventRecord_ptsz, ev, stream)
+            : CUDA_INTERNAL_CALL(cuda_library_entry, cuEventRecord, ev, stream)) == CUDA_SUCCESS;
+
+  pthread_mutex_lock(&g_graph_use_lock);
+  if (slot->seq == seq && slot->active == GRAPH_RUN_PENDING) {
+    slot->ev = ev;
+    slot->active = recorded ? GRAPH_RUN_EVENT : GRAPH_RUN_DONE;
+    ev = NULL;
+  }
+  pthread_mutex_unlock(&g_graph_use_lock);
+  graph_event_destroy(ev, gen);   /* the record went to another launch meanwhile */
 }
 
 /* After a successful launch of an exec with alloc nodes or frees from elsewhere. A launch
@@ -5455,11 +5546,7 @@ static void graph_launched(CUgraphExec exec, const graph_mem_t *mem, CUstream st
       graph_stream_tracked(stream, ptsz)) {
     CUcontext ctx = NULL;
     if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetCurrent, &ctx) == CUDA_SUCCESS && ctx != NULL) {
-      pthread_rwlock_rdlock(&g_capture_gate);
-      if (!capture_reg_any()) {
-        graph_running_note(mem->d[0].dev, mem->d[0].need - mem->d[0].kept, stream, ptsz, exec, ctx);
-      }
-      pthread_rwlock_unlock(&g_capture_gate);
+      graph_running_note(mem->d[0].dev, mem->d[0].need - mem->d[0].kept, stream, ptsz, exec, ctx);
     }
   }
 }
@@ -6143,8 +6230,8 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
 }
 
 /* Beginning a capture records its graph (capture_reg_begin), which is the
- * only point the graph is certain to be known: see the registry. Both under
- * g_capture_gate, so no event call of ours falls between them. One wrapper
+ * only point the graph is certain to be known: see the registry. Announced
+ * first (capture_announce), so no event call of ours falls between the two. One wrapper
  * per ABI, each reaching the entry of its own name -- cuda.h declares
  * cuStreamBeginCapture(CUstream) and cuStreamBeginCapture_v2(CUstream,
  * CUstreamCaptureMode) in its __CUDA_API_VERSION_INTERNAL block, and crossing
@@ -6152,45 +6239,45 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
  * unset register in the other. */
 CUresult cuStreamBeginCapture(CUstream hStream) {
   capture_origin_t origin = stream_origin_before_capture(hStream, __CUDA_API_IS_PTSZ);
-  pthread_rwlock_wrlock(&g_capture_gate);
+  capture_announce();
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture), hStream);
   if (ret == CUDA_SUCCESS) {
     capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ), &origin);
   }
-  pthread_rwlock_unlock(&g_capture_gate);
+  capture_settled();
   return ret;
 }
 
 CUresult cuStreamBeginCapture_v2(CUstream hStream, CUstreamCaptureMode mode) {
   capture_origin_t origin = stream_origin_before_capture(hStream, __CUDA_API_IS_PTSZ);
-  pthread_rwlock_wrlock(&g_capture_gate);
+  capture_announce();
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture_v2), hStream, mode);
   if (ret == CUDA_SUCCESS) {
     capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ), &origin);
   }
-  pthread_rwlock_unlock(&g_capture_gate);
+  capture_settled();
   return ret;
 }
 
 CUresult cuStreamBeginCapture_ptsz(CUstream hStream) {
   capture_origin_t origin = stream_origin_before_capture(hStream, 1);
-  pthread_rwlock_wrlock(&g_capture_gate);
+  capture_announce();
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamBeginCapture_ptsz, hStream);
   if (ret == CUDA_SUCCESS) {
     capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1), &origin);
   }
-  pthread_rwlock_unlock(&g_capture_gate);
+  capture_settled();
   return ret;
 }
 
 CUresult cuStreamBeginCapture_v2_ptsz(CUstream hStream, CUstreamCaptureMode mode) {
   capture_origin_t origin = stream_origin_before_capture(hStream, 1);
-  pthread_rwlock_wrlock(&g_capture_gate);
+  capture_announce();
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamBeginCapture_v2_ptsz, hStream, mode);
   if (ret == CUDA_SUCCESS) {
     capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1), &origin);
   }
-  pthread_rwlock_unlock(&g_capture_gate);
+  capture_settled();
   return ret;
 }
 
@@ -6199,14 +6286,14 @@ CUresult cuStreamBeginCaptureToGraph(CUstream hStream, CUgraph hGraph,
                                      const CUgraphEdgeData *dependencyData,
                                      size_t numDependencies, CUstreamCaptureMode mode) {
   capture_origin_t origin = stream_origin_before_capture(hStream, __CUDA_API_IS_PTSZ);
-  pthread_rwlock_wrlock(&g_capture_gate);
+  capture_announce();
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCaptureToGraph),
                                   hStream, hGraph, dependencies, dependencyData,
                                   numDependencies, mode);
   if (ret == CUDA_SUCCESS) {
     capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, hGraph, &origin);
   }
-  pthread_rwlock_unlock(&g_capture_gate);
+  capture_settled();
   return ret;
 }
 
@@ -6215,14 +6302,14 @@ CUresult cuStreamBeginCaptureToGraph_ptsz(CUstream hStream, CUgraph hGraph,
                                           const CUgraphEdgeData *dependencyData,
                                           size_t numDependencies, CUstreamCaptureMode mode) {
   capture_origin_t origin = stream_origin_before_capture(hStream, 1);
-  pthread_rwlock_wrlock(&g_capture_gate);
+  capture_announce();
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamBeginCaptureToGraph_ptsz,
                                   hStream, hGraph, dependencies, dependencyData,
                                   numDependencies, mode);
   if (ret == CUDA_SUCCESS) {
     capture_reg_begin(hStream, 1, hGraph, &origin);
   }
-  pthread_rwlock_unlock(&g_capture_gate);
+  capture_settled();
   return ret;
 }
 
