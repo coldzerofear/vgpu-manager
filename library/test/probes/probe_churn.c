@@ -310,6 +310,23 @@ static void m_running_streams(void) {
   COUNT_FAILURE(cuStreamSynchronize(g_stream));
 }
 
+/* Threads coming and going, each launching on its per-thread default stream: a record
+ * per thread, which no destroy hook retires. Idle ones are recycled past 64. */
+static void *running_thread_body(void *arg) {
+  CUgraphExec e = (CUgraphExec)arg;
+  cuCtxSetCurrent(g_ctx);
+  COUNT_FAILURE(cuGraphLaunch(e, CU_STREAM_PER_THREAD));
+  COUNT_FAILURE(cuStreamSynchronize(CU_STREAM_PER_THREAD));
+  return NULL;
+}
+
+static void m_running_threads(void) {
+  static CUgraphExec e;
+  if (e == NULL) e = make_exec(g_dev, 0);
+  pthread_t t;
+  if (pthread_create(&t, NULL, running_thread_body, e) == 0) pthread_join(t, NULL);
+}
+
 /* ---- the pool table ---- */
 static void m_pool(void) { COUNT_FAILURE(cuMemPoolDestroy(make_pool())); }
 
@@ -345,6 +362,7 @@ static const struct {
   {"held_ctx", m_held_ctx, 0},
   {"running_ctx", m_running_ctx, 0},
   {"running_streams", m_running_streams, 0},
+  {"running_threads", m_running_threads, 0},
   {"pool", m_pool, 0},
   {"pool_get", m_pool_get, 0},
 };

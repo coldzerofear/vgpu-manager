@@ -77,6 +77,11 @@ churn held                        10000 held      64 0
 churn held_ctx                      100 held      64 0
 churn running_ctx                   200 cost    4096 0
 churn running_streams             20000 cost    4096 1
+# The records of graphs running per stream: the context's go with it, a destroyed
+# stream's with it, the default stream's stays; a thread's are recycled past 64.
+churn running_ctx                   200 running   64 0
+churn running_streams             20000 running   64 1
+churn running_threads              2000 running  128 64
 churn pool                        10000 pool      64 0
 churn pool_get                   100000 pool      64 2
 

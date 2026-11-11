@@ -38,6 +38,14 @@
  *       launch whose event has to be made hold other launches off neither: the driver
  *       makes those two wait until the stream drains, and what drains it may be one of
  *       those other launches
+ *   [V] a launch counts as running from its admission on: another stream's launch made
+ *       while the first is still in the driver, its memory mapped, is not lent it
+ *   [W] the per-thread default stream counts as a stream of its own per thread
+ *   [X] a synchronize of the stream, or of its context, settles what it waited for: the
+ *       stream stops holding on to the largest graph it ran
+ *   [Y] graphs running on more streams than a fixed table of 32 held are all counted
+ *   [Z] a launch on a stream of a context that is not the current one is counted, and so
+ *       is a graph's pool memory on its second device (needs 2 GPUs)
  *
  * Each case trims the graph pool first so it starts with nothing reserved.
  * Built twice (_ptsz variant) so the per-thread-default-stream hooks are
@@ -1422,6 +1430,389 @@ static int full_stream_holds_nothing(void) {
   return failed;
 }
 
+/* --------------------------------------------------------------------- [V] */
+/* As in [U], F blocks enqueuing on a full stream of a context of its own; no capture
+ * begins. T1 launches a graph on a new stream: the driver maps its memory and then holds
+ * the call (or the library's cuEventCreate does), so T1 is still in its launch. T3, on
+ * another stream, launches a graph as large: it cannot reuse T1's memory, and what is
+ * left of the headroom does not hold it -- refused, at once. Claimed only after the
+ * driver returned, T1's record was not there yet: T3 went through and the pool grew past
+ * the limit (docs 6.17). */
+static int launch_counts_from_admission(void) {
+  CUcontext ctx3 = NULL, prev = NULL;
+  int failed = 0;
+  cuCtxGetCurrent(&prev);
+  CHECK_DRV_API(CUCTX_CREATE(&ctx3, 0, g_dev));
+  trim_pool();
+  /* The headroom taken down to 1.5 graphs: T1's fits, T3's only by reusing T1's. */
+  size_t room = headroom(), x = room / 8, tiny[1] = {2u << 20}, big[1] = {x};
+  CUdeviceptr hog = 0, buf = 0;
+  CHECK_DRV_API(cuMemAlloc(&hog, room - x * 3 / 2 - (64u << 20)));
+  CHECK_DRV_API(cuMemAlloc(&buf, 4096));
+  CUstream s1 = NULL, s3 = NULL, s4 = NULL;
+  CHECK_DRV_API(cuStreamCreate(&s1, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuStreamCreate(&s3, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuStreamCreate(&s4, CU_STREAM_NON_BLOCKING));
+  CUgraphExec warm = sized_graph(tiny, 1, 1), a1 = sized_graph(big, 1, 1), a3 = sized_graph(big, 1, 1);
+  if (warm == NULL || a1 == NULL || a3 == NULL) { printf("  FAIL: could not build the graphs\n"); return 1; }
+
+  hold(s1);
+  if (cuLaunchHostFunc(s3, hold_stream, NULL) != CUDA_SUCCESS) g_release = 1;
+  CUresult rw = cuGraphLaunch(warm, s3);   /* s3's record busy: T1 cannot take its event */
+  size_t before = pool_reserved();
+  filler_t f = {ctx3, s1, buf, 0, 0};
+  pthread_t thf, th1;
+  pthread_create(&thf, NULL, fill_stream, &f);
+  for (int last = -1, i = 0; i < 100 && f.filled != last; i++) { last = f.filled; usleep(100 * 1000); }
+  launcher_t t1 = {ctx3, s4, a1, 0, CUDA_SUCCESS};
+  pthread_create(&th1, NULL, launch_in_thread, &t1);
+  for (int i = 0; i < 2000 && pool_reserved() < before + x; i++) usleep(1000);
+  usleep(100 * 1000);
+  int mapped = pool_reserved() >= before + x;
+  int t1_waiting = !t1.done;
+  double t0 = now_s();
+  CUresult r3 = cuGraphLaunch(a3, s3);
+  double took = now_s() - t0;
+  g_release = 1;
+  f.stop = 1;
+  pthread_join(th1, NULL);
+  pthread_join(thf, NULL);
+  cuCtxSynchronize();
+  printf("  pool %.0f MiB, T1 %s, T3's launch took %.3f s\n", MIB(pool_reserved()),
+         !mapped ? "did not map" : t1_waiting ? "was still in its launch" : "had returned", took);
+  describe("cuGraphLaunch (T1, new stream)", t1.r);
+  describe("cuGraphLaunch (T3, another stream, as large)", r3);
+  if (rw != CUDA_SUCCESS || !mapped || t1.r != CUDA_SUCCESS) {
+    printf("  FAIL: T1's graph did not go through as set up\n");
+    failed++;
+  } else if (!t1_waiting) {
+    printf("  (T1 was not held up on this driver: its graph done, nothing to check)\n");
+  } else if (took > 2.0 || r3 != CUDA_ERROR_OUT_OF_MEMORY) {
+    printf("  FAIL: expected T3 refused at once, T1 counted as running from its admission\n");
+    failed++;
+  }
+  cuGraphExecDestroy(warm);
+  cuGraphExecDestroy(a1);
+  cuGraphExecDestroy(a3);
+  cuMemFree(hog);
+  cuMemFree(buf);
+  cuStreamDestroy(s1);
+  cuStreamDestroy(s3);
+  cuStreamDestroy(s4);
+  trim_pool();
+  cuCtxSetCurrent(prev);
+  cuCtxDestroy(ctx3);
+  return failed;
+}
+
+/* A launch on g_stream, waited for: the SM limit's idle-gap path (CUDA_CORE_LIMIT under
+ * 100) makes the first launch after 200 ms idle wait for its stream to finish, which a
+ * parked stream never does. Launching onto one right after this keeps clear of it. */
+static void keep_busy(void) {
+  static CUgraphExec empty;
+  if (empty == NULL) {
+    CUgraph g = NULL;
+    CUgraphNode n = NULL;
+    if (cuGraphCreate(&g, 0) != CUDA_SUCCESS) return;
+    if (cuGraphAddEmptyNode(&n, g, NULL, 0) == CUDA_SUCCESS) cuGraphInstantiateWithFlags(&empty, g, 0);
+    cuGraphDestroy(g);
+  }
+  if (empty != NULL) launch_and_wait(empty);
+}
+
+/* --------------------------------------------------------------------- [W] */
+typedef struct {
+  CUcontext ctx;
+  CUgraphExec ex;
+  volatile int phase;   /* 1 launched, 2 launch again, 3 again done, 4 may end */
+  CUresult r1, r2;
+} ptds_thread_t;
+
+static void *launch_on_own_ptds(void *arg) {
+  ptds_thread_t *p = (ptds_thread_t *)arg;
+  cuCtxSetCurrent(p->ctx);
+  if (cuLaunchHostFunc(CU_STREAM_PER_THREAD, hold_stream, NULL) != CUDA_SUCCESS) g_release = 1;
+  p->r1 = cuGraphLaunch(p->ex, CU_STREAM_PER_THREAD);
+  p->phase = 1;
+  for (int i = 0; p->phase != 2 && i < 30000; i++) usleep(1000);
+  p->r2 = cuGraphLaunch(p->ex, CU_STREAM_PER_THREAD);
+  p->phase = 3;
+  for (int i = 0; p->phase != 4 && i < 30000; i++) usleep(1000);
+  cuStreamSynchronize(CU_STREAM_PER_THREAD);
+  return NULL;
+}
+
+/* T's per-thread stream is parked with a graph launched on it; this thread's per-thread
+ * stream is another stream. A graph as large launched there cannot reuse T's memory, and
+ * the headroom left holds half of it: refused. T launching its own again reuses it. The
+ * per-thread stream was not tracked before: one handle for as many streams as threads. */
+static int per_thread_stream_counts(CUcontext ctx) {
+  trim_pool();
+  size_t x = headroom() / 4, one[1] = {x};
+  int failed = 0;
+  CUgraphExec a = sized_graph(one, 1, 1), b = sized_graph(one, 1, 1);
+  if (a == NULL || b == NULL) { printf("  FAIL: could not build the graphs\n"); return 1; }
+  g_release = 0;
+  ptds_thread_t t;
+  memset(&t, 0, sizeof(t));
+  t.ctx = ctx;
+  t.ex = a;
+  pthread_t th;
+  keep_busy();
+  pthread_create(&th, NULL, launch_on_own_ptds, &t);
+  for (int i = 0; t.phase != 1 && i < 20000; i++) usleep(1000);
+  CUdeviceptr filler = fill_leaving(x / 2);
+  CUresult rb = cuGraphLaunch(b, CU_STREAM_PER_THREAD);
+  t.phase = 2;
+  for (int i = 0; t.phase != 3 && i < 20000; i++) usleep(1000);
+  g_release = 1;
+  t.phase = 4;
+  pthread_join(th, NULL);
+  cuCtxSynchronize();
+  if (filler) cuMemFree(filler);
+  describe("cuGraphLaunch (T, its per-thread stream parked)", t.r1);
+  describe("cuGraphLaunch (this thread's per-thread stream)", rb);
+  describe("cuGraphLaunch (T again, its own stream)", t.r2);
+  if (t.r1 != CUDA_SUCCESS || rb != CUDA_ERROR_OUT_OF_MEMORY || t.r2 != CUDA_SUCCESS) {
+    printf("  FAIL: expected T's through, this thread's refused, T's again through\n");
+    failed++;
+  }
+  cuGraphExecDestroy(a);
+  cuGraphExecDestroy(b);
+  trim_pool();
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [X] */
+/* S1 runs a large graph and is synchronized; then, parked, a small one. A stream keeps
+ * counting the largest graph it ran while busy (the driver reuses its blocks only on that
+ * stream), until something shows it finished: the synchronize does. So a graph on S2 can
+ * reuse all but the small one, and goes through with the headroom taken. */
+static int sync_settles(int whole_ctx) {
+  trim_pool();
+  size_t room = headroom(), big[1] = {room / 2}, small[1] = {room / 8}, mid[1] = {room / 4};
+  int failed = 0;
+  CUstream s1 = NULL, s2 = NULL;
+  CHECK_DRV_API(cuStreamCreate(&s1, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuStreamCreate(&s2, CU_STREAM_NON_BLOCKING));
+  CUgraphExec gb = sized_graph(big, 1, 1), gs = sized_graph(small, 1, 1), gm = sized_graph(mid, 1, 1);
+  if (gb == NULL || gs == NULL || gm == NULL) { printf("  FAIL: could not build the graphs\n"); return 1; }
+  keep_busy();
+  hold(s1);
+  CUresult r1 = cuGraphLaunch(gb, s1);
+  g_release = 1;
+  CUresult rs = whole_ctx ? cuCtxSynchronize() : cuStreamSynchronize(s1);
+  hold(s1);
+  CUresult r2 = cuGraphLaunch(gs, s1);
+  CUdeviceptr filler = fill_leaving(mid[0] / 2);
+  CUresult r3 = cuGraphLaunch(gm, s2);
+  g_release = 1;
+  cuStreamSynchronize(s1);
+  cuStreamSynchronize(s2);
+  if (filler) cuMemFree(filler);
+  describe(whole_ctx ? "cuCtxSynchronize (after the large graph)" : "cuStreamSynchronize (after the large graph)", rs);
+  describe("cuGraphLaunch (S2, S1 busy with the small one)", r3);
+  if (r1 != CUDA_SUCCESS || rs != CUDA_SUCCESS || r2 != CUDA_SUCCESS || r3 != CUDA_SUCCESS) {
+    printf("  FAIL: expected all through, S1 counting only its small graph\n");
+    failed++;
+  }
+  cuGraphExecDestroy(gb);
+  cuGraphExecDestroy(gs);
+  cuGraphExecDestroy(gm);
+  cuStreamDestroy(s1);
+  cuStreamDestroy(s2);
+  trim_pool();
+  return failed;
+}
+
+static int synchronize_settles(void) {
+  int failed = 0;
+  printf("  (stream)\n");
+  failed += sync_settles(0);
+  printf("  (context)\n");
+  failed += sync_settles(1);
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [Y] */
+#define MANY_STREAMS 70
+/* 70 parked streams, each with a graph of its own launched on it (execs differ: a graph
+ * relaunched is not counted against itself). With the headroom then taken, a 71st on a
+ * stream of its own cannot reuse any of theirs: refused. A table of 32 records dropped
+ * the oldest, and lent their memory out. 70 is past the 64 records kept before an idle
+ * one is recycled, too: running ones never are. */
+static int many_streams_count(void) {
+  trim_pool();
+  size_t one[1] = {32u << 20};
+  int failed = 0, made = 0;
+  CUstream st[MANY_STREAMS + 1];
+  CUgraphExec ex[MANY_STREAMS + 1];
+  memset(st, 0, sizeof(st));
+  memset(ex, 0, sizeof(ex));
+  for (int i = 0; i <= MANY_STREAMS; i++) {
+    if (cuStreamCreate(&st[i], CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS || (ex[i] = sized_graph(one, 1, 1)) == NULL) break;
+    made++;
+  }
+  if (made <= MANY_STREAMS || headroom() < (MANY_STREAMS + 8) * one[0]) {
+    printf("  FAIL: could not set up %d streams and graphs\n", MANY_STREAMS + 1);
+    failed = 1;
+  } else {
+    keep_busy();
+    g_release = 0;
+    int through = 0;
+    for (int i = 0; i < MANY_STREAMS; i++) {
+      if (cuLaunchHostFunc(st[i], hold_stream, NULL) != CUDA_SUCCESS) g_release = 1;
+      through += cuGraphLaunch(ex[i], st[i]) == CUDA_SUCCESS;
+    }
+    CUdeviceptr filler = fill_leaving(one[0] / 2);
+    CUresult r = cuGraphLaunch(ex[MANY_STREAMS], st[MANY_STREAMS]);
+    g_release = 1;
+    cuCtxSynchronize();
+    if (filler) cuMemFree(filler);
+    printf("  %d of %d launched on parked streams\n", through, MANY_STREAMS);
+    describe("cuGraphLaunch (one stream more, the headroom taken)", r);
+    if (through != MANY_STREAMS || r != CUDA_ERROR_OUT_OF_MEMORY) {
+      printf("  FAIL: expected all of them through and the last refused\n");
+      failed = 1;
+    }
+  }
+  for (int i = 0; i <= MANY_STREAMS; i++) {
+    if (ex[i] != NULL) cuGraphExecDestroy(ex[i]);
+    if (st[i] != NULL) cuStreamDestroy(st[i]);
+  }
+  trim_pool();
+  return failed;
+}
+
+/* --------------------------------------------------------------------- [Z] */
+/* A graph allocating sizes[i] on devs[i], each freed after. */
+static CUgraphExec devices_graph(const CUdevice *devs, const size_t *sizes, int n) {
+  CUgraph g = NULL;
+  CUgraphNode prev = NULL;
+  CUgraphExec ex = NULL;
+  if (cuGraphCreate(&g, 0) != CUDA_SUCCESS) return NULL;
+  for (int i = 0; i < n; i++) {
+    CUDA_MEM_ALLOC_NODE_PARAMS ap;
+    memset(&ap, 0, sizeof(ap));
+    ap.poolProps.allocType = CU_MEM_ALLOCATION_TYPE_PINNED;
+    ap.poolProps.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    ap.poolProps.location.id = devs[i];
+    ap.bytesize = sizes[i];
+    CUgraphNode an = NULL, fn = NULL;
+    if (cuGraphAddMemAllocNode(&an, g, prev ? &prev : NULL, prev ? 1 : 0, &ap) != CUDA_SUCCESS ||
+        cuGraphAddMemFreeNode(&fn, g, &an, 1, ap.dptr) != CUDA_SUCCESS) {
+      cuGraphDestroy(g);
+      return NULL;
+    }
+    prev = fn;
+  }
+  if (cuGraphInstantiateWithFlags(&ex, g, 0) != CUDA_SUCCESS) ex = NULL;
+  cuGraphDestroy(g);
+  return ex;
+}
+
+/* With another context current, a graph launched on this context's parked stream S1: its
+ * event has to be of S1's context. Then, this context current again, a graph as large on
+ * S2 with the headroom taken: refused. Made in the current context, the event did not take
+ * on S1, and the launch went uncounted. On two devices, a graph allocating a little on the
+ * first and much on the second, parked; then one as large on the second, on another
+ * stream, with that device's headroom taken: refused. Only the first device was counted.
+ * Contexts are made and headroom taken before parking: either takes long enough to make
+ * the next launch one after an idle gap (see keep_busy). */
+static int other_context_and_device_count(CUcontext ctx) {
+  int failed = 0;
+  trim_pool();
+  size_t x = headroom() / 4, one[1] = {x};
+  CUstream s1 = NULL, s2 = NULL;
+  CHECK_DRV_API(cuStreamCreate(&s1, CU_STREAM_NON_BLOCKING));
+  CHECK_DRV_API(cuStreamCreate(&s2, CU_STREAM_NON_BLOCKING));
+  CUgraphExec a = sized_graph(one, 1, 1), b = sized_graph(one, 1, 1);
+  if (a == NULL || b == NULL) { printf("  FAIL: could not build the graphs\n"); return 1; }
+  CUcontext other = NULL;
+  CHECK_DRV_API(CUCTX_CREATE(&other, 0, g_dev));
+  cuCtxSetCurrent(ctx);
+  CUdeviceptr filler = fill_leaving(x * 3 / 2);   /* a's x, then half of b's */
+  keep_busy();
+  hold(s1);
+  cuCtxSetCurrent(other);
+  double t0 = now_s();
+  CUresult ra = cuGraphLaunch(a, s1);
+  double took = now_s() - t0;
+  cuCtxSetCurrent(ctx);
+  CUresult rb = cuGraphLaunch(b, s2);
+  g_release = 1;
+  cuCtxSynchronize();
+  if (filler) cuMemFree(filler);
+  describe("cuGraphLaunch (S1 of this context, another current)", ra);
+  describe("cuGraphLaunch (S2, this context current, headroom taken)", rb);
+  if (ra != CUDA_SUCCESS) {
+    printf("  (the driver refuses a launch on another context's stream: nothing to check)\n");
+  } else if (took > 2.0) {
+    printf("  FAIL: the launch on the parked stream waited %.1f s: not set up as meant\n", took);
+    failed++;
+  } else if (rb != CUDA_ERROR_OUT_OF_MEMORY) {
+    printf("  FAIL: expected it refused, the graph on S1 counted\n");
+    failed++;
+  }
+  cuCtxDestroy(other);
+  cuCtxSetCurrent(ctx);
+  cuGraphExecDestroy(a);
+  cuGraphExecDestroy(b);
+  trim_pool();
+
+  int count = 0;
+  cuDeviceGetCount(&count);
+  if (count < 2) {
+    printf("  (second device: SKIP, needs 2 devices, have %d)\n", count);
+  } else {
+    CUdevice dev1;
+    CHECK_DRV_API(cuDeviceGet(&dev1, g_dev == 0 ? 1 : 0));
+    CUcontext octx = NULL, popped = NULL;
+    CHECK_DRV_API(cuDevicePrimaryCtxRetain(&octx, dev1));
+    cuDeviceGraphMemTrim(dev1);
+    CHECK_DRV_API(cuCtxPushCurrent(octx));
+    size_t y = headroom() / 4;
+    CUdeviceptr filler1 = fill_leaving(y * 3 / 2);   /* g2's y, then half of g3's */
+    CHECK_DRV_API(cuCtxPopCurrent(&popped));
+    CUdevice both[2] = {g_dev, dev1}, second[1] = {dev1};
+    size_t both_sizes[2] = {32u << 20, y}, second_sizes[1] = {y};
+    CUgraphExec g2 = devices_graph(both, both_sizes, 2), g3 = devices_graph(second, second_sizes, 1);
+    if (g2 == NULL || g3 == NULL) {
+      printf("  FAIL: could not build the two-device graphs\n");
+      failed++;
+    } else {
+      keep_busy();
+      hold(s1);
+      t0 = now_s();
+      CUresult r2 = cuGraphLaunch(g2, s1);
+      took = now_s() - t0;
+      CUresult r3 = cuGraphLaunch(g3, s2);
+      g_release = 1;
+      cuCtxSynchronize();
+      describe("cuGraphLaunch (S1: a little on this device, much on the other)", r2);
+      describe("cuGraphLaunch (S2: as much on the other, its headroom taken)", r3);
+      if (took > 2.0) {
+        printf("  FAIL: the launch on the parked stream waited %.1f s: not set up as meant\n", took);
+        failed++;
+      } else if (r2 != CUDA_SUCCESS || r3 != CUDA_ERROR_OUT_OF_MEMORY) {
+        printf("  FAIL: expected the first through and the second refused\n");
+        failed++;
+      }
+    }
+    CHECK_DRV_API(cuCtxPushCurrent(octx));
+    if (filler1) cuMemFree(filler1);
+    CHECK_DRV_API(cuCtxPopCurrent(&popped));
+    if (g2 != NULL) cuGraphExecDestroy(g2);
+    if (g3 != NULL) cuGraphExecDestroy(g3);
+    cuDeviceGraphMemTrim(dev1);
+    cuDevicePrimaryCtxRelease(dev1);
+  }
+  cuStreamDestroy(s1);
+  cuStreamDestroy(s2);
+  trim_pool();
+  return failed;
+}
+
 int main(void) {
   if (!preloaded()) {
     printf("SKIP (needs LD_PRELOAD=libvgpu-control.so and a memory limit)\n");
@@ -1467,6 +1858,11 @@ int main(void) {
   RUN_CASE("[S] captures begun while launches go on are left alone", captures_begun_during_launches(ctx));
   RUN_CASE("[T] an idle-gap launch waiting for its stream holds nothing off", gap_wait_holds_nothing(ctx));
   RUN_CASE("[U] a full stream elsewhere holds no launch off", full_stream_holds_nothing());
+  RUN_CASE("[V] a launch counts as running from its admission on", launch_counts_from_admission());
+  RUN_CASE("[W] the per-thread default stream is a stream of its own per thread", per_thread_stream_counts(ctx));
+  RUN_CASE("[X] a synchronize settles what it waited for", synchronize_settles());
+  RUN_CASE("[Y] graphs running on more than 32 streams are all counted", many_streams_count());
+  RUN_CASE("[Z] another context's stream, and a graph's second device, are counted", other_context_and_device_count(ctx));
 #undef RUN_CASE
   trim_pool();
   cuStreamDestroy(g_stream);
