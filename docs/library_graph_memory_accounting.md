@@ -1593,3 +1593,32 @@ primary release 仍在驱动调用之后清理：调用前无法知道这是不�
 其余核对过、没有问题的：`need[]` 和 `g_graph_streams[]` 的下标都检查了 `0 <= dev < MAX_DEVICE_COUNT`；slot 表采用后移删除，代码里删除之后都不再用旧指针，回收那里删除后立即 insert，删除后 insert 一定能找到空位；票据（含 `saved`，约 200 字节）在栈上，不跨线程；撤销时按 key 重新查找，不用登记时的指针（中间可能扩容）。
 
 验证：本地编译无警告，`make check`、hook 一致性通过，`make test-nogpu` 全部通过，`make test-sanitize`（时限放宽到 300 s）22 项全部通过，没有 sanitizer 报告。#4、#5 都要构造跨线程的 context 销毁和句柄复用才能复现，没有用例覆盖；下一次有 GPU 时，应连同 88e48a7 一起重跑 `test_graph_mem_admission`（含 `_ptsz`）、`test-probes`（`running_ctx`、`ctx_multi`、`primary_release`）、TSan。
+
+#### 88e48a7、eb811f3 上机回归（2026-11-12，单卡 RTX 3080 10 GiB，驱动 595.84，CUDA 13.0 工具链）
+
+| 项 | 结果 |
+|---|---|
+| `make test` | 29/30，跳过 5 个未安装的框架。失败的是 `test_graph_mem_admission_ptsz` 的 [P]，见下 |
+| `make test-probes` | rc=0。各表回到 0；`capture_thread_exit`、`pool_get`、`running_streams` 的 1 和 `running_threads` 的 64 是预期；`running_ctx` 容量 32、0 条。fork 循环 60 次，0 挂起、0 异常。双卡模式（`exec_multi`、`ctx_multi`、`primary_release`）因单卡跳过 |
+| `test_graph_mem_admission` 及 `_ptsz` 各 5 次 | 10/10，无驱动 API 报错。[Z] 第二部分（第二张卡）跳过 |
+| TSan | 两个测试通过，**锁顺序/死锁报告 0**。data race 只在 main 已有的位置（令牌桶 `delta`、`rate_limiter`、`change_token`，`gap_begin`，`loader.c` 里由跨进程文件锁保护的账本） |
+| 6 进程并发 3 轮 | 18 个都没有超时、没有崩溃；12 个 rc=1 是共用账本互相算进用量 |
+| `make test-gpu-sanitize` | 5/5，无报告 |
+| `make test-sanitize` | 22 项通过 |
+
+launch 开销（µs/launch，三轮）：
+
+| | 空 graph | alloc 节点，单 stream | alloc 节点，双 stream |
+|---|---|---|---|
+| 不加载库 | 0.21 | 0.47 | 0.65 |
+| main | 0.27 | 0.54 | 0.74 |
+| 6003720 | 0.28 | 0.71 | 1.19 |
+| 本轮（eb811f3） | 0.28 | 0.75 | 1.14 |
+
+本轮的修复没有带来可测的开销（单 stream 多出的 0.04 µs 在 6003720 自身三轮 0.69–2.04 的波动之内）。
+
+**[P] 偶发失败**：`make test` 里那次失败后，两个变体又各重跑了 20 次（一次只跑一个，环境和 `make test` 相同）。第 8 次 `_ptsz` 的 [P] 再次失败：hold 住 `g_stream` 后在上面 launch a，再在另一个 stream 上 launch 同样大小的 b，期望 b 被拒，实际放行。这次运行用了 121 s，其他每次约 90 s，多出的 30 s 正是 `hold_stream` 的超时。原因：[P] 在 hold 之前刚做过 `trim_pool`（把约 2.6 GiB 的池放掉），偶尔超过 200 ms；于是 a 的 launch 成了闲置后的第一次 launch，走占空比路径，**按设计**一直等它的 stream 跑完，直到 30 s 后 hold 放手，a 已经跑完，b 放行是对的。这是测试的问题，不是库的问题，路径在 main 上就有，和 6.18 [Z] 第一版是同一回事。[U]、[V] 也会往刚 hold 住的 stream 上 launch，有同样的隐患（这次没撞上）。
+
+修法（只改测试）：新增 `keep_busy_on(stream)`，在当前 context 里建一个空 graph，在要 hold 的 stream 上 launch 并同步，[P] 的四次 hold 和 [U]、[V] 的 hold 之前都调用。[W]–[Z] 原来的 `keep_busy` 不变。修后的重复结果见下。
+
+修后重复：节点回收前跑完 20 次（`_ptsz` 10 次、普通 10 次交替），**20/20 通过**，原计划 40 次。每次约 90 s，只有第 3 次 `_ptsz` 用了 316 s（多出约 226 s），但通过了，输出里各段耗时（[T]、[U]、[V] 的 took）和别的轮次一样。机器回收前没来得及定位慢在哪里；没有 FAIL，也不是 30 s 超时的整数倍，只能记为未解释的现象，下一次有 GPU 时给用例加分段计时再看。

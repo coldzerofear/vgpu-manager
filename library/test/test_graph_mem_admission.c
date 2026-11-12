@@ -959,6 +959,24 @@ static void hold(CUstream s) {
   if (cuLaunchHostFunc(s, hold_stream, NULL) != CUDA_SUCCESS) g_release = 1;
 }
 
+/* An empty graph of the current context launched on s and waited for, right before s
+ * is parked: the SM limit's idle-gap path (CUDA_CORE_LIMIT under 100) makes the first
+ * launch after 200 ms idle wait for its stream to finish, which a parked stream does only
+ * when hold_stream gives up after 30 s -- the graph launched there then done, not running.
+ * A trim of the pool before can take that long. */
+static void keep_busy_on(CUstream s) {
+  CUgraph g = NULL;
+  CUgraphNode n = NULL;
+  CUgraphExec ex = NULL;
+  if (cuGraphCreate(&g, 0) != CUDA_SUCCESS) return;
+  if (cuGraphAddEmptyNode(&n, g, NULL, 0) == CUDA_SUCCESS && cuGraphInstantiateWithFlags(&ex, g, 0) == CUDA_SUCCESS) {
+    cuGraphLaunch(ex, s);
+    cuStreamSynchronize(s);
+    cuGraphExecDestroy(ex);
+  }
+  cuGraphDestroy(g);
+}
+
 static void release(void) {
   g_release = 1;
   cuCtxSynchronize();
@@ -980,6 +998,7 @@ static int running_graph_counts(void) {
   if (a == NULL || b == NULL) { printf("  FAIL: could not build the graphs\n"); return 1; }
   failed += expect_launch("cuGraphLaunch (first, to have the pool)", a, CUDA_SUCCESS);
 
+  keep_busy_on(g_stream);
   hold(g_stream);
   CUresult r = cuGraphLaunch(a, g_stream);
   CUresult rb = cuGraphLaunch(b, other);
@@ -992,6 +1011,7 @@ static int running_graph_counts(void) {
   trim_pool();
   failed += expect_launch("cuGraphLaunch (first again, the pool back)", a, CUDA_SUCCESS);
 
+  keep_busy_on(g_stream);
   hold(g_stream);
   r = cuGraphLaunch(a, g_stream);
   rb = cuGraphLaunch(b, other);
@@ -1003,6 +1023,7 @@ static int running_graph_counts(void) {
   describe("cuGraphLaunch (another stream, the first done)", rb);
   if (rb != CUDA_SUCCESS) failed++;
 
+  keep_busy_on(g_stream);
   hold(g_stream);
   r = cuGraphLaunch(a, g_stream);
   rb = cuGraphLaunch(b, g_stream);
@@ -1010,6 +1031,7 @@ static int running_graph_counts(void) {
   describe("cuGraphLaunch (same stream, the first not run)", rb);
   if (r != CUDA_SUCCESS || rb != CUDA_SUCCESS) failed++;
 
+  keep_busy_on(g_stream);
   hold(g_stream);
   r = cuGraphLaunch(a, g_stream);
   rb = cuGraphLaunch(a, other);
@@ -1376,6 +1398,7 @@ static int full_stream_holds_nothing(void) {
   if (a1 == NULL || a3 == NULL) { printf("  FAIL: could not build the graphs\n"); return 1; }
 
   /* T3's stream parked with a launch behind it, its record busy so T1 cannot take it. */
+  keep_busy_on(s3);
   hold(s1);
   if (cuLaunchHostFunc(s3, hold_stream, NULL) != CUDA_SUCCESS) g_release = 1;
   CUresult warm = cuGraphLaunch(a3, s3);
@@ -1456,6 +1479,7 @@ static int launch_counts_from_admission(void) {
   CUgraphExec warm = sized_graph(tiny, 1, 1), a1 = sized_graph(big, 1, 1), a3 = sized_graph(big, 1, 1);
   if (warm == NULL || a1 == NULL || a3 == NULL) { printf("  FAIL: could not build the graphs\n"); return 1; }
 
+  keep_busy_on(s3);
   hold(s1);
   if (cuLaunchHostFunc(s3, hold_stream, NULL) != CUDA_SUCCESS) g_release = 1;
   CUresult rw = cuGraphLaunch(warm, s3);   /* s3's record busy: T1 cannot take its event */
