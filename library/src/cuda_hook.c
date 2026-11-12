@@ -5272,10 +5272,12 @@ static struct {
  * cuEventRecord / Create / Destroy can wait on another thread's enqueue (see
  * g_capture_gate), so they are made off it. */
 static pthread_mutex_t g_graph_use_lock = PTHREAD_MUTEX_INITIALIZER;
-/* Around destroying a record's event off g_graph_use_lock, and around forgetting a
- * context's records: an event is destroyed only while its context is known alive.
- * Taken before g_graph_use_lock, never by a launch or an allocation. */
-static pthread_mutex_t g_graph_ev_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Read around destroying a record's event off g_graph_use_lock, written around
+ * forgetting a context's records: an event is destroyed only while its context is known
+ * alive. A destroy can wait on another thread's enqueue; read, it holds off no other
+ * destroy, so a launch giving an event back never waits for an unrelated one, only a
+ * context being destroyed does. Taken before g_graph_use_lock. */
+static pthread_rwlock_t g_graph_ev_lock = PTHREAD_RWLOCK_INITIALIZER;
 /* Bumped whenever a context's records are forgotten, under both locks. */
 static uint64_t g_graph_ctx_gen;
 /* Numbers threads for their per-thread default stream. Never reused, unlike thread ids,
@@ -5394,13 +5396,13 @@ static int graph_running_of_ctx(void *cell, void *arg) {
 /* The context's events went with it: forgotten, not destroyed. Its held blocks did not. */
 static void graph_use_forget_ctx(CUcontext ctx) {
   if (ctx == NULL) return;
-  pthread_mutex_lock(&g_graph_ev_lock);
+  pthread_rwlock_wrlock(&g_graph_ev_lock);
   pthread_mutex_lock(&g_graph_use_lock);
   slot_table_retire_if(&g_graph_running, graph_running_of_ctx, ctx);
   graph_running_count_locked();
   g_graph_ctx_gen++;
   pthread_mutex_unlock(&g_graph_use_lock);
-  pthread_mutex_unlock(&g_graph_ev_lock);
+  pthread_rwlock_unlock(&g_graph_ev_lock);
 }
 
 /* A stream gone: its record must not be matched by a new stream at the same address.
@@ -5439,7 +5441,7 @@ static void graph_use_reset_after_fork(void) {
   g_graph_held_count = 0;
   g_graph_running_count = 0;
   pthread_mutex_init(&g_graph_use_lock, NULL);
-  pthread_mutex_init(&g_graph_ev_lock, NULL);
+  pthread_rwlock_init(&g_graph_ev_lock, NULL);
 }
 
 /* 1 while the record's last launch has not finished on the GPU. */
@@ -5549,7 +5551,7 @@ static void graph_running_claim_locked(const graph_mem_t *mem, const graph_skey_
  * may have been this one, and its events went with it. Off g_graph_use_lock. */
 static void graph_event_destroy(CUevent ev, uint64_t gen) {
   if (ev == NULL) return;
-  pthread_mutex_lock(&g_graph_ev_lock);
+  pthread_rwlock_rdlock(&g_graph_ev_lock);
   if (g_graph_ctx_gen == gen) {
     if (CUDA_FIND_ENTRY(cuda_library_entry, cuEventDestroy_v2)) {
       CUDA_INTERNAL_CALL(cuda_library_entry, cuEventDestroy_v2, ev);
@@ -5557,7 +5559,7 @@ static void graph_event_destroy(CUevent ev, uint64_t gen) {
       CUDA_INTERNAL_CALL(cuda_library_entry, cuEventDestroy, ev);
     }
   }
-  pthread_mutex_unlock(&g_graph_ev_lock);
+  pthread_rwlock_unlock(&g_graph_ev_lock);
 }
 
 static CUresult graph_event_record(CUevent ev, CUstream stream, int ptsz) {
@@ -5625,6 +5627,10 @@ static void graph_running_cancel(graph_run_ticket_t *t) {
     } else {
       *r = t->saved;     /* its event, taken out, goes back with it */
       ev = NULL;
+      /* Claimed over another launch still under way on the stream, which may have found
+       * the record taken and dropped its event already: nothing would settle a pending
+       * record again. Not counted, rather than counted for good. */
+      if (r->active == GRAPH_RUN_PENDING) r->active = GRAPH_RUN_DONE;
     }
   }
   pthread_mutex_unlock(&g_graph_use_lock);
@@ -6575,12 +6581,14 @@ extern CUresult _cuStreamDestroy(CUstream hStream);
 
 static CUresult stream_destroy_and_discharge(CUstream hStream) {
   CUgraph capturing = capture_reg_graph(hStream, 0);
+  /* Before the handle is given up: once it is, another thread's new stream can get the
+   * same address, and its record would be the one forgotten. */
+  if (hStream != NULL) graph_use_forget_stream(hStream);
   CUresult ret = _cuStreamDestroy(hStream);
   if (ret == CUDA_SUCCESS && capturing != NULL) {
     free_gpu_virt_memory_by_graph(capturing);
     capture_reg_forget(capturing, NULL);
   }
-  if (ret == CUDA_SUCCESS && hStream != NULL) graph_use_forget_stream(hStream);
   return ret;
 }
 
