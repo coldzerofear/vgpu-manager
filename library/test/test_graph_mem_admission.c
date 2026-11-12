@@ -982,6 +982,13 @@ static void release(void) {
   cuCtxSynchronize();
 }
 
+static void *release_soon(void *arg) {
+  (void)arg;
+  usleep(300 * 1000);
+  g_release = 1;
+  return NULL;
+}
+
 /* A graph on another stream that has not run yet keeps its pool memory: the next one
  * there needs its own. On the same stream, once the first is done, or for the same exec,
  * it is reused. Run before any case launches on a second stream: the first part is the
@@ -1031,10 +1038,17 @@ static int running_graph_counts(void) {
   describe("cuGraphLaunch (same stream, the first not run)", rb);
   if (r != CUDA_SUCCESS || rb != CUDA_SUCCESS) failed++;
 
+  /* Admitted (the exec's own memory), but with no free block in the pool the driver
+   * holds this call until the exec's launch on g_stream is done -- natively too
+   * (probe: the same launches without the library, 8.5 s for an 8 s hold). Released
+   * soon, rather than at hold_stream's 30 s. */
   keep_busy_on(g_stream);
   hold(g_stream);
   r = cuGraphLaunch(a, g_stream);
+  pthread_t releaser;
+  pthread_create(&releaser, NULL, release_soon, NULL);
   rb = cuGraphLaunch(a, other);
+  pthread_join(releaser, NULL);
   release();
   describe("cuGraphLaunch (same exec on another stream, not run)", rb);
   if (r != CUDA_SUCCESS || rb != CUDA_SUCCESS) failed++;
