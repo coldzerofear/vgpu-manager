@@ -1564,3 +1564,32 @@ M26：准入时不登记，改回 launch 返回后由 `graph_running_note` 登�
 | 3 | 销毁 stream 时，先调驱动销毁，再清记录。间隙里别的线程新建的同地址 stream 的记录会被清掉（少算） | fb3c64c 起就有 | 先清记录再销毁。销毁失败时只是丢一条记录（少算） |
 
 验证：本地编译无警告，`make check`、hook 一致性（80 条）通过，`make test-nogpu` 全部通过，`make test-sanitize` 除两项外都通过：`test_delta_gen_campaign`、`test_delta_gen_hard` 是 SM 限流的纯仿真，不链接这里改的代码，在这台无 GPU 的开发机上用 ASan 跑约 131 s，超过默认 120 s 时限；单独放宽时限重跑都 rc=0，没有 sanitizer 报告（测试机上 6.18 的 22 项都在时限内）。**没有上 GPU**：第 1 处可以从代码审查确认；第 2、3 处要稳定复现需要插入控制时序的测试钩子，没有做。下一次有 GPU 时，应至少重跑 `test_graph_mem_admission`（含 `_ptsz`）、`test-probes`、TSan。
+
+#### fork 安全与内存安全复查（2026-11-12，代码只读；**未上 GPU**）
+
+**fork**：本分支新增或改动的锁、表和计数在子进程里都有处理（`child_after_fork` → 各模块的 `*_reset_after_fork`）：
+
+| 状态 | 子进程里 |
+|---|---|
+| `g_capture_gate`（读写锁，写优先） | 从静态初始化器 memcpy，保留写优先属性 |
+| `g_capture_reg_lock`、`g_graph_cost_lock`、`g_graph_use_lock`、`g_pool_dev_lock`、`g_gap_lock[]` | `pthread_mutex_init` |
+| `g_graph_ev_lock`（本轮改成读写锁，默认属性） | `pthread_rwlock_init`，等价于静态初始化器 |
+| capture 登记表、cost 表、held 表、running 表、pool 表 | `slot_table_abandon`：只丢指针，不 free（父进程别的线程可能正在用，子进程里 free 不安全）；之后的 find、遍历在容量为 0 时直接返回，insert 会重新分配 |
+| `g_capture_beginning`、`g_graph_held_bytes`、`g_graph_held_count`、`g_graph_running_count`、`g_graph_streams` | 清零 |
+| 父进程的事件句柄 | 随表一起丢弃，不销毁（CUDA context 不跨 fork） |
+| `g_graph_running_seq`、`g_graph_submitted`、`g_graph_ctx_gen`、`g_graph_threads`、`t_graph_thread` | 不清。都是单调递增的计数，子进程表是空的，旧值不会匹配到任何记录；`t_graph_thread` 只在 fork 的那个线程里存活，号码仍然唯一 |
+
+fork 时别的线程正握着票据，或者正在锁外 record / 销毁事件：这些线程在子进程里不存在，相关状态随表一起丢弃。子进程处理函数里只有 init、memset、赋值，没有 malloc 和驱动调用。结论：不需要额外处理。
+
+**内存安全复查发现两处句柄复用问题，已修**：
+
+| # | 问题 | 来源 | 修法 |
+|---|---|---|---|
+| 4 | 回收空闲记录时，会把它的事件连同记录一起交给新 stream 的 launch，而那个事件可能属于**另一个 context**。从登记到锁外 record 之间（跨越驱动 launch），如果别的线程正当地销毁了那个 context，句柄就失效了；应用这时新建的事件可能拿到同一个地址，我们的 `cuEventRecord` 就会记到**应用的事件**上，悄悄改变应用的同步语义 | 6003720（回收） | 只接手属于当前 context 的事件；属于别的 context 的放进票据的 `dropped`，在锁外按代数检查销毁 |
+| 5 | `cuCtxDestroy`、primary reset 在驱动销毁 context **之后**才清记录、递增代数。这中间别的线程在锁外销毁该 context 的事件时，代数检查仍然通过，可能销毁应用新建的、地址相同的事件 | 7de2cf5 起（事件随 6.15 引入） | 把 `graph_use_forget_ctx` 挪到驱动调用**之前**：写锁先等正在进行的销毁结束，再递增代数，之后的销毁都会跳过。销毁失败时只丢记录、泄漏事件，都无害 |
+
+primary release 仍在驱动调用之后清理：调用前无法知道这是不是最后一次 release（只有最后一次才会重置 context），所以 #5 的窗口在这条路径上还在。窗口只有驱动返回到加写锁之间的几条指令，还要恰好有一个该 context 的事件在锁外被销毁，并且应用同时新建的事件拿到了同一个地址。记为已知边界。
+
+其余核对过、没有问题的：`need[]` 和 `g_graph_streams[]` 的下标都检查了 `0 <= dev < MAX_DEVICE_COUNT`；slot 表采用后移删除，代码里删除之后都不再用旧指针，回收那里删除后立即 insert，删除后 insert 一定能找到空位；票据（含 `saved`，约 200 字节）在栈上，不跨线程；撤销时按 key 重新查找，不用登记时的指针（中间可能扩容）。
+
+验证：本地编译无警告，`make check`、hook 一致性通过，`make test-nogpu` 全部通过，`make test-sanitize`（时限放宽到 300 s）22 项全部通过，没有 sanitizer 报告。#4、#5 都要构造跨线程的 context 销毁和句柄复用才能复现，没有用例覆盖；下一次有 GPU 时，应连同 88e48a7 一起重跑 `test_graph_mem_admission`（含 `_ptsz`）、`test-probes`（`running_ctx`、`ctx_multi`、`primary_release`）、TSan。

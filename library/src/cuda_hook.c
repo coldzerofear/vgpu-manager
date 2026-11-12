@@ -5322,6 +5322,7 @@ typedef struct {
   uint64_t seq, gen;
   CUevent ev;              /* the record's event, taken out to record */
   CUcontext ev_ctx;        /* its context */
+  CUevent dropped;         /* a recycled record's event of another context, to destroy */
 } graph_run_ticket_t;
 
 static void graph_held_drop_locked(graph_held_t *e) {
@@ -5472,11 +5473,15 @@ static void graph_streams_note_locked(int dev, const graph_skey_t *k) {
   g_graph_streams[dev].key2 = k->key2;
 }
 
-/* The record a launch goes to: its stream's, or a new one -- taking the place, and the
- * event, of an idle record once GRAPH_RUNNING_KEEP are kept. NULL if the table can hold
- * no more (the launch then goes untracked). Called with the gate (read) and
- * g_graph_use_lock held. */
-static graph_running_t *graph_running_slot_locked(const graph_skey_t *k, int *created) {
+/* The record a launch goes to: its stream's, or a new one -- taking the place of an
+ * idle record once GRAPH_RUNNING_KEEP are kept, and its event if that is of ctx, the
+ * current context. One of another context goes to *dropped, to be destroyed off the
+ * locks: that context may be destroyed by another thread meanwhile, and the handle of
+ * an event recorded then could already be a new one of the application's. NULL if the
+ * table can hold no more (the launch then goes untracked). Called with the gate (read)
+ * and g_graph_use_lock held. */
+static graph_running_t *graph_running_slot_locked(const graph_skey_t *k, CUcontext ctx, int *created,
+                                                  CUevent *dropped) {
   graph_running_t *r = (graph_running_t *)slot_table_find(&g_graph_running, k->key, k->key2);
   *created = 0;
   if (r != NULL) return r;
@@ -5492,11 +5497,16 @@ static graph_running_t *graph_running_slot_locked(const graph_skey_t *k, int *cr
       break;
     }
   }
+  /* After a removal the insert always finds room: NULL means nothing was removed. */
   r = (graph_running_t *)slot_table_insert(&g_graph_running, k->key, k->key2, created);
-  if (r == NULL) return NULL;   /* nothing was removed, so no event is lost */
+  if (r == NULL) return NULL;
   memset((char *)r + sizeof(r->h), 0, sizeof(*r) - sizeof(r->h));
-  r->ev = ev;
-  r->ctx = ev_ctx;
+  if (ev != NULL && ev_ctx != ctx) {
+    *dropped = ev;
+  } else {
+    r->ev = ev;
+    r->ctx = ev_ctx;
+  }
   graph_running_count_locked();
   return r;
 }
@@ -5508,7 +5518,8 @@ static graph_running_t *graph_running_slot_locked(const graph_skey_t *k, int *cr
 static void graph_running_claim_locked(const graph_mem_t *mem, const graph_skey_t *k,
                                        CUgraphExec exec, graph_run_ticket_t *t) {
   int created;
-  graph_running_t *r = graph_running_slot_locked(k, &created);
+  t->dropped = NULL;
+  graph_running_t *r = graph_running_slot_locked(k, t->ctx, &created, &t->dropped);
   if (r == NULL) return;
   t->k = *k;
   t->created = created;
@@ -5586,6 +5597,7 @@ static CUevent graph_event_create(CUcontext ctx, CUcontext current) {
 static void graph_running_finish(graph_run_ticket_t *t, CUstream stream, int ptsz) {
   if (t == NULL || !t->claimed) return;
   t->claimed = 0;
+  graph_event_destroy(t->dropped, t->gen);
   if (!t->several) return;
   CUevent ev = t->ev;
   CUcontext ev_ctx = t->ev_ctx;
@@ -5616,6 +5628,7 @@ static void graph_running_finish(graph_run_ticket_t *t, CUstream stream, int pts
 static void graph_running_cancel(graph_run_ticket_t *t) {
   if (t == NULL || !t->claimed) return;
   t->claimed = 0;
+  graph_event_destroy(t->dropped, t->gen);
   CUevent ev = t->ev, dropped = NULL;
   pthread_mutex_lock(&g_graph_use_lock);
   graph_running_t *r = (graph_running_t *)slot_table_find(&g_graph_running, t->k.key, t->k.key2);
@@ -6717,6 +6730,10 @@ static CUcontext primary_ctx_handle(CUdevice dev) {
 
 CUresult _cuCtxDestroy(CUcontext ctx) {
   CUresult ret = CUDA_ERROR_NOT_FOUND;
+  /* Before the driver frees its events: an event of ctx destroyed after that could be a
+   * new one of the application's at the same address. Should the destroy fail, the
+   * records are lost and their events leak, both harmless. */
+  graph_use_forget_ctx(ctx);
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDestroy_v2, ctx);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy))) {
@@ -6726,7 +6743,6 @@ CUresult _cuCtxDestroy(CUcontext ctx) {
     free_gpu_virt_memory_by_ctx(ctx);
     capture_reg_forget(NULL, ctx);
     graph_cost_forget_ctx(ctx);
-    graph_use_forget_ctx(ctx);
   }
   return ret;
 }
@@ -6773,6 +6789,7 @@ CUresult cuDevicePrimaryCtxRelease(CUdevice dev) {
 CUresult _cuDevicePrimaryCtxReset(CUdevice dev) {
   CUcontext ctx = primary_ctx_handle(dev);
   CUresult ret = CUDA_ERROR_NOT_FOUND;
+  graph_use_forget_ctx(ctx);   /* before its events go: see _cuCtxDestroy() */
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset_v2, dev);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset))) {
@@ -6782,7 +6799,6 @@ CUresult _cuDevicePrimaryCtxReset(CUdevice dev) {
     free_gpu_virt_memory_by_ctx(ctx);
     capture_reg_forget(NULL, ctx);
     graph_cost_forget_ctx(ctx);
-    graph_use_forget_ctx(ctx);
   }
   return ret;
 }
