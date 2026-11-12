@@ -226,6 +226,14 @@ static const struct timespec g_cycle = {
 #define GAP_MAX_SLEEP_MS   500.0                 /* clamp pathological spikes */
 #define GAP_POLL_MIN_US    20                    /* gap_end polls the end marker  */
 #define GAP_POLL_MAX_US    512                   /* from 20 us, doubling to this */
+/* How long gap_end waits for the end marker. It completes only once everything queued
+ * on the stream before the launch has run too, and that may wait on the host -- a
+ * cuStreamWaitValue32 on host memory, a host function waiting on the application, an
+ * external semaphore -- for something this thread does only after its launch returns:
+ * waiting without end hung such a launch for good (docs 6.18). A launch whose marker is
+ * not done by then is not measured, so gets no duty-cycle sleep; the watcher, sampling
+ * every ~100 ms, holds kernels that long to the limit anyway. */
+#define GAP_WAIT_MAX_NS    (1000LL * 1000000LL)
 
 /* Per-device thread mutex: protects the process-private cuEvent pair and the
  * g_gap_dc snapshot from concurrent launcher threads. NOT a cross-process
@@ -2314,8 +2322,9 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
   int measured = 0;
   /* A capture may have begun on another thread since gap_begin, and cuEventQuery /
    * cuEventSynchronize would break it if global (900, and 901 at its end). So the end
-   * marker is waited for by polling, each query with g_capture_gate held for reading
-   * and the check repeated; a capture beginning gives the measurement up. The gate is
+   * marker is waited for by polling, for GAP_WAIT_MAX_NS at most, each query with
+   * g_capture_gate held for reading and the check repeated; a capture beginning gives
+   * the measurement up. The gate is
    * never held while waiting: a capture beginning on another thread would wait on this
    * stream, and with writers first every launch behind it too -- forever, if the stream
    * waits on one of them (docs 6.17). Nor across the record, which waits while another
@@ -2328,6 +2337,7 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
       CUDA_INTERNAL_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuEventRecord),
                          g_gap_end[host_index], stream) == CUDA_SUCCESS) {
     useconds_t backoff_us = GAP_POLL_MIN_US;
+    int64_t deadline = monotonic_ns() + GAP_WAIT_MAX_NS;
     for (;;) {
       CUresult q = CUDA_ERROR_UNKNOWN;
       pthread_rwlock_rdlock(&g_capture_gate);
@@ -2341,6 +2351,11 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
       }
       pthread_rwlock_unlock(&g_capture_gate);
       if (q != CUDA_ERROR_NOT_READY) break;   /* done, failed, or a capture began */
+      if (monotonic_ns() >= deadline) {
+        LOGGER(VERBOSE, "gap throttle: launch on device %d not done after %lld ms, not measured",
+               host_index, GAP_WAIT_MAX_NS / 1000000LL);
+        break;
+      }
       usleep(backoff_us);
       if (backoff_us < GAP_POLL_MAX_US) backoff_us *= 2;
     }

@@ -1622,3 +1622,40 @@ launch 开销（µs/launch，三轮）：
 修法（只改测试）：新增 `keep_busy_on(stream)`，在当前 context 里建一个空 graph，在要 hold 的 stream 上 launch 并同步，[P] 的四次 hold 和 [U]、[V] 的 hold 之前都调用。[W]–[Z] 原来的 `keep_busy` 不变。修后的重复结果见下。
 
 修后重复：节点回收前跑完 20 次（`_ptsz` 10 次、普通 10 次交替），**20/20 通过**，原计划 40 次。每次约 90 s，只有第 3 次 `_ptsz` 用了 316 s（多出约 226 s），但通过了，输出里各段耗时（[T]、[U]、[V] 的 took）和别的轮次一样。机器回收前没来得及定位慢在哪里；没有 FAIL，也不是 30 s 超时的整数倍，只能记为未解释的现象，下一次有 GPU 时给用例加分段计时再看。
+
+#### 慢运行与偶发失败的根因；占空比路径的等待加上限（2026-11-12，单卡 RTX 3080，595.84）
+
+给每个用例加时间戳重复运行（`_ptsz` 和普通各若干次），并在输出停顿时用 gdb 抓栈。结论有三条：
+
+**1. [P] 每次多出约 30 s：驱动本身的行为，不是库的问题。** 卡在最后一步"同一个 exec 换一条 stream launch"：调用栈停在 libcuda 的 `cuGraphLaunch_ptsz` 内部（由 hook 调用真实驱动的那一行进入）。原生探针 `preplay` 重放 [P] 的全部 launch：不加载库时这一步 0.000 s；加载库、限额 4096 MiB 时 8.5 s（探针 hold 8 s）；限额 9000 MiB 时 0.1 s；**不加载库但跳过那次被拒的 b 时同样 8.5 s**。也就是说，池里没有空闲块时，驱动会把同一个带内存节点的 exec 在别的 stream 上的 launch 挡在主机侧，直到它上一次 launch 跑完。库按设计拒绝了 b，池里就少了一块，于是撞上了这条驱动行为。准入本身是对的（同一个 exec 的内存不算占用）。测试改为 0.3 s 后从另一个线程放开 hold。
+
+**2. [P] 的偶发失败、[Y] 偶尔多出 30/97 s：占空比路径无上限地等 stream（main 上就有）。** 算力限额小于 100 时，设备闲置超过 200 ms 后的第一次 launch，hook 会 record 开始和结束两个事件，并一直等结束事件完成才返回。结束事件要等**这条 stream 上 launch 之前排着的所有工作**都跑完。
+
+- [P]：hold 之前的 `trim_pool` 偶尔超过 200 ms，a 的 launch 走进这条路径，等满 hold 的 30 s，a 已经跑完，b 放行是对的（上一节的 `keep_busy_on` 规避了它）。
+- [Y]：70 条 stream 各挂一个 hold 回调，回调都要等到循环结束才放手（上限 30 s），驱动依次执行这些回调。限流的令牌桶让循环里某次 launch 睡眠超过 200 ms 时，下一次 launch 就被当成"闲置之后"，等自己的 stream，而那条 stream 前面的回调要一个个等满 30 s，所以耗时是 30 s 的倍数。单独的探针 `yplay`（同样 70 条 stream）没有复现，令牌桶状态取决于前面跑过的用例；结论依据是耗时是 30 s 的倍数，以及只有这条路径会等 stream。附带说明：被限流时，令牌桶自己的睡眠也会让下一次 launch 被当成"闲置之后"。
+
+真实负载下的后果（`gapdead` 探针，限额 30）：
+
+| stream 上排着的工作 | 不加载库 | main、修复前的本分支 |
+|---|---|---|
+| host 回调，等本线程 launch 之后才设置的标志（回调自带 20 s 上限） | launch 立即返回 | 21 s |
+| `cuStreamWaitValue32`，等本线程 launch 之后才写的主机内存 | 立即返回 | **永久死锁**（60 s 超时被杀） |
+
+gdb：`cuGraphLaunch` → `gap_end` → 轮询（main 上是 `cuEventSynchronize`）。所有 kernel launch hook 和 graph launch 都走这里。会触发的写法：`cuStreamWaitValue` 做主机-GPU 同步、外部信号量（Vulkan/DX 互操作）、host 回调等待应用线程、kernel 轮询主机在 launch 之后才写的标志。
+
+**修复**：`gap_end` 最多等 1 s（`GAP_WAIT_MAX_NS`），到点还没完成就放弃这次测量，不注入睡眠，照常记最后 launch 时间。代价是 GPU 时间超过 1 s 的 launch 拿不到这一次的占空比睡眠；这样长的 kernel 本来就由约 100 ms 一次的 NVML 采样控制，令牌桶不受影响。上限取 1 s：不至于漏掉正常 kernel 的测量（占空比睡眠本身封顶 500 ms），又把死锁变成一次最多 1 s 的延迟。
+
+**新用例 `test_gap_wait_bounded`**（driver API，随 `make test` 跑）：闲置 300 ms 后，stream 上排一个 `cuStreamWaitValue32`，等本线程在 launch 返回后才写的主机内存，graph launch 和 kernel launch（PTX JIT 的空 kernel）各一次；10 s 后看门狗写入，旧库判失败而不是挂死；0.5 s 内返回说明 gap 路径没有生效，判 SKIP。
+
+| | 旧库（eb811f3） | 新库 |
+|---|---|---|
+| graph launch | 10.0 s，FAIL | 1.0 s，PASS |
+| kernel launch | 10.0 s，FAIL | 1.0 s，PASS |
+| `gapdead waitvalue` | 永久死锁 | 1.0 s 返回 |
+| 不设算力限额 | — | SKIP |
+
+**3. [J] 每次约 47 s**：300 次 context 创建销毁本身的耗时，不是卡住。
+
+**修复后的重复**（新库，[P] 改为 0.3 s 放开）：`_ptsz` 和普通各 8 次，**16/16 通过**，每次 58–62 s（之前 90–316 s）。[Y] 16 次里 12 次 0.1–0.4 s，4 次 1.3–1.4 s：后者正是撞上占空比路径、被 1 s 上限截住，印证了上面对 [Y] 的判断。[P] 1.3–1.9 s。
+
+**回归（新库）**：`make test` 31/31 通过（跳过 5 个未安装的框架），含 `test_gap_wait_bounded` 和原有的占空比用例 `test_runtime_launch_gap`；`make test-probes` rc=0，fork 循环 60 次 0 挂起，graph 限流探针与之前一致（约 2.6 万次/s）；`make test-gpu-sanitize` 5/5。
