@@ -2,7 +2,7 @@ module github.com/coldzerofear/vgpu-manager
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.26.11
 
 require (
 	github.com/Masterminds/semver v1.5.0
@@ -158,15 +158,15 @@ require (
 
 replace (
 	github.com/NVIDIA/go-nvml => github.com/coldzerofear/go-nvml v0.0.0-20261013031909-02fb7f4f2c54
-	k8s.io/cloud-provider => k8s.io/cloud-provider v0.37.1
-	k8s.io/cluster-bootstrap => k8s.io/cluster-bootstrap v0.37.1
-	k8s.io/cri-streaming => k8s.io/cri-streaming v0.37.1
-	k8s.io/csi-translation-lib => k8s.io/csi-translation-lib v0.37.1
-	k8s.io/endpointslice => k8s.io/endpointslice v0.37.1
-	k8s.io/externaljwt => k8s.io/externaljwt v0.37.1
-	k8s.io/kube-aggregator => k8s.io/kube-aggregator v0.37.1
-	k8s.io/kube-controller-manager => k8s.io/kube-controller-manager v0.37.1
-	k8s.io/kube-proxy => k8s.io/kube-proxy v0.37.1
-	k8s.io/pod-security-admission => k8s.io/pod-security-admission v0.37.1
-	k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.37.1
+	k8s.io/cloud-provider => k8s.io/cloud-provider v0.37.2
+	k8s.io/cluster-bootstrap => k8s.io/cluster-bootstrap v0.37.2
+	k8s.io/cri-streaming => k8s.io/cri-streaming v0.37.2
+	k8s.io/csi-translation-lib => k8s.io/csi-translation-lib v0.37.2
+	k8s.io/endpointslice => k8s.io/endpointslice v0.37.2
+	k8s.io/externaljwt => k8s.io/externaljwt v0.37.2
+	k8s.io/kube-aggregator => k8s.io/kube-aggregator v0.37.2
+	k8s.io/kube-controller-manager => k8s.io/kube-controller-manager v0.37.2
+	k8s.io/kube-proxy => k8s.io/kube-proxy v0.37.2
+	k8s.io/pod-security-admission => k8s.io/pod-security-admission v0.37.2
+	k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.37.2
 )
