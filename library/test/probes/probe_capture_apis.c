@@ -93,6 +93,13 @@ int main(void) {
   cuCtxSetCurrent(c0);
   begin();
   g_broken += end("cuCtxGetDevice", cuCtxGetDevice(&dev)) != CUDA_SUCCESS;
+  /* What the library asks while checking an allocation in a capture. */
+  {
+    cuuint64_t reserved = 0;
+    begin();
+    g_broken += end("cuDeviceGetGraphMemAttribute",
+                    cuDeviceGetGraphMemAttribute(d0, CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT, &reserved)) != CUDA_SUCCESS;
+  }
   /* What goes through the library's stream lookups. */
   begin();
   r = cuMemAllocAsync(&p, 1u << 20, s0);

@@ -368,6 +368,11 @@ if(BUILD_SM_NODE_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(test_slot_table PRIVATE pthread)
 
+    # Header-only: the estimate of what a graph takes from the device's graph pool.
+    add_executable(test_graph_pool_sim test/nogpu/test_graph_pool_sim.c)
+    target_include_directories(test_graph_pool_sim PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
     # Header-only: the CUDA array descriptor sizing, against the byte sizes
     # and zero-extent rules quoted from cuda.h in include/array_size.h.
     add_executable(test_array_size test/nogpu/test_array_size.c)
@@ -492,6 +497,7 @@ foreach(vgpu_nogpu_test
         test_array_size
         test_vmem_table
         test_slot_table
+        test_graph_pool_sim
         test_delta_campaign
         test_delta_gen_campaign
         test_delta_gen_hard

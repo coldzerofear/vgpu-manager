@@ -5,11 +5,10 @@
 ## 1. 记账口径回顾
 
 显存限额检查 = NVML 报告的进程实际占用 + 本进程"尚未被 NVML 看到"的在途记账（共享账本 `/tmp/.vmem_node`）。
-在途记账有两类：
+在途记账只有捕获这一类（非捕获的异步分配在调用返回时 NVML 已可见，见 6.16）：
 
 | 类型 | 何时记 | 何时释放 |
 |---|---|---|
-| `MEMORY_TYPE_ASYNC_BRIDGE` | 非捕获的 `cuMemAllocAsync` / `cuMemAllocFromPoolAsync` 调用后 | 同步该 stream 后（NVML 已可见） |
 | `MEMORY_TYPE_CAPTURE` | 捕获期间的异步分配 | 捕获结束（成功或被作废）、graph 销毁、按指针释放、所属 context 销毁/重置、fork 子进程作废、进程退出清理 |
 
 launch 之后显存由 NVML 计入，记账若继续持有会重复计数（误报 OOM），所以记账只覆盖"NVML 还看不到"的那段时间。
@@ -103,7 +102,7 @@ T2 也是 6.1 节"不能把记账持有到首次 launch"的实证：持有的话
 ## 5. 已知边界
 
 - **空窗 B**（捕获结束/手工加完节点到首次 upload/launch 之间 graph 显存不在记账也不在 NVML）：由 upload/launch 时的准入检查覆盖（第 6 节），
-  多 stream 并发 launch 与分配不释放的 graph 会低估，作为已知边界。
+  多 stream 并发 launch、graph 内依赖无关的并行分支与分配不释放的 graph 曾经会低估，6.15 已按驱动规则修正；其中不释放的块是可叠加的绕过。
 - 手工 graph 的 alloc node 在创建时各自检查、不累加；upload/launch 时按整个 graph 的总量（扣除池已预留）再检查一次。
 - alloc node 跨多个设备的 graph 逐卡检查、每张卡检查完立即放锁（6.5）：检查到 launch 之间别的进程若在已检查的卡上分配，会低估（仅多卡 graph 的首次映射）。
 - 捕获登记表可增长（6.9），只有内存耗尽写不进去时才退回到结束时查询，此时被作废的捕获仍会遗留记账，直到 context 拆除或进程退出，捕获内的异步分配也按当前 context 查卡。接入捕获的 stream 同样按当前 context 查卡（6.6）。
@@ -833,3 +832,830 @@ TSan 只覆盖这两个测试程序，不包含 fork，也不覆盖多进程。
 - 550、580 上这次的提交（550 不支持 5090）。`stream_device()` 现在走的路径就是 550 上一直走的路径，这些查询在 6.6 已于 550/570/580 上测过，但这几个提交没有在这两个驱动上整体回归。
 - 570 上的 `make test` 全量：缺 12.x 工具链，只跑了上表这些 C 用例和探针；570 上的 ASan 只覆盖一项。
 - vLLM 本身。
+
+### 6.14 graph 池复用与两处误报 OOM（2026-11-06，RTX 3080 10 GiB，驱动 595.84，CUDA 13.0，main c405ed7，torch 2.15.0+cu132）
+
+复查同类问题时发现两个疑点，这里是实测结果。"每个存活 graph 都按完整大小记账"这种累加我们没有，见 6.4 的 T2；这两处是相近的症状：物理显存够，却报 OOM。两处都已修复，见本节末尾。下面"问题 1""问题 2"的表是修复前 main 的行为。
+
+探针：`test/probes/probe_pool_reuse.c`（手工图和捕获）、`test/probes/torch_pool_reuse.py`（真实 torch graph，从源码目录直接运行）。
+
+#### 驱动的池怎么复用（不加载库，`probe_pool_reuse inner / shapes / blocks`）
+
+每行先 trim，读 `CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT`。B = 256 MiB；a/f 是一条依赖链上的 alloc/free 节点，`|` 表示另起一条没有依赖的线。
+
+| 形状 | 总和 | 峰值 | 池实际 MiB | 说明 |
+|---|---|---|---|---|
+| 16×B 依次分配释放（手工、捕获都一样） | 4096 | 256 | **256** | 同一 graph 内会复用 |
+| 8×1024 依次分配释放 | 8192 | 1024 | **1024** | |
+| 16×B 同时持有 | 4096 | 4096 | 4096 | 对照 |
+| 4×B 同时持有 | 1024 | 1024 | 1024 | 对照 |
+| 同时最多两块 a0 a1 f0 a2 f1 f2（各 B） | 768 | 512 | 512 | |
+| 两条无依赖的线 a0f0 \| a1f1 | 512 | 256 | **512** | 没有依赖就不复用 |
+| 四条无依赖的线 | 1024 | 256 | **1024** | |
+| 递增 B、2B、4B | 1792 | 1024 | **1792** | 等于总和，不是峰值 |
+| 递减 4B、2B、B | 1792 | 1024 | 1024 | |
+| 混合 B、2B、B/2、4B、B/4 | 1984 | 1024 | 1792 | |
+| 2B，然后 B 和 B 同时持有 | 1024 | 512 | 512 | 空闲块能切分 |
+| 4B，然后 4×B 同时持有 | 2048 | 1024 | 1024 | |
+| B 和 B 都释放，然后 2B | 1024 | 512 | 512 | 相邻空闲块能合并 |
+| B，然后 B + 2 MiB | 514 | 258 | 544 | 空闲块不能原地扩展；按 32 MiB 取整（258 → 288） |
+| B，然后 B + 64 MiB | 576 | 320 | 576 | |
+| B、2B、B | 1024 | 512 | 768 | |
+| B、2B、B、2B | 1536 | 512 | 768 | |
+
+结论：同一 graph 内的行为像一个按依赖顺序工作、可切分可合并、不能原地扩展的空闲块分配器，只有 alloc 依赖于 free 时才复用。**"峰值"不是正确的估算**：递增序列的实际值等于总和，改成峰值会低估。总和是上界（只差 32 MiB 取整）。这个模型只在 595.84 上测过。
+
+#### 问题 1：捕获时不考虑空闲的 graph 池
+
+捕获内分配和 `cuGraphAddMemAllocNode` 按完整大小检查 `NVML + 账本 + 请求`，而 NVML 已含空闲的池，之后 launch 能复用这部分。
+
+| 场景（`probe_pool_reuse`） | 结果 |
+|---|---|
+| 不加载库，recapture 2048 | 第二次捕获成功，第二次 launch 池 2048 → 2048，不增长 |
+| 限额 4096，recapture 2048 | **第二次捕获的 `cuMemAllocAsync` 返回 2**（误拒） |
+| 限额 4096，recapture 1800（对照） | 通过，池 1824 → 1824 |
+| 限额 4096，refill 2048 | `cuGraphAddMemAllocNode`、捕获内 `cuMemAllocFromPoolAsync` 也都返回 2 |
+| 限额 4096，refill 1800（对照） | 都通过，池不增长 |
+
+真实 torch（`PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync`，`torch_pool_reuse.py recapture`，捕获后立刻回放，张量 1500 MiB + 同样大小的临时块）：
+
+| 配置 | 结果 |
+|---|---|
+| 不加载库，3 次 | 全部成功，池稳定在 1504 MiB |
+| 限额 4096，3×1500 | 第 1 次成功；**第 2 次捕获失败**，应用看到 `cudaErrorStreamCaptureInvalidated`，而张量和池合计约 3004 MiB，放得下 |
+| 限额 4096，3×1000（对照） | 全部成功，池 1024 MiB |
+
+触发条件：捕获后回放、再捕获，且临时块大于可用额度的大约一半。先全部捕获再回放的用法（6.4 的 T2、vLLM）不会触发。
+
+#### 问题 2：launch 的 `need` 是总和
+
+`graph_mem_add` 把所有 alloc 节点相加。捕获时 free 会退账，所以能通过；到首次 launch 才按总和检查。
+
+| 场景 | 结果 |
+|---|---|
+| 不加载库，`inner 16 256` | 依次分配释放 256 MiB，同时持有 4096 MiB |
+| 限额 2048，`inner 16 256` | 手工、捕获的依次分配释放都**返回 2（误拒，实际只要 256 MiB）**；同时持有返回 2（正确，修的时候不能放过这一行） |
+| 限额 8192，`inner 16 256`（对照） | 都通过，池 256 / 4096 MiB |
+| 不加载库，torch 链式 12×256（`y = y * 1.0001`） | 回放成功，池 512 MiB |
+| 限额 2048，torch 链式 12×256 | **回放 OOM**，池 0 |
+| 限额 2048，torch 链式 6×256 | **回放 OOM**，池 0 |
+| 限额 6144，torch 链式 12×256（对照） | 成功，池 512 MiB |
+| 限额 2048，torch 链式 12×256，默认 allocator | 成功，池 0 MiB：临时块不进 graph |
+
+#### 影响范围
+
+只影响 graph 内有 alloc 节点的负载：`cudaMallocAsync` 后端、直接用 `cuMemAllocAsync` 或内存节点的程序。PyTorch 默认 allocator 不受影响，上面最后一行就是证据。两者都是偏严的错误（拒绝合法请求），不会让容器超限。Warp、mjlab 是否属于这一类没有验证。
+
+#### 修复（分支 fix/graph-pool-false-oom）
+
+取舍：多算会让没超限的任务 OOM、服务不可用；少算的部分映射后 NVML 能看到，再次分配和新进程都会被限住。所以**宁可少算**，但能准就准。
+
+| | 修法 | 代价 |
+|---|---|---|
+| 问题 1 | 捕获内的 `cuMemAllocAsync`、`cuMemAllocFromPoolAsync` 和 `cuGraphAddMemAllocNode` 改为检查 `NVML + 账本 + 请求 − min(池预留, 本进程捕获记账 + 请求)`。普通分配不变 | 捕获内每次分配多一次属性查询和一次记账表扫描，只在池非空时扫描 |
+| 问题 2 | `include/graph_pool_sim.h`：instantiate 遍历节点时按节点顺序模拟驱动的分配器（选能放下的最小空闲块、切分、合并、不原地扩展、按 32 MiB 取整），得到 `need`。内存不足时退回总和；驱动没有 `cuGraphMemFreeNodeGetParams` 时同样是总和 | 只在 instantiate 走一次，launch 热路径不变；没有 alloc 节点的 graph 没有额外开销 |
+
+没有做依赖可达性分析（代价大，收益只在并行分支）。
+
+**模型准确度**，`probe_pool_reuse model`，随机序列（最多同时 4 GiB，大小 1–900 MiB，一条依赖线），600 个序列离线比较各种策略：
+
+| 估算 | 完全一致 | 偏高（平均） | 偏低（平均，最差） |
+|---|---|---|---|
+| 总和（修复前） | 35 | 565 例（2405 MiB） | 0 |
+| 峰值 | 81 | 0 | 519 例（336，1568 MiB） |
+| first-fit | 424 | 67 例（137 MiB） | 109 例（231，1312 MiB） |
+| **best-fit（采用）** | **440** | **52 例（87 MiB）** | **108 例（226，1312 MiB）** |
+| worst-fit | 405 | 97 例（212 MiB） | 98 例（251，1312 MiB） |
+| last-fit | 424 | 75 例（183 MiB） | 101 例（223，1312 MiB） |
+| 从高地址切分（各策略） | 373–418 | 更多 | 相近 |
+| 取整的余量不可复用（各策略） | 362–404 | 更多 | 略少 |
+
+上机复核 300 个序列：219 个完全一致，21 个偏高（平均 58，最差 256 MiB），60 个偏低（平均 237，最差 1312 MiB）。这是专门挑的碎片化序列；上面表里的结构化形状全部精确，已写入 `test/nogpu/test_graph_pool_sim.c`。
+
+#### 修复后的结果
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| 限额 4096，recapture 2048 | 第二次捕获返回 2 | 通过，池 2048 → 2048 |
+| 限额 4096，refill 2048（节点、池内分配） | 都返回 2 | 都通过，池不增长 |
+| 限额 2048，`inner 16 256` 依次分配释放 | 返回 2 | 通过，池 256 MiB |
+| 限额 2048，`inner 16 256` 同时持有 | 返回 2 | **仍返回 2**（正确） |
+| torch 限额 4096，recapture 3×1500 | 第 2 次捕获失败 | 全部成功，池 1504 MiB |
+| torch 限额 2048，链式 12×256 / 6×256 | 回放 OOM | 成功，池 512 MiB |
+| torch 对照（recapture 3×1000、限额 6144） | 成功 | 成功，池不变 |
+
+新增用例：`test_graph_mem_admission` [L]（空闲池算数，但只到池的大小：同一捕获的第二块、超过池加余量的请求仍被拒）、[M]（链式不按总和；同时持有和递增序列仍被拒）、[N]（本捕获已记的也算在池内）；`test_graph_pool_sim`（实测表逐项比对，2000 轮随机序列的不变量：块不重叠且总量等于 top，top 介于峰值和取整总和之间）。
+
+变异验证（`test_graph_mem_admission`）：
+
+| 变异 | 结果 |
+|---|---|
+| 不折扣（等于 main） | [L]、[N] 失败 |
+| 忽略捕获记账 C | [N] 失败 |
+| 吸收量不以池大小为上限 | [L] 失败：第二块放过了 |
+| 不看 free 节点（等于总和） | [M] 失败 |
+
+#### 全量结果（RTX 3080 10 GiB，单卡）
+
+| 项 | 595.84（CUDA 13.0 工具链，torch 2.15.0+cu132） | 580.178.04（同一工具链，无 torch） |
+|---|---|---|
+| `make test` / `run_tests_with_env.sh` | 32/32，跳过 3 个未安装的框架 | 30/30，torch 也跳过：cu132 需要更新的驱动 |
+| `make test-gpu-sanitize` | 5/5，无报告 | 5/5，无报告 |
+| `make test-sanitize`（无 GPU） | 22 项 | — |
+| `probe_capture_apis`，含新增的 `cuDeviceGetGraphMemAttribute` | 捕获不受影响，挂库输出相同 | 相同 |
+| `probe_pool_reuse` 形状表、300 个随机序列 | 见上 | **全部和 595 相同** |
+| `make check`（本地 13.4 头文件）、cppcheck | 通过；608 项，77 个 hook | — |
+
+TSan（一次性，换 `-fsanitize=thread` 构建；这台 7.0 内核要 `vm.mmap_rnd_bits=28` 和 `setarch -R`）：`test_graph_mem_admission`、`test_alloc_async_accounting` 全部通过，没有锁顺序或死锁报告。data race 报告都在已有位置：令牌桶的无锁读，以及 ledger（读写都持跨进程文件锁，TSan 不认识）。
+
+这轮还修了两处测试本身的问题，都不是库的问题：
+
+- `test_graph_mem_admission` [I] 写死 600 个存活 graph。驱动对存活 alloc 节点的限制因卡而异：不加载库时 RTX 3080 在 618 个 1 MiB 的 graph 处返回 2，518 个时 256 MiB 的节点就失败，418 个时 3000 MiB 仍能成功（V100 约 1010）。main 的库在这张卡上同样失败。改成 300，仍超过当初固定表的 256。
+- `probe_churn primary_release` 单卡时不是最后一个引用，execs 留着是对的（count=50）。改成需要两张卡。
+
+顺带确认的：`PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync` 下，捕获中真正超限时 torch 会 terminate（析构里的 free 抛 `cudaErrorStreamCaptureInvalidated`）。main 和修复后相同，是 torch 的行为。
+
+#### 已知边界和没有验证的
+
+- 依赖无关的并行分支、并发 launch：按节点顺序模拟会低估（两条线各 256，实际 512，估算 256）。映射后 NVML 能看到。**6.15 已修正，并发现不释放的块会造成可叠加的绕过。**
+- 捕获打开期间的**普通**分配（别的线程的 `cuMemAlloc`）还是 `NVML + 捕获记账`，和池重复计算：只在捕获窗口内，可能偏严。
+- 空闲的 graph 池对普通分配仍然算占用，那是真实占用（6.5）。
+- **570、550 没有验证**：这台机器内核 7.0，这两个驱动的模块编不过。捕获中查 `cuDeviceGetGraphMemAttribute` 的安全性和复用模型只在 580、595 上测过。如果旧驱动的模型不同，偏差方向由上表决定，少算有 NVML 兜底。
+- 跨卡路径没有上 GPU（这台只有一张卡）：[H]、`exec_multi`、`ctx_multi` 打印跳过。每张卡一个模拟器，逻辑上互不相关，但没有跑过。
+- Warp、mjlab、vLLM 本身没有跑。
+
+### 6.15 持有、并发与依赖：把三处少算也修准（2026-11-08，两张 RTX 2080 Ti 11 GiB，无 NVLink，驱动 595.84，CUDA 13.0，torch 2.15.0+cu132）
+
+6.14 修的是多算。按"宁可少算"处理的三处少算，这轮在双卡机上逐条测了驱动的规则，结果其中一处是**可以无限叠加的绕过**，所以都改成按规则计算。数据来自 `exp`、`exp2`、`exp3` 三个探针（不加载库，规则部分已整理进 `probe_pool_reuse` 和用例），以及 `hc` 探针（不释放的块、多 stream 运行中的场景）。
+
+#### 发现的问题（修复前的 main 与 6.14 的分支都有）
+
+| 问题 | 规则 | 后果 |
+|---|---|---|
+| 不释放的块 | graph 分配后不释放的块，launch 后一直归进程，exec、graph 销毁也不还，**context 销毁、primary reset 也不还**；只有任意 context 里的 `cuMemFree`/`cuMemFreeAsync`、或一个含它的 free 节点的 graph 运行后才还 | 池预留包含它，下一个 graph 以为池够大，增长算成 0。**限额 4096 下第二个不释放的 graph launch 成功，池到 5248 MiB，可以一直叠加**（`hc`） |
+| 别的 stream 上还在跑的 graph | 驱动只在它在 GPU 上**执行完**后才复用它的池内存，和 host 是否同步无关；用 event 让后者等它也不复用；同一 stream 上复用 | 并发 launch 时池增长算成 0，N 个 stream 就能把池撑到 N 倍，池会留着这些页 |
+| graph 内并行分支 | 只复用"祖先 free"释放的块；按**创建顺序**处理（后补的依赖不算）；互不先后的两个 free 释放的相邻块**不合并** | 两条无依赖的线各 x，按节点顺序模拟算成 x，实际 2x |
+
+DAG 规则（B = 256 MiB，`exp dag`）：
+
+| 形状 | 池 MiB |
+|---|---|
+| 链 a0 f0 a1 | 256 |
+| 两条并行线 | 512 |
+| 两条线的 free 之后分配 2B | 1024（不合并） |
+| 只依赖其中一条线的 free 分配 B | 512 |
+| 同一 free 之后的两个兄弟分配 | 512 |
+| 依赖 a0、与 f0 并行 | 512 |
+| 经空节点传递依赖 | 256 |
+| 依赖 free 和另一个根 | 256 |
+| 菱形（free 在一侧，分配在另一侧） | 512 |
+| a1 先创建，之后补上对 f0 的依赖 | 512（按创建顺序） |
+
+并发规则（1 GiB，`exp conc`）：
+
+| 情况 | 池 MiB（之前 → 之后） |
+|---|---|
+| A 在 s1 跑完并同步，B 在 s2 | 1024 → 1024 |
+| A 在 s1 被挂住，B 在 s2 | 1024 → **2048** |
+| A 在 s1 已在 GPU 上跑完，host 没同步，B 在 s2 | 1024 → 1024 |
+| A 在 s1 被挂住，s2 用 event 等它，B 在 s2 | 1024 → **2048** |
+| A 在 s1 被挂住，B 也在 s1 | 1024 → 1024 |
+| 同一个 exec 在 s1 挂住时又在 s2 launch | 1024 → 1024 |
+
+不释放的块（1 GiB，`exp unfreed`、`exp2`、`exp3`）：
+
+| 情况 | 结果 |
+|---|---|
+| U 不释放已 launch，F（分配加释放）launch | 池 1024 → 2048 |
+| `cuMemFree(U 的块)` 后 F | 池不变，复用 |
+| `cuMemFreeAsync` 后 F | 复用 |
+| U 的块还被持有时再 launch U | 驱动返回 1 |
+| AUTO_FREE_ON_LAUNCH 的 U 再 launch | 复用自己的块 |
+| AUTO_FREE 的 U launch 后 F | 2048：直到 U 再 launch 都持有 |
+| exec（无论 AUTO_FREE 与否）和 graph 销毁后 F | 2048：仍持有，之后 `cuMemFree` 成功 |
+| 只 upload 不 launch，F | 1024：映射了但不算持有；此时 `cuMemFree` 返回 1 |
+| 另一个 graph 的 free 节点运行后 F | 复用 |
+| context 销毁、primary reset | 仍持有；从别的 context `cuMemFree` 成功，池随即可 trim 到 0 |
+| 持有时 trim | 不还 |
+
+
+580.178.04 上三组规则与 595.84 逐行相同。
+
+#### 修复（分支 fix/graph-pool-false-oom）
+
+| 部分 | 做法 | 代价 |
+|---|---|---|
+| 依赖 | instantiate 遍历时，graph 既有分配又有 free 才算：`cuGraphGetEdges`（失败或 `LOSSY` 再用 `_v2`）取边，按拓扑序传播"依赖了哪些 free 节点"的位图。模拟器只复用祖先 free 释放的块，只合并一方依赖另一方的相邻块，仍按创建顺序处理。位图超过 1M 个 64 位字或取不到边，退回按节点顺序 | 只在 instantiate 时 |
+| 持有 | `dptr -> 卡、字节` 的表（可增长哈希表）。launch 成功后加入 graph 不释放的块（地址来自模拟器），`cuMemFree`、不在捕获中的 `cuMemFreeAsync`、含其 free 节点的 graph launch 移除；context 拆除**不**移除。可用池 = 预留 − 持有 + 本 exec 自己正被持有的块（按地址逐个核对，AUTO_FREE 的 exec 再 launch 时拿回来）。捕获时的折扣（6.14 问题 1）也扣掉持有 | free 热路径只多一次原子读；只有带不释放块的 exec 才查表 |
+| 在途 | 每个 stream 一条记录。某张卡只见过一个 stream 时不做别的；见到第二个 stream 起，每次 launch 后记 event，之前没有 event 的记录问一次 `cuStreamQuery`（先确认不在捕获中）。可用池再扣掉别的 stream 上未完成 graph 的需要量 | 见下面的开销 |
+
+没有做的：在途只看 graph 的第一张卡；per-thread 默认流在线程之间当作同一个 stream；子 graph 里的 free 节点不被任何分配看作祖先（只会多算，子 graph 里有内存节点本来就少见）。
+
+#### 修复前后（`hc`，限额 4096 MiB）
+
+| 场景 | 6.14 的分支 | 本节 |
+|---|---|---|
+| 第二个不释放的 graph（先 launch 第一个再建第二个） | launch 成功，池 5248 MiB，可叠加 | 节点创建时就被拒 |
+| 三种捕获模式下，池能容纳第一块、不能容纳第二块 | 正确 | 正确 |
+| `cuStreamQuery` 作废捕获后余量 | 恢复 | 恢复 |
+| 同时打开的捕获拿到相同地址 | 200 对中 0 次 | 同左（按 `dptr` 做键是安全的） |
+
+main 上若两个不释放的 graph 都先建好、再依次 launch，同样绕过（`[O]` 就是这个顺序）。
+
+#### 新用例（`test_graph_mem_admission`）与变异验证
+
+| 用例 | 内容 |
+|---|---|
+| [L]、[N] | 改为三种捕获模式各跑一次 |
+| [O] | 第二个不释放的 graph 被拒；`cuMemFree`、`cuMemFreeAsync`、另一个 graph 的 free 节点之后放行；只 upload 不算持有；AUTO_FREE 再 launch 不误拒；context 销毁后块仍持有，从别的 context 释放后放行 |
+| [P] | 另一 stream 上的 graph 未运行时拒绝，运行完或同一 stream 时放行 |
+| [Q] | 两条并行线拒绝，链式放行 |
+
+`probe_churn` 新增 `held`（1 万轮）、`held_ctx`（100 轮，context 销毁后从主 context 释放）两种模式，持有表都回到 0。
+
+| 变异 | 打红的用例 |
+|---|---|
+| 持有不计入 | [O]（6 处） |
+| `cuMemFree` 不移除持有 | [O] |
+| 在途永远视为已完成 | [P] |
+| 不算依赖 | [Q] |
+| 不加回本 exec 自己的持有 | [O]（AUTO_FREE 再 launch 被误拒） |
+| 忽略外来 free 节点 | [O] |
+
+#### 模型准确度（随机 DAG，最多三条线、带跨线边，`probe_pool_reuse dagmodel 600`，595.84）
+
+| 估算 | 完全一致 | 偏高（平均，最差） | 偏低（平均，最差） |
+|---|---|---|---|
+| 总和（6.14 之前） | 38 | 562 例（2239，6784 MiB） | 0 |
+| 按节点顺序（6.14） | 197 | 27 例（146，448 MiB） | 376 例（910，3712 MiB） |
+| **带依赖（本节）** | **335** | 124 例（316，1376 MiB） | 141 例（389，1440 MiB） |
+
+580.178.04 上 400 个图：222 / 126 / 20 例完全一致，比例相同。一条线的随机序列（`model 300`）两个驱动都是 219 例一致。
+
+离线比较了 24 种变体（可见性、合并规则、块选择、按拓扑序处理、只对总量取整、余量不与带标签块合并、可跨块取段），都不比现在好。随机 DAG 上剩下的偏差没有找到规律，就此打住：规整形状（链、并行线、菱形、兄弟、传递依赖）全部精确，写进了 `test_graph_pool_sim`。取 `min(带依赖, 按节点顺序)` 等于退回按节点顺序。
+
+#### 热路径开销（`exp/bench`，单位 µs/launch，三轮，单 stream 与双 stream 在不同进程里测）
+
+| | 不加载库 | main | 本节（复核修正后） |
+|---|---|---|---|
+| 空节点 graph | 0.23 | 0.31–0.33 | 0.34–0.35 |
+| alloc+free graph，单 stream | 0.54–0.57 | 0.67–0.70 | 0.87–0.91 |
+| alloc+free graph，两个 stream 交替 | 0.77–1.26 | 0.90–1.37 | 1.74–2.19 |
+
+第一版每次 launch 都记 event，单 stream 是 1.43 µs，改成"见到第二个 stream 才记"后是 0.80–0.83；复核后每次 launch 要先看有没有打开的捕获（取一次登记表的锁），又多约 0.08 µs。一个进程见过两个 stream 后不会再回到单 stream 的做法。
+
+#### 全量结果（两张 RTX 2080 Ti，本节最终代码）
+
+| 项 | 595.84（torch 2.15.0+cu132） | 580.178.04 |
+|---|---|---|
+| `make test` / `run_tests_with_env.sh`（双卡） | 32/32，跳过 3 个未安装的框架 | 32/32 |
+| `make test-gpu-sanitize` | 5/5，无报告 | 5/5，无报告 |
+| `make test-sanitize`（无 GPU） | 22 项 | — |
+| `make test-probes` | 全部通过；churn 各表回到 0（`capture_thread_exit` 1、`pool_get` 1 是预期的）；fork 60 次无挂死；驱动隐式回收后重新 launch 被拒 | — |
+| `probe_launch_device` | 本节与 main 各 3 次全部通过 | — |
+| torch（`cudaMallocAsync` 后端）：recapture 3×1500/3×1000、链式 12×256/6×256 限额 2048、对照 6144 | 全部成功，池 1504/1024/512 MiB | — |
+| `make check`（本地 13.4 头文件）、cppcheck | 通过；608 项、77 个 hook | — |
+| TSan（一次性，`vm.mmap_rnd_bits=28` 加 `setarch -R`） | 两个测试全部通过，**没有锁顺序或死锁报告**；data race 都在已有位置（令牌桶无锁读、TSan 不认识的跨进程文件锁） | — |
+| 6 个进程并发 3 轮 | 18 个进程都没有超时；失败是共用账本互相算进用量，预期之内 | — |
+
+这轮还修了两处测试本身的问题：`probe_launch_device` 的校准改为同一尺寸连续两次都 ≥20 ms 才采用（空闲卡起步时钟低），从设备 1 发起的那次 launch 改用极小的 graph（原来的大 kernel 会掏空设备 0 那 10% 的令牌桶，使下一次 launch 等令牌，测出 50–100 ms）。改之前 main 和本节在这台卡上都间歇失败。
+
+记一个过程上的教训：网络断开后，旧的会话进程没有退出，和新会话同时用同一台 GPU 机器和同一个工作区跑了约半小时。这期间并发跑的结果（包括一次开销测量和 `probe_launch_device` 的失败）已全部作废，上面的数据都是在机器只有一个会话时重跑的。
+
+#### 已知边界和没有验证的
+
+- 随机 DAG 上模型仍有约 20% 偏高、约 24% 偏低（见上表），规整形状精确。
+- 在途只看 graph 的第一张卡；per-thread 默认流跨线程视为同一个 stream。
+- 捕获打开期间的**普通**分配仍会把捕获记账和池重复计算（只在捕获窗口内偏严）。
+- 570、550 没有验证：这两台机器的内核是 7.0，模块编不过。
+- Warp、mjlab、vLLM 本身没有跑。
+
+#### 独立复核与修正（同日，代码只读复核两路：库代码、测试覆盖；修完上 GPU 验证）
+
+| 复核发现 | 判断 | 修正 | 验证 |
+|---|---|---|---|
+| 在途记录用的 `cuEventRecord`/`cuEventQuery` 不看进程里有没有别的捕获 | **成立，严重**：别的线程以 global 模式捕获时，记 event 会把它弄坏（对方 End 返回 901）。main 没有这些调用，是本分支引入的 | 进程里有任何捕获打开（捕获登记表非空）就不查询、不记 event，按已完成算 | 新用例 [R]；去掉记 event 前的检查，[R] 两次都红（901）；去掉查询前的检查不变红：这个驱动上 `cuEventQuery` 不弄坏捕获，检查留作防御 |
+| 往捕获里 launch graph 也会进上面的路径 | 驱动本身就拒绝：无论有没有内存节点、哪种模式，不加载库也返回 900 并作废捕获 | 只改注释 | `exp/intocap`，加载与不加载库结果相同 |
+| 单 stream 过渡时问 `cuStreamQuery`，那个流一直有别的工作就一直算作在途 | 成立：会持续多算，还在应用的流上调用 | 去掉 `cuStreamQuery`：第二个 stream 出现时，之前没有 event 的记录直接算完成（只在那一刻可能少算） | [P] 第一段 |
+| per-thread 默认流是所有线程共用的一个句柄；legacy 流的记录跨设备会被覆盖 | 成立，少算或问错流 | per-thread 默认流不做在途记录；记录匹配加上设备 | — |
+| 流销毁后记录还在，地址复用会被新流认领 | 成立 | 流销毁的 hook 清掉它的记录（event 留给同一 context 复用） | `probe_churn running_streams` 2 万轮 |
+| instantiate 带 UPLOAD 的路径读了未初始化的 `own_held` | **成立，未定义行为** | 建表时置 0 | — |
+| `cuGraphGetEdges` 计数成功、取边返回 `LOSSY` 时没有改用 `_v2` | 成立 | 两个入口各自完整试一遍 | — |
+| 增长余量与带标签块合并后取标签，可能多算一个 32 MiB | 机制成立 | 不改：离线比较这样更贴近驱动（600 个图 345 对 258），注释写明 | — |
+| [P] 的覆盖随用例顺序变化（多 stream 标志在进程内不复位） | 成立 | [P] 移到第一个用到第二个 stream 的位置，先测过渡再测 event 路径，补"同一 exec 换 stream" | — |
+| [O]/[P] 前一条期望失败会提前返回、挂住流 | 成立 | 释放改成不返回；[P] 返回前一定放开挂住的流 | — |
+| 捕获里 `cuMemFreeAsync` 不应立即释放持有，没有测 | 成立 | [O] 补上：只捕获时仍拒绝，那个 graph 运行后放行 | — |
+| 位图超过一个字（>64 个 free）没有测 | 成立 | [Q] 加 70 个 free 节点的版本 | — |
+| 单元测试没钉住 best-fit、合并后的标签、余量带依赖；不变量没查重叠 | 成立 | 补三条规则和"每个字节恰在一个块里"的不变量；best-fit 那条实测驱动也是 832 MiB；换成 first-fit 该用例变红 | — |
+| context 轮换时在途 event 的处理没有探针 | 成立 | `probe_churn running_ctx` 200 轮 | — |
+
+修正后的全量结果（两张 RTX 2080 Ti）：
+
+| 项 | 595.84 | 580.178.04 |
+|---|---|---|
+| `make test` / `run_tests_with_env.sh` | 32/32（含 torch） | 32/32 |
+| `make test-gpu-sanitize` | 5/5 | 5/5 |
+| `make test-sanitize` | 22 项 | — |
+| `make test-probes` | 全部通过，新增 `running_ctx`、`running_streams` 无失败、表不增长 | — |
+| 变异（[O]–[R]） | 持有不计入、free 不移除、在途视为完成、不算依赖、不加回自己的持有、忽略外来 free、记 event 前不看捕获：全部变红 | — |
+| TSan | 没有锁顺序或死锁报告；data race 仍只在已有位置 | — |
+| 6 进程并发 3 轮 | 18 个都没有超时 | — |
+| 驱动规则、`probe_capture_apis`、`hc` | — | 与 595 相同 |
+
+#### 第三轮复核（2026-11-09，代码只读；修正后**尚未上 GPU**，测试机已回收）
+
+| 复核发现 | 判断 | 修正 |
+|---|---|---|
+| "有捕获就不碰 event"是先检查后调用，中间另一个线程可能刚开始 global 捕获，event 调用落进它的捕获 | 成立：窗口很小，但后果是应用的捕获失败 | 读写锁 `g_capture_gate`：开始捕获的六个 hook 在驱动调用和登记期间持写锁，"检查 + event 调用"持读锁；glibc 下写者优先 |
+| 登记表收不下的捕获（拿不到 graph、表满）不会让"有捕获"成立 | 成立 | 这时置一个粘滞标志，此后都按有捕获处理（不记 event，只会少算） |
+| `prepare_async_allocation` 对每次 `cuMemAllocAsync` 先问一次是否在捕获，没有限额的卡也问 | 成立，热路径变慢 | 只在不打折就超限时才问是否在捕获、才查池 |
+| 两个线程同时在两个 stream 上 launch，都看到同一份空闲池 | 成立，main 一样 | 不改，记为边界 |
+| launch 返回到登记持有之间，另一线程 `cuMemFree` 了那个块，持有表留下旧记录 | 成立，但这本身是应用的错误用法（graph 刚产出块就从别处释放） | 不改，记为边界 |
+| 在途状态用 0/1/2；`graph_pool_sim_free` 注释说"最新优先"但删除会换位；`GRAPH_DEPS_MAX_WORDS` 说明不清 | 成立 | 改为 `GRAPH_RUN_*` 命名常量，修正两处注释 |
+
+新增用例 [S]：一个线程反复开始/结束 global 捕获（最多 2000 次），主线程同时在两个 stream 上 launch 带分配的 graph，要求所有捕获都正常结束。
+
+本地验证：库编译无警告，`make check`（含 cppcheck）通过，`test_graph_pool_sim` 在 ASan/UBSan 下通过，GPU 用例与探针在普通和 `_ptsz` 两种定义下编译无错误。**GPU 上的全量回归、[S] 与变异验证待补。**
+
+#### 库额外发起的 CUDA 调用与别的线程的捕获（2026-11-09，RTX 3080 10 GiB，驱动 595.84）
+
+第三轮复核之后，按同一类问题把整个库扫了一遍：库在 hook 里替应用多做的调用，会不会弄坏**别的线程**正开着的 global 模式捕获。先测驱动规则（`xt` 探针，不加载库）：
+
+另一个线程开着 global 捕获时，本线程调用：
+
+| 调用 | 返回 | 对方结束捕获 |
+|---|---|---|
+| 什么都不做 | — | 0 |
+| `cuEventRecord`（本线程的流） | 0 | 0 |
+| `cuEventCreate`、`cuMemGetInfo` | 0 | 0 |
+| `cuStreamSynchronize`、`cuStreamQuery`（本线程的流） | 900 | **901** |
+| `cuEventQuery`、`cuEventSynchronize` | 900 | **901** |
+| `cuMemAllocAsync`、`cuMemFreeAsync`（本线程的流） | 900 | **901** |
+| `cuMemAlloc`、`cuMemFree`、`cuMemAllocManaged`、`cuMemFree`（托管） | 900 | **901** |
+
+据此修正两处之前的说法：弄坏捕获的是 `cuEventQuery` 而不是 `cuEventRecord`（6.15 的变异里，打破 [R] 的那次也经过了查询）；以及，别的线程开着 global 捕获时，应用自己的异步/同步分配和释放就会被驱动拒绝。
+
+另测 `cuMemAllocAsync` 何时对 NVML 可见：
+
+| 情形 | NVML |
+|---|---|
+| 空池，流被挂住，调用返回后 | 602 → 1626 MiB（已可见） |
+| 池里留着 1 GiB，从中分配 | 1626 → 1626 |
+| 另一个被挂住的流上有 1 GiB 待释放，在别的流上分配 | 1626 → 2650（当场扩池） |
+
+结论（逐处）：
+
+| 位置 | 库多做了什么 | 结论 |
+|---|---|---|
+| 非捕获的 `cuMemAllocAsync`/`cuMemAllocFromPoolAsync` 之后 `cuStreamSynchronize`（为让 NVML 看见再退掉过渡记账） | 同步 | 不会多弄坏捕获：别的线程开着 global 捕获时，应用的这次分配本身就被拒（900），走不到同步。但同步本身是多余的：595 上调用返回时 NVML 已可见。去掉它要先在旧驱动上测过，本次不改 |
+| 超分 UVA 内存的 `cuMemFreeAsync` 改为同步后 `cuMemFree` | 同步、释放 | 同上：应用原本的 `cuMemFreeAsync` 也会被拒，结果不比不用库更糟。不改 |
+| 算力占空比：空闲后第一次 launch 的 `gap_end` 里 `cuEventSynchronize` | 同步 | **会**：应用自己的 launch 是允许的，库加的同步把对方弄坏。已修：有捕获打开时不走占空比，`gap_end` 在 `g_capture_gate` 读锁下再查一次，sleep 在锁外 |
+| 在途记录的 `cuEventQuery` | 查询 | 已在 6.15 修（有捕获打开时不查） |
+
+验证（RTX 3080 单卡，595.84，无 torch）：
+
+| 项 | 结果 |
+|---|---|
+| `test_graph_mem_admission` 及 `_ptsz`（含 [R] 的空闲后 launch、[S]） | 通过；[S] 2000 次捕获 0 次被破坏，但同期 launch 只有 31 到 85 次（捕获跑得快），对竞争窗口的压力有限 |
+| 拿掉占空比路径上的捕获检查 | [R] 变红，对方结束捕获返回 901 |
+| `make test` | 单卡 30 项：除上面两个当时待修的用例外全部通过；这两个修正后单独通过，未再跑一次完整 `make test` |
+| `make test-gpu-sanitize` | 5/5，无报告 |
+| 未做 | 读写锁的 TSan；拿掉读写锁的变异（竞争不确定，难以稳定复现）；旧驱动上的同样测试 |
+
+中途的用例问题，记下来免得再踩：[S] 第一版在循环里调 `cuStreamSynchronize`，这本身就是 global 捕获禁止的调用，破坏捕获的是用例自己。[Q] 的 70 个小节点放在大节点之前时，这张卡上第二个大节点偶尔被库拒绝（OOM）；隔离实验里小节点不改变用量，两个大节点也都通过，最可能是 trim 之后池预留已归零而 NVML 尚未更新的短暂时序，**没有证实**。小节点已挪到大节点之后。这类时序不是本分支引入的：任何释放后紧接分配都可能碰到。
+
+### 6.16 去掉异步分配后的同步（2026-11-09，RTX 3080 10 GiB，驱动 595.84 与 580.178.04）
+
+非捕获的 `cuMemAllocAsync`、`cuMemAllocFromPoolAsync`（各含 `_ptsz`）原来会先记一笔过渡记账，再 `cuStreamSynchronize` 等 stream 跑完，然后退账，理由是"stream 执行到它才真正提交物理显存"。这个前提一直没有实测过，实测是错的。
+
+**何时可见**（探针 `xt2/vis`）：3 种入口（`cuMemAllocAsync`、默认池、自建池）× 2 种阻塞（host 回调挂住、前面排着 24 次 2 GiB memset）× 3 种大小（16、256、1024 MiB），每组 10 轮，普通与 `_ptsz` 各一遍，两个驱动共 72 组、720 次。分配前后都用 `cuStreamQuery` 确认 stream 为 NOT_READY。
+
+| 观察 | 结果 |
+|---|---|
+| stream 分配前、后都处于忙状态 | 全部 |
+| 调用返回后第一次采样，整卡用量（`nvmlDeviceGetMemoryInfo`）已增加 | 全部 |
+| 同时，按进程用量（`nvmlDeviceGetComputeRunningProcesses_v3`）已增加 | 全部 |
+| 最大延迟 | 0 µs（第一次采样就可见） |
+| 调用耗时 | 16 MiB 约 0.15 ms，1 GiB 约 1.8 ms，与 stream 是否忙无关 |
+| 另一个被挂住的流上有 1 GiB 待释放，在别的流上分配 | 当场扩池，第一次采样 +1024 MiB |
+
+**同步的副作用**（`xt2/dep`）：stream 上排着一个要等分配返回后才放行的回调（应用用 event 建立这种依赖完全合法）。
+
+| | `cuMemAllocAsync` 耗时 |
+|---|---|
+| 不加载库 | 0.028 s |
+| 带同步的库 | 5.352 s（卡到回调自带的 5 s 上限，没有上限就是死锁） |
+| 去掉同步 | 0.030 s |
+
+**限额没有被突破**（`xt2/race`）：4 个进程各抢 1536 MiB，限额 4096 MiB，stream 上排着 memset，独立进程以每秒数万次采样 NVML 峰值（驱动 595.84）：
+
+| | 基础占用 | 峰值 |
+|---|---|---|
+| 不加载库 | 378 MiB | 7250 MiB |
+| 带同步 | 378 MiB | 4434 / 4453 MiB |
+| 去掉同步 | 378 MiB | 4434 / 4434 MiB |
+
+580.178.04 上去掉同步的版本峰值 4152 / 4195 MiB（基础占用 118 MiB），扣除基础占用都在 4096 以内；580 上没有带同步的版本做对照。
+
+**改动**：4 处入口去掉过渡记账和同步，捕获分支、设备锁都不变；删除 `MEMORY_TYPE_ASYNC_BRIDGE`。UVA 异步释放的同步（托管内存没有异步释放接口，要靠它保证 stream 顺序）和占空比的 `cuEventSynchronize` 与此无关，保留。用例 [A] 重写：stream 挂住时分配立即返回，stream 仍忙，限额视图已减少，账本没有残留，`cuMemAllocAsync` 与 `cuMemAllocFromPoolAsync` 各测一遍。
+
+**没有验证的**：570、550（这台机器内核 7.0，这两个驱动的模块编不过）。这些驱动上如果提交时机不同，后果是分配后极短时间内少算一次，别的进程可能多分配，之后 NVML 能看到。
+
+**回归**（RTX 3080 单卡，本节最终代码，已包含 6.14、6.15 的全部修复）：
+
+| 项 | 595.84（torch 2.15.0+cu132） | 580.178.04 |
+|---|---|---|
+| `make test` / `run_tests_with_env.sh` | 32/32，跳过 3 个未安装的框架 | 30/30（无 torch：cu132 需要更新的驱动） |
+| `make test-gpu-sanitize` | 5/5，无报告 | 5/5，无报告 |
+| `make test-sanitize` | 22 项 | — |
+| `make test-probes` | 通过；各表回到 0，`capture_thread_exit`、`pool_get`、`running_streams` 的 1 是预期；需要两张卡的三个 churn 模式和 `probe_launch_device` 跳过 | — |
+| `test_graph_mem_admission` 及 `_ptsz` 各 5 次 | 10/10 通过 | — |
+| 驱动规则（DAG、并发、不释放）、捕获中查询 | — | 与 595 相同 |
+| TSan（含 `g_capture_gate`） | 两个测试通过，**没有锁顺序或死锁报告**；data race 仍只在已有位置（令牌桶、跨进程文件锁保护的账本） | — |
+| 6 进程并发 3 轮 | 18 个都没有超时；失败是共用账本互相算进用量 | — |
+
+变异验证（595）：
+
+| 变异 | 结果 |
+|---|---|
+| 持有不计入、free 不移除、在途视为完成、不算依赖、不加回自己的持有、忽略外来 free | [O]/[P]/[Q] 变红 |
+| `graph_launched` 记录在途前不查捕获 | [R]、[S] 变红（对方捕获被破坏） |
+| 把同步加回 `cuMemAllocAsync` | [A] 变红（调用等了 stream） |
+| 只去掉 `gap_end` 里的复查 | **不变红**：`gap_begin` 的检查还在，复查防的是两者之间才开始的捕获，竞争窗口无法稳定复现。两处都去掉时 [R] 变红（6.15） |
+
+没有验证的：双卡路径（这台只有一张卡，a96fa9e 之后的提交没有上过双卡）；570、550；[S] 同期 launch 只有 15 到 40 次，对竞争窗口的压力有限，但 `graph_launched` 的保护去掉时它能变红。
+
+### 6.17 锁里不等：复核发现的永久挂起与修复（2026-11-11，两张 RTX 2080 Ti 11 GiB，无 NVLink，驱动 595.84，CUDA 13.0，torch 2.15.0+cu132）
+
+#### 复核发现
+
+合并前又做了一次独立只读复核（只给代码，不给之前的结论）。最严重的一条：`gap_end` 持 `g_capture_gate` 读锁做 `cuEventSynchronize`。另一个线程此时开始捕获，就会在写锁上等这个 stream 跑完；gate 是写优先的，之后所有带内存节点的 launch 也排在写锁后面。如果这个 stream 正好在等其中某个线程（例如等它 launch 之后才 record 的 event），三个线程就永远互等。main 上 `gap_end` 不持锁，这是 a96fa9e 引入的回归。复核的其余条目见本节末尾。
+
+顺着这条往下查：库还在哪些锁里调用了可能阻塞的驱动函数。
+
+#### 驱动在满队列下的行为（不加载库，`prb`、`prf`、`pcb` 探针）
+
+- 单线程往一个被 host 回调挂住的 stream 上入队 `cuMemsetD8Async`：第 988 个调用阻塞（前 987 个入队）。同一个 stream 上反复 `cuEventRecord` 40 万次、与 memset 交替 986 次都不阻塞。
+- **另一个线程卡在这个 stream 的入队里时**（队列满），本线程调用：
+
+| 调用 | 结果 |
+|---|---|
+| `cuEventQuery`、`cuEventElapsedTime`（该 stream 上的事件） | 立即返回 |
+| `cuEventRecord`（另一个 stream） | 立即返回 |
+| `cuCtxGetCurrent`、`cuCtxGetDevice`、`cuStreamGetCtx` | 立即返回 |
+| `cuStreamIsCapturing`、`cuStreamGetCaptureInfo`（该 stream 或别的 stream） | 立即返回 |
+| `cuGraphGetNodes`、`cuGraphNodeGetType`、`cuGraphGetEdges`、`cuGraphMemAllocNodeGetParams`、`cuGraphInstantiate` | 立即返回 |
+| `cuDeviceGetGraphMemAttribute`、`cuMemGetInfo`、`cuPointerGetAttribute` | 立即返回 |
+| `cuGraphLaunch`（别的 stream，扩池 1 MiB / 480 MiB） | 立即返回 |
+| `cuEventRecord`（该 stream） | **阻塞到队列放开** |
+| `cuEventCreate`、`cuEventDestroy` | **阻塞**（同一 context 内，与 stream 无关） |
+| `cuStreamBeginCapture`（别的 stream，relaxed 与 global 都是） | **阻塞** |
+| `cuStreamCreate`、`cuMemAlloc` | **阻塞** |
+| `cuGraphLaunch`（别的 stream，扩池 2.3 GiB） | **阻塞**（映射之后、返回之前，见下文"新发现的边界"） |
+
+另一个线程开着 global 捕获时（补 6.15 的表）：`cuEventDestroy`（已完成、未 record、仍在等待的事件）、`cuEventElapsedTime`、`cuEventCreate` + `cuEventRecord`、`cuStreamIsCapturing` 都**不破坏**对方的捕获（结束返回 0）。
+
+#### 由此确认的三处挂起（修复前的分支代码；main 上都没有）
+
+| 位置 | 锁内的阻塞调用 | 被挡住的 |
+|---|---|---|
+| `gap_end`（a96fa9e） | 读锁内 `cuEventSynchronize` | 开始捕获的线程（写锁），以及排在它后面的所有带内存节点的 launch |
+| 6 个 capture begin 包装（a96fa9e） | 写锁内调用驱动的 `cuStreamBeginCapture` | 所有带内存节点的 launch（读锁） |
+| `graph_running_note`（7de2cf5） | `g_graph_use_lock` 和读锁内 `cuEventCreate` / `Destroy` / `Record` | 所有带内存节点的 launch（`graph_pool_available` 要这把锁） |
+
+后两处甚至不需要有捕获：只要一个线程卡在满队列的入队里，而放开队列要靠另一个线程先 launch 一个带内存节点的 graph。
+
+#### 修复
+
+原则：**库自己的锁里只调用上表中实测立即返回的函数**。持锁期间调用的驱动函数只剩 `cuEventQuery`、`cuEventElapsedTime` 和 graph / stream 的只读查询。
+
+- **capture begin**：写锁里只把 `g_capture_beginning` 加一（`capture_announce`），放锁后再调驱动；登记完成后减一（`capture_settled`，release 语义）。`capture_reg_any()` 同时看这个计数（acquire 语义）。读侧在读锁里检查后做 query：要么整个发生在加一之前（此时还没有捕获），要么会看到计数，原子性和以前一样。
+- **`gap_end`**：end 事件在锁外 record（不破坏别人的捕获，见上）。之后轮询：每轮持读锁复查一次没有捕获，再 `cuEventQuery`，成功就在同一次持锁内 `cuEventElapsedTime`；放锁后睡 20 µs，每轮翻倍，最多 512 µs。期间有捕获开始就放弃这次测量，不睡。耗时取自事件时间戳，轮询不影响测量值；只是 launch 返回最多晚约 0.5 ms，这条路径本来就只在空闲 200 ms 后的第一次 launch 上走。
+- **`graph_running_note`** 分三步：
+  1. 持读锁和 `g_graph_use_lock` 选槽，把事件从槽里取出，状态置为 `GRAPH_RUN_PENDING`（按运行中计）。
+  2. 不持锁：别的 context 的旧事件就地销毁，没有事件就 create，然后 record。
+  3. 再拿 `g_graph_use_lock` 写回。如果这期间槽被别的 launch 接管（序号变了），就销毁自己的事件。
+
+  在锁外销毁事件和 `cuCtxDestroy` 清理之间的竞争，由新增的 `g_graph_ev_lock` 加 context 代数计数处理：只有在代数没变（期间没有 context 被清理）时才销毁；代数变了就不销毁，最坏情况是罕见竞争下泄漏一个事件，不会误销毁。launch 路径从不取这把锁。
+- fork 后的子进程里，gate 从初始化器复制，仍然写优先（以前 `pthread_rwlock_init` 会丢掉写优先）。
+
+#### 新用例与对照（`test_graph_mem_admission`，旧库为 dc657df）
+
+- **[T]**：T1 空闲 300 ms 后在挂住的 stream 上 launch，进入 `gap_end` 等待；T2 开始 global 捕获；T3 launch 一个带内存节点的 graph，之后才放开 stream。
+- **[U]**：在单独的 context 里，F 把一个挂住的 stream 填到驱动阻塞；T1 在新 stream 上 launch（要 create 事件）；T2 开始 global 捕获；T3 在第三个挂住的 stream 上 launch，之后放开。
+
+host 回调自带 30 s 上限，所以旧库会卡到上限而不是永远挂死；用例按耗时判定（超过 2 s 即失败）。
+
+| | 旧库（dc657df） | 新库 |
+|---|---|---|
+| [T] 捕获开始用时 | 超过 5 s（测到上限） | 0.001 s |
+| [T] T3 的 launch | 26.8 s | 0.000 s |
+| [U] T3 的 launch | 31.6 s | 0.000 s |
+| 对方捕获结束 | 0 | 0 |
+
+变异（每次只改回一处）：
+
+| 变异 | 结果 |
+|---|---|
+| M21 `gap_end` 恢复持读锁 `cuEventSynchronize` | [T] 变红（T3 26.7 s） |
+| M22 capture begin 恢复持写锁调驱动 | [U] 变红（T3 31.6 s） |
+| M23 `note` 恢复在锁内 create / record | [U] 变红（T3 31.6 s） |
+| M24 PENDING 不按运行中计 | **不变红**，见下 |
+
+M24 当时没有稳定的用例：T1 常常在映射之后、库收到通知之前，就被驱动挡在 `cuGraphLaunch` 里，PENDING 窗口撑不开。这一点由下一小节的修复解决：登记提前到准入后，T1 无论卡在驱动里还是卡在我们的 `cuEventCreate` 上都处于 PENDING，[V] 因此能稳定判定，M24 也随之变红（见 6.18 的变异表）。
+
+其余变异在本节最终代码上重跑（595）：6.15、6.16 的 M11–M16、M18、M20 都仍然变红。M19（轮询里不复查捕获）上一轮不变红，这次由 [T] 抓到：T2 的捕获被 T1 的查询破坏。M25（`capture_reg_any()` 忽略 `g_capture_beginning`）**不变红**：它防的是驱动 begin 返回到登记完成之间的窗口，[S] 的 2000 次捕获都没撞上。
+
+#### 回归（两张 RTX 2080 Ti，595.84，本节最终代码）
+
+| 项 | 结果 |
+|---|---|
+| `make test` | 32/32，跳过 3 个未安装的框架（torch 2.15.0+cu132 在） |
+| `make test-gpu-sanitize` | 5/5，无报告 |
+| `make test-sanitize` | 22 项 |
+| `make test-probes` | 通过，**含双卡模式**（`exec_multi`、`ctx_multi`、`primary_release`、`probe_launch_device`）；各表回到 0，`capture_thread_exit`、`pool_get`、`running_streams` 的 1 是预期 |
+| `test_graph_mem_admission` 及 `_ptsz` 各 5 次 | 10/10；[T] 每次 0.001–0.002 s，[U] 每次 0.000 s |
+| TSan | 两个测试通过，**没有锁顺序或死锁报告**。data race 报告都在 main 已有的无锁读取上：令牌桶（`rate_limiter`、`change_token`、`delta`），以及 `gap_begin` 读 `last_launch_ns`。后者是 [T] 让两个线程同时走空闲后 launch 才报出来的。账本那几处由跨进程文件锁保护 |
+| 6 进程并发 3 轮 | 18 个都没有超时；13 个 rc=1 是共用账本互相算进用量，与 6.16 相同 |
+| launch 开销（µs/launch，三轮） | 见下表 |
+
+| | 空 graph | alloc 节点，单 stream | alloc 节点，双 stream |
+|---|---|---|---|
+| 不加载库 | 0.28 | 0.63 | 0.88 |
+| main | 0.36 | 0.74 | 1.09–1.21 |
+| dc657df | 0.36 | 0.95 | 1.87 |
+| 本节 | 0.36 | 0.94 | 1.91 |
+
+两步拆分没有带来可测的开销。直接运行 `probe_launch_device`（限额 10%）时，新库第 1 次限流生效（约 4 次/s），第 2、3 次和 main 的 3 次都没有（约 1000 次/s）；test-probes 里那次生效。新库和 main 表现一致，不是本分支引入的，原因没有追查。
+
+驱动 580 本轮没有重跑：本节的改动不涉及驱动 API 的行为差异，只是调整锁的范围。（尝试切换时 595 模块正被占用、卸载失败，那几秒的结果作废。）
+
+#### 映射到登记之间的窗口（同日修复）
+
+排查 M24 时发现：launch 要等驱动返回后才登记为运行中（`graph_launched` → `note`）。驱动映射完池内存到登记完成之间，`RESERVED_MEM_CURRENT` 已经包含这块内存，运行表里却还没有它。这时别的 stream 上的 launch 做准入，会把它算成空闲可复用（`增长 = 0`），既不检查限额，也不拿设备锁。而驱动并不会复用一个还没跑完的 graph 的块（6.15），只能再扩池。
+
+- 正常情况下窗口只有驱动返回到登记之间的几条指令。
+- 驱动的 launch 在映射之后被挡住时，窗口会一直开着。上表里，另一个线程卡在满队列时，扩池 2.3 GiB 的 launch 每次都被挡，480 MiB 的有时被挡。实测：限额 4096 MiB，T1 映射 2272 MiB 后被挡在驱动里，T3 在另一个 stream 上的同尺寸 graph 被放行（0.010 s），池到 4544 MiB，超过限额。（**6.18 更正**：T1 当时卡住的位置后来查明多半不是驱动，而是库在 launch 返回后为新 stream 调的 `cuEventCreate`；见 6.18 变异表后的 M26 说明。）
+- "两个 launch 同时做准入、都看到空闲池"是同一类问题（6.15 的已知边界）。
+- main 根本不追踪运行中的 graph，别的 stream 上的 graph 无论在不在跑，它的内存都会被当成可复用。这不是回归，本分支只剩这个窗口。
+
+**修复**：把登记提前到准入，和准入在同一次持锁里完成。`graph_pool_available` 算完"可用"之后，在同一次持有 gate（读）和 `g_graph_use_lock` 时直接选槽、标记 PENDING（`graph_running_claim_locked`），结果作为票据（`graph_run_ticket_t`）带回 launch 路径：
+
+- 驱动 launch 成功：`graph_launched` 只做 record 事件和写回（`graph_running_finish`）；
+- 准入被拒、多设备 graph 后面的设备被拒、驱动报错、launch 进了捕获：撤销票据（`graph_running_cancel`）。槽的序号没变时恢复登记前的整个槽（连同取出的事件）；变了，说明被别的 launch 接管，就销毁自己取出的事件；
+- 拿不到票据的情况（该卡没开内存限额，准入时有捕获打开，不是当前设备，per-thread 默认 stream）照旧在 launch 后登记。
+
+这样 T1 一定先登记、后映射，之后的准入都能看到它；两次准入在 `g_graph_use_lock` 上串行，同时 launch 那一条也一并修掉。只追踪第一张卡的限制不变。upload 不登记（6.15：upload 不持有块）。
+
+#### 仍然存在的边界
+
+1. **hook 额外调用的 `cuEventCreate` / `Destroy`**（槽位首次使用、`gap_events_ensure`）：同一 context 里有线程卡在满队列时，这些调用会阻塞。即使不持锁，也会让一个本该返回的 launch 卡住；如果放开队列的正是这个线程，就会死锁。槽位事件会复用，只在新 stream、新 context 首次用槽位时 create。main 上的 `gap_events_ensure` 也有同样的情况。
+2. **main 上就有**：设备文件锁（跨进程）持有期间会调用 `cuMemAlloc`、`cuMemAllocAsync`，这两个调用在同样的条件下会阻塞，此时同一张卡上其他进程的分配要等。不是死锁，除非存在跨进程的依赖。
+
+#### 复核的其余条目
+
+| 条目 | 处理 |
+|---|---|
+| 同一 stream 一直忙时保留最大的 `need`，可能让别的 stream 多算 | 接受，已在已知边界中 |
+| 线程在捕获中退出或登记表满时 `capture_reg_any()` 一直为真，在途追踪和空闲后的占空比睡眠关闭 | 接受；令牌桶限流仍然生效 |
+| 子图里的 free 节点不计入依赖，内存会多估 | 接受，形状窄 |
+| `graph_running_busy_locked` 查询出错时丢弃事件而不销毁 | 只在事件的 context 已经销毁时出错，此时不能也不需要销毁 |
+| 去掉同步只在 580、595 上测过 | 570、550 仍未验证 |
+| 小项：`vmem_table.h` 注释仍提到 bridge、测试函数名不准确、6.15 里一处外部项目引用、fork 后丢失写优先、`g_graph_use_lock` 注释写着"不阻塞" | 都已修 |
+
+### 6.18 per-thread 默认 stream、同步、去掉淘汰、所有设备（2026-11-11，两张 RTX 2080 Ti 11 GiB，驱动 595.84）
+
+对照一个外部项目同期的同类改动（只读代码），把它做得比我们好的三处补上，第四处（stream / context 的身份）比较后保留我们的做法。
+
+#### 改动
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| per-thread 默认 stream | 不追踪（一个句柄对应多少个线程就是多少个 stream） | 按"context + 线程序号"作为一个 stream。线程序号原子递增、永不复用：线程退出后，新线程不会撞上旧记录 |
+| legacy 默认 stream | 各 context 共用一个 key | 按 context 区分 |
+| 同步 | 不 hook。stream 一直忙时保留它跑过的最大 need，要等别的 stream 查到事件完成才清 | hook `cuStreamSynchronize`（含 `_ptsz`）和 `cuCtxSynchronize`：调用前取"已返回的 launch"计数快照，成功后把该 stream / 该 context 里计数不超过快照的 EVENT 记录置为完成。PENDING 和同步开始后才返回的 launch 不动。没有任何记录时只多一次 relaxed load |
+| 记录数 | 固定 32 个槽，满了淘汰最老的，**即使它还在运行** | 可增长的表（初始 32，上限 65536），按 stream 身份查找。超过 64 条后，新 stream 优先回收一条空闲记录（连同它的事件），**正在运行的记录从不回收** |
+| 设备 | 只追踪 graph 的第一张卡，而且只在 exec 所在设备是当前设备时追踪 | 每条记录按设备存 need，graph 用到的每张卡都计入 |
+| 事件的 context | 在当前 context 创建；stream 属于别的 context 时 record 失败，这次 launch 就不计入 | record 失败时取 stream 所属的 context（`cuStreamGetCtx`），临时 push 后创建事件，每个 stream 只发生一次 |
+
+**stream / context 身份（第四项）比较**：
+
+| | 外部项目（`cuStreamGetId` + `cuCtxGetId`，没有时用 epoch 兜底） | 我们（销毁 hook + context 代数计数） |
+|---|---|---|
+| 每次 launch 的额外开销 | `cuStreamGetId` 约 28 ns，`cuCtxGetId` 约 15 ns，另外还调 `cuStreamGetCtx` 约 27 ns（`pids` 探针，595.84） | 具名 stream 0 次驱动调用 |
+| 捕获安全 | 对正被别的线程 global 捕获的 stream 调 `cuStreamGetId` 返回 900，**对方结束捕获返回 901** | 不调 |
+| 句柄复用 | 精确 | stream、context 的所有销毁路径都有 hook（`cuStreamDestroy`、`cuCtxDestroy`、primary release / reset）。剩下一个窄缝：单 stream 阶段的 NO_EVENT 记录，如果它的 stream 属于另一个随后被销毁的 context，记录会留下；句柄被复用时，新 stream 会继承旧的 need 一次（多算，不会少算） |
+
+结论：保留我们的做法。
+
+#### 新用例（`test_graph_mem_admission`）
+
+| 用例 | 内容 |
+|---|---|
+| [W] | 线程 T 在自己的 per-thread stream 上停住并 launch 一个 graph；本线程 per-thread stream 上同样大小的 graph 在余量不够时被拒；T 在自己的 stream 上再次 launch 则放行（同一 stream 复用） |
+| [X] | S1 先跑一个大 graph，同步，再停住 S1 跑一个小的；S2 上中等大小的 graph 应放行（S1 只按小的计）。`cuStreamSynchronize` 和 `cuCtxSynchronize` 两个变体 |
+| [Y] | 70 个停住的 stream 各 launch 一个不同的 exec，然后第 71 个在余量不够时被拒。70 既超过旧的 32 个槽，也超过 64 条的回收阈值 |
+| [Z] | 别的 context 当前时，向本 context 停住的 S1 launch，再在本 context 的 S2 上 launch 同样大小的 graph，应被拒（单卡可测）；graph 在第一张卡上分配一点、在第二张卡上分配很多，停住，再在别的 stream 上向第二张卡 launch 同样多，应被拒（需要两张卡） |
+
+用例设计上踩到的一点：测试环境设了 `CUDA_CORE_LIMIT=30`，空闲 200 ms 后的第一次 launch 会走占空比路径，**按设计等 stream 跑完**；如果这次 launch 落在一个停住的 stream 上，就会一直等到 host 回调的 30 s 上限。[Z] 第一版因为在停住 S1 之后才创建 context（0.2–0.4 s），命中了这一点。不加载库时，host 回调执行期间 `cuCtxCreate`、`cuDevicePrimaryCtxRetain`、`cuMemAlloc` 都不会等它（`phb` 探针）；加载库时也不会等，等的是 launch 本身。修法：往停住的 stream 上 launch 之前，先在 `g_stream` 上做一次 launch 并同步（`keep_busy`），把需要时间的准备工作都放到停住之前。[W]、[X]、[Y] 也加上了同样的处理，避免碰运气。这是 main 上就有的限流行为，不是本节引入的。
+
+`probe_churn` 新增 `running_threads` 模式：反复创建线程，在各自的 per-thread stream 上 launch、同步后退出。running 表应稳定在回收阈值以内（容量不超过 128，记录数不超过 64）。`running_ctx` 和 `running_streams` 也加上了对 running 表的检查（分别应为 0 条和 1 条）。退出时打印的 table stats 增加了 running 表。
+
+#### 新用例在旧库上的对照
+
+| 用例 | fb3c64c（上一提交） | 本节 |
+|---|---|---|
+| [W] per-thread stream | FAIL | PASS |
+| [X] 同步后只按小 graph 计（stream / context 两个变体） | FAIL / FAIL | PASS / PASS |
+| [Y] 70 个 stream 都计入，第 71 个被拒 | FAIL | PASS（70/70 被追踪） |
+| [Z] 别的 context 当前、第二张卡 | FAIL | PASS（两部分都 OOM，launch 都没超过 2 s） |
+
+#### 回归（两张 RTX 2080 Ti，595.84，本节最终代码）
+
+| 项 | 结果 |
+|---|---|
+| `make test` | 32/32，跳过 3 个未安装的框架 |
+| `make test-probes` | rc=0。running 表在 churn 后：`running_ctx` 容量 32、0 条；`running_streams` 32、1 条；`running_threads` 128、64 条（回收阈值） |
+| `test_graph_mem_admission` 及 `_ptsz` 各 5 次 | 10/10，无失败，无驱动 API 报错 |
+| `probe_launch_device` 3 次（新库、main） | 都 rc=0。新库第 1 次限流生效（约 4 次/s），之后两次和 main 的 3 次都约 1000–2000 次/s，与 6.17 相同 |
+| TSan | 两个测试通过，**锁顺序/死锁报告 0**。data race 只在 main 已有的位置：令牌桶 `delta`、`rate_limiter`，`gap_begin`，以及 `loader.c` 里由跨进程文件锁保护的账本 |
+| 6 进程并发 3 轮 | 18 个都没有超时、没有崩溃；17 个 rc=1 是共用账本互相算进用量（6.16 起一直如此） |
+| `make test-gpu-sanitize` | 5/5，无报告 |
+| `make test-sanitize` | 22 项通过 |
+
+launch 开销（µs/launch，`exp/bench`，三轮，中位数）：
+
+| | 空 graph | alloc 节点，单 stream | alloc 节点，双 stream |
+|---|---|---|---|
+| 不加载库 | 0.28 | 0.63 | 0.94 |
+| main | 0.36 | 0.75 | 1.03 |
+| fb3c64c | 0.37 | 0.95 | 1.93 |
+| 本节 | 0.37 | 1.04 | 1.60 |
+
+没有 alloc 节点的 graph（PyTorch / vLLM 的 CUDA graph 用私有内存池，不走 alloc 节点）开销与 main 相同。带 alloc 节点时，单 stream 比 fb3c64c 多约 0.09 µs（准入时登记多一次选槽），双 stream 反而少约 0.3 µs；相对 main 分别多约 0.3 µs 和 0.6 µs，这是追踪运行中 graph 的代价（main 根本不追踪，会把别的 stream 上还在跑的 graph 的内存当成可复用）。
+
+#### 变异（每个变异只改一处，跑 `test_graph_mem_admission` 和 `test_alloc_async_accounting`）
+
+| 变异 | 抓到它的用例 |
+|---|---|
+| M11 held 不累加 | [O] |
+| M12 free 不释放 held | [O]、[W]、[X] |
+| M13 运行中从不算忙 | [P]、[V]、[W]、[Y]、[Z] |
+| M14 不建依赖 | [Q] |
+| M15 忽略自己持有的块 | [O] |
+| M16 忽略外来 free | [O]、[W]、[X] |
+| M19 轮询时不复查捕获 | [T] |
+| M20 异步分配后同步放回 | [A] |
+| M21 空闲间隙的同步放回锁内 | [P]、[T]（launch 等了 26.8 s） |
+| M22 begin 放回锁内 | [U]（31.5 s） |
+| M23 事件操作放回锁内 | [P]、[U]、[V]（31–32 s） |
+| M24 PENDING 不算忙 | [V] |
+| M27 不追踪 per-thread stream | [W] |
+| M28 同步不清理 | [X]（两个变体） |
+| M29 回收正在运行的记录 | [Y] |
+| M30 事件只在当前 context 创建 | [Z] 第一部分 |
+| M31 只追踪第一张卡 | [Z] 第二部分 |
+| M18 launch 后登记前不查捕获 | **没抓到**，见下 |
+| M25 忽略 `g_capture_beginning` | **没抓到**（竞争窗口太窄，6.17 起如此） |
+| M26 准入时不登记（改回 launch 后登记） | **没抓到**，见下 |
+
+M18：准入时登记之后，`graph_running_note` 只剩"准入时有捕获打开、没拿到票据"这一条路径。登记本身不查询事件，只有记录超过 64 条、需要回收空闲记录时才会 `cuEventQuery`，而 record、create 在别的线程捕获时是安全的（6.17 的表）。所以在 [R]、[S] 的条件下这个变异等价，保护只在超过 64 条记录时才起作用，保留。真正关键的守卫是 `graph_pool_available` 里的 `quiet`（遍历时会查询事件）。
+
+M26：准入时不登记，改回 launch 返回后由 `graph_running_note` 登记。[V] 在这个变异上、在 fb3c64c 上都通过（T3 被拒），所以 [V] 区分不了这一项。机器回收前最后几次对照（595，各 1 次）：
+
+| 配置 | fb3c64c | M26 | 本节 |
+|---|---|---|---|
+| [V] 原样（x = 余量/8，池 512 MiB） | T1 卡住，T3 被拒 | T1 卡住，T3 被拒 | T1 卡住，T3 被拒 |
+| x = 余量×10/16（池 2400 MiB） | 同上 | 同上 | 同上 |
+| 同上，且 s4 先跑过一次、事件已建好 | T1 卡住，T3 被拒 | **T1 没被挡**，T3 放行（T1 已跑完，合法复用） | **T1 没被挡**，同左 |
+
+结论：T1 "卡在 launch 里"卡的是库在驱动返回后为新 stream 调的 `cuEventCreate`（满队列时会阻塞，6.17 的边界 1），不是驱动本身；而 fb3c64c 和 M26 的 `note` 都是先登记、再建事件，所以 T3 都能看到 T1。事件建好以后，扩池 2.4 GiB 的 launch 在 595 上并没有被满队列挡住。因此：
+
+- 6.17 说的"驱动映射之后被挡住，窗口一直开着"在 595 上**没有被证实**；6.17 那次 T3 被放行（池到 4544 MiB）的情形，T1 当时卡在哪一步，现在无法复查。
+- 准入时登记仍然保留：它让"驱动返回到登记之间"的窗口和"两个 launch 同时准入、都看到空闲池"（6.15 的已知边界）都不复存在。代价是单 stream 带 alloc 节点的 launch 约多 0.09 µs。但**没有用例能证明它的必要性**，M26 不变红如实记为测试缺口。
+- 想真正测到这一项，需要让驱动在映射之后、返回之前停住（或在两次准入之间插入延迟的测试钩子），留待以后。
+
+测试机已在补这组对照后回收，上表每格只跑了 1 次。
+
+#### 合并前的自查与收敛（2026-11-12，代码只读；测试机已回收，以下改动**未上 GPU**）
+
+**逐项评估是否过度设计**。标准：上机有没有"旧代码失败、新代码通过"的对照；场景在真实负载里会不会出现；代价多大。
+
+| 机制 | 相对 main | 上机对照 | 场景 | 代价 | 结论 |
+|---|---|---|---|---|---|
+| 空闲池可复用（6.14） | 修误报 OOM | 有 | 一次捕获几十张 graph | 小 | 保留 |
+| graph 内按依赖复用（6.14） | 修误报 OOM | 有 | 带临时张量的 graph | 中（`graph_pool_sim.h`） | 保留 |
+| 未释放的块、别的 stream 上在跑的 graph（6.15） | 堵超限：每个 stream 停一张 graph，池能无限长 | 有（`hc`、[O]、[P]） | 多 stream 带 alloc 节点的 graph | 事件 + 槽 | 保留 |
+| 捕获期间不做事件调用（gate） | 修上一行引入的捕获破坏（901） | 有（[R]、[S]） | 多线程、有线程在捕获 | 读写锁 + 计数 | 保留。其中 begin 计数（M25）从未变红，只有几行，保留 |
+| 锁内不调会阻塞的驱动函数（fb3c64c） | 修本分支引入的三处挂起（main 上没有） | 有（[T]、[U]） | 满队列 + 多线程 | 锁外轮询 | 保留 |
+| 1. per-thread 默认 stream（借鉴外部项目） | 补少算（不追踪时与 main 相同） | 有（[W]） | 按 per-thread 编译的多线程程序 | 小（key + 线程序号） | 保留 |
+| 2. 同步后清记录（借鉴） | 消除本分支"同一 stream 保留最大 need"带来的多算（误报 OOM 方向） | 有（[X]） | 同一 stream 先大后小 | 小（3 个 hook，没有记录时一次 load） | 保留 |
+| 3. 不淘汰运行中的记录、所有设备、stream 所属 context 的事件（借鉴） | 补少算（与 main 相同） | 有（[Y]、[Z]） | 超过 32 个 stream、多卡 graph、跨 context launch | 中（复用已有 `slot_table`） | 保留 |
+| 准入时登记 | 关"驱动返回到登记"之间的窗口、两次准入同时看到空闲池 | **没有**（M26 不变红） | 多线程在不同 stream 上同时 launch | 中（票据、撤销） | 保留：机制上成立，且已在 595 全量回归里测过；拆掉反而要在没有 GPU 的情况下大改。如实记为测试缺口 |
+
+结论：没有需要抛弃的项。会被质疑的只有"准入时登记"，它的必要性没有用例证明。之前"整体回退 6003720"的提议是错的：那样会把借鉴来的 1、2、3 一起丢掉，而它们都有上机对照。
+
+**自查发现的三处问题，已修（共 18 行）**：
+
+| # | 问题 | 来源 | 修法 |
+|---|---|---|---|
+| 1 | launch 路径（`finish`、`cancel`）要拿 `g_graph_ev_lock`，而这把锁在 `cuEventDestroy` 期间一直持有。同一 context 有线程卡在满队列时，`cuEventDestroy` 会阻塞，别的 context、别的卡的 launch 也会被拖住。锁的注释写着"launch 不拿"，与代码不符 | fb3c64c 起就有，6003720 扩大了触发面 | 改成读写锁：销毁事件拿读锁，彼此不互斥；`forget_ctx`（context 销毁时）拿写锁。launch 不会再等一个无关的销毁，只有 context 销毁会等 |
+| 2 | 两个线程同时往同一 stream launch：X 登记、Y 登记、X 完成（序号对不上，丢掉事件）、Y 被拒，撤销时恢复成 X 当时的 PENDING。之后没有任何操作会清它，别的 stream 一直把它算作在用（多算） | 6003720 | 撤销时恢复出的是 PENDING 就改成 DONE。X 那次可能少算，方向符合"宁可少算" |
+| 3 | 销毁 stream 时，先调驱动销毁，再清记录。间隙里别的线程新建的同地址 stream 的记录会被清掉（少算） | fb3c64c 起就有 | 先清记录再销毁。销毁失败时只是丢一条记录（少算） |
+
+验证：本地编译无警告，`make check`、hook 一致性（80 条）通过，`make test-nogpu` 全部通过，`make test-sanitize` 除两项外都通过：`test_delta_gen_campaign`、`test_delta_gen_hard` 是 SM 限流的纯仿真，不链接这里改的代码，在这台无 GPU 的开发机上用 ASan 跑约 131 s，超过默认 120 s 时限；单独放宽时限重跑都 rc=0，没有 sanitizer 报告（测试机上 6.18 的 22 项都在时限内）。**没有上 GPU**：第 1 处可以从代码审查确认；第 2、3 处要稳定复现需要插入控制时序的测试钩子，没有做。下一次有 GPU 时，应至少重跑 `test_graph_mem_admission`（含 `_ptsz`）、`test-probes`、TSan。
+
+#### fork 安全与内存安全复查（2026-11-12，代码只读；**未上 GPU**）
+
+**fork**：本分支新增或改动的锁、表和计数在子进程里都有处理（`child_after_fork` → 各模块的 `*_reset_after_fork`）：
+
+| 状态 | 子进程里 |
+|---|---|
+| `g_capture_gate`（读写锁，写优先） | 从静态初始化器 memcpy，保留写优先属性 |
+| `g_capture_reg_lock`、`g_graph_cost_lock`、`g_graph_use_lock`、`g_pool_dev_lock`、`g_gap_lock[]` | `pthread_mutex_init` |
+| `g_graph_ev_lock`（本轮改成读写锁，默认属性） | `pthread_rwlock_init`，等价于静态初始化器 |
+| capture 登记表、cost 表、held 表、running 表、pool 表 | `slot_table_abandon`：只丢指针，不 free（父进程别的线程可能正在用，子进程里 free 不安全）；之后的 find、遍历在容量为 0 时直接返回，insert 会重新分配 |
+| `g_capture_beginning`、`g_graph_held_bytes`、`g_graph_held_count`、`g_graph_running_count`、`g_graph_streams` | 清零 |
+| 父进程的事件句柄 | 随表一起丢弃，不销毁（CUDA context 不跨 fork） |
+| `g_graph_running_seq`、`g_graph_submitted`、`g_graph_ctx_gen`、`g_graph_threads`、`t_graph_thread` | 不清。都是单调递增的计数，子进程表是空的，旧值不会匹配到任何记录；`t_graph_thread` 只在 fork 的那个线程里存活，号码仍然唯一 |
+
+fork 时别的线程正握着票据，或者正在锁外 record / 销毁事件：这些线程在子进程里不存在，相关状态随表一起丢弃。子进程处理函数里只有 init、memset、赋值，没有 malloc 和驱动调用。结论：不需要额外处理。
+
+**内存安全复查发现两处句柄复用问题，已修**：
+
+| # | 问题 | 来源 | 修法 |
+|---|---|---|---|
+| 4 | 回收空闲记录时，会把它的事件连同记录一起交给新 stream 的 launch，而那个事件可能属于**另一个 context**。从登记到锁外 record 之间（跨越驱动 launch），如果别的线程正当地销毁了那个 context，句柄就失效了；应用这时新建的事件可能拿到同一个地址，我们的 `cuEventRecord` 就会记到**应用的事件**上，悄悄改变应用的同步语义 | 6003720（回收） | 只接手属于当前 context 的事件；属于别的 context 的放进票据的 `dropped`，在锁外按代数检查销毁 |
+| 5 | `cuCtxDestroy`、primary reset 在驱动销毁 context **之后**才清记录、递增代数。这中间别的线程在锁外销毁该 context 的事件时，代数检查仍然通过，可能销毁应用新建的、地址相同的事件 | 7de2cf5 起（事件随 6.15 引入） | 把 `graph_use_forget_ctx` 挪到驱动调用**之前**：写锁先等正在进行的销毁结束，再递增代数，之后的销毁都会跳过。销毁失败时只丢记录、泄漏事件，都无害 |
+
+primary release 仍在驱动调用之后清理：调用前无法知道这是不是最后一次 release（只有最后一次才会重置 context），所以 #5 的窗口在这条路径上还在。窗口只有驱动返回到加写锁之间的几条指令，还要恰好有一个该 context 的事件在锁外被销毁，并且应用同时新建的事件拿到了同一个地址。记为已知边界。
+
+其余核对过、没有问题的：`need[]` 和 `g_graph_streams[]` 的下标都检查了 `0 <= dev < MAX_DEVICE_COUNT`；slot 表采用后移删除，代码里删除之后都不再用旧指针，回收那里删除后立即 insert，删除后 insert 一定能找到空位；票据（含 `saved`，约 200 字节）在栈上，不跨线程；撤销时按 key 重新查找，不用登记时的指针（中间可能扩容）。
+
+验证：本地编译无警告，`make check`、hook 一致性通过，`make test-nogpu` 全部通过，`make test-sanitize`（时限放宽到 300 s）22 项全部通过，没有 sanitizer 报告。#4、#5 都要构造跨线程的 context 销毁和句柄复用才能复现，没有用例覆盖；下一次有 GPU 时，应连同 88e48a7 一起重跑 `test_graph_mem_admission`（含 `_ptsz`）、`test-probes`（`running_ctx`、`ctx_multi`、`primary_release`）、TSan。
+
+#### 88e48a7、eb811f3 上机回归（2026-11-12，单卡 RTX 3080 10 GiB，驱动 595.84，CUDA 13.0 工具链）
+
+| 项 | 结果 |
+|---|---|
+| `make test` | 29/30，跳过 5 个未安装的框架。失败的是 `test_graph_mem_admission_ptsz` 的 [P]，见下 |
+| `make test-probes` | rc=0。各表回到 0；`capture_thread_exit`、`pool_get`、`running_streams` 的 1 和 `running_threads` 的 64 是预期；`running_ctx` 容量 32、0 条。fork 循环 60 次，0 挂起、0 异常。双卡模式（`exec_multi`、`ctx_multi`、`primary_release`）因单卡跳过 |
+| `test_graph_mem_admission` 及 `_ptsz` 各 5 次 | 10/10，无驱动 API 报错。[Z] 第二部分（第二张卡）跳过 |
+| TSan | 两个测试通过，**锁顺序/死锁报告 0**。data race 只在 main 已有的位置（令牌桶 `delta`、`rate_limiter`、`change_token`，`gap_begin`，`loader.c` 里由跨进程文件锁保护的账本） |
+| 6 进程并发 3 轮 | 18 个都没有超时、没有崩溃；12 个 rc=1 是共用账本互相算进用量 |
+| `make test-gpu-sanitize` | 5/5，无报告 |
+| `make test-sanitize` | 22 项通过 |
+
+launch 开销（µs/launch，三轮）：
+
+| | 空 graph | alloc 节点，单 stream | alloc 节点，双 stream |
+|---|---|---|---|
+| 不加载库 | 0.21 | 0.47 | 0.65 |
+| main | 0.27 | 0.54 | 0.74 |
+| 6003720 | 0.28 | 0.71 | 1.19 |
+| 本轮（eb811f3） | 0.28 | 0.75 | 1.14 |
+
+本轮的修复没有带来可测的开销（单 stream 多出的 0.04 µs 在 6003720 自身三轮 0.69–2.04 的波动之内）。
+
+**[P] 偶发失败**：`make test` 里那次失败后，两个变体又各重跑了 20 次（一次只跑一个，环境和 `make test` 相同）。第 8 次 `_ptsz` 的 [P] 再次失败：hold 住 `g_stream` 后在上面 launch a，再在另一个 stream 上 launch 同样大小的 b，期望 b 被拒，实际放行。这次运行用了 121 s，其他每次约 90 s，多出的 30 s 正是 `hold_stream` 的超时。原因：[P] 在 hold 之前刚做过 `trim_pool`（把约 2.6 GiB 的池放掉），偶尔超过 200 ms；于是 a 的 launch 成了闲置后的第一次 launch，走占空比路径，**按设计**一直等它的 stream 跑完，直到 30 s 后 hold 放手，a 已经跑完，b 放行是对的。这是测试的问题，不是库的问题，路径在 main 上就有，和 6.18 [Z] 第一版是同一回事。[U]、[V] 也会往刚 hold 住的 stream 上 launch，有同样的隐患（这次没撞上）。
+
+修法（只改测试）：新增 `keep_busy_on(stream)`，在当前 context 里建一个空 graph，在要 hold 的 stream 上 launch 并同步，[P] 的四次 hold 和 [U]、[V] 的 hold 之前都调用。[W]–[Z] 原来的 `keep_busy` 不变。修后的重复结果见下。
+
+修后重复：节点回收前跑完 20 次（`_ptsz` 10 次、普通 10 次交替），**20/20 通过**，原计划 40 次。每次约 90 s，只有第 3 次 `_ptsz` 用了 316 s（多出约 226 s），但通过了，输出里各段耗时（[T]、[U]、[V] 的 took）和别的轮次一样。机器回收前没来得及定位慢在哪里；没有 FAIL，也不是 30 s 超时的整数倍，只能记为未解释的现象，下一次有 GPU 时给用例加分段计时再看。
+
+#### 慢运行与偶发失败的根因；占空比路径的等待加上限（2026-11-12，单卡 RTX 3080，595.84）
+
+给每个用例加时间戳重复运行（`_ptsz` 和普通各若干次），并在输出停顿时用 gdb 抓栈。结论有三条：
+
+**1. [P] 每次多出约 30 s：驱动本身的行为，不是库的问题。** 卡在最后一步"同一个 exec 换一条 stream launch"：调用栈停在 libcuda 的 `cuGraphLaunch_ptsz` 内部（由 hook 调用真实驱动的那一行进入）。原生探针 `preplay` 重放 [P] 的全部 launch：不加载库时这一步 0.000 s；加载库、限额 4096 MiB 时 8.5 s（探针 hold 8 s）；限额 9000 MiB 时 0.1 s；**不加载库但跳过那次被拒的 b 时同样 8.5 s**。也就是说，池里没有空闲块时，驱动会把同一个带内存节点的 exec 在别的 stream 上的 launch 挡在主机侧，直到它上一次 launch 跑完。库按设计拒绝了 b，池里就少了一块，于是撞上了这条驱动行为。准入本身是对的（同一个 exec 的内存不算占用）。测试改为 0.3 s 后从另一个线程放开 hold。
+
+**2. [P] 的偶发失败、[Y] 偶尔多出 30/97 s：占空比路径无上限地等 stream（main 上就有）。** 算力限额小于 100 时，设备闲置超过 200 ms 后的第一次 launch，hook 会 record 开始和结束两个事件，并一直等结束事件完成才返回。结束事件要等**这条 stream 上 launch 之前排着的所有工作**都跑完。
+
+- [P]：hold 之前的 `trim_pool` 偶尔超过 200 ms，a 的 launch 走进这条路径，等满 hold 的 30 s，a 已经跑完，b 放行是对的（上一节的 `keep_busy_on` 规避了它）。
+- [Y]：70 条 stream 各挂一个 hold 回调，回调都要等到循环结束才放手（上限 30 s），驱动依次执行这些回调。限流的令牌桶让循环里某次 launch 睡眠超过 200 ms 时，下一次 launch 就被当成"闲置之后"，等自己的 stream，而那条 stream 前面的回调要一个个等满 30 s，所以耗时是 30 s 的倍数。单独的探针 `yplay`（同样 70 条 stream）没有复现，令牌桶状态取决于前面跑过的用例；结论依据是耗时是 30 s 的倍数，以及只有这条路径会等 stream。附带说明：被限流时，令牌桶自己的睡眠也会让下一次 launch 被当成"闲置之后"。
+
+真实负载下的后果（`gapdead` 探针，限额 30）：
+
+| stream 上排着的工作 | 不加载库 | main、修复前的本分支 |
+|---|---|---|
+| host 回调，等本线程 launch 之后才设置的标志（回调自带 20 s 上限） | launch 立即返回 | 21 s |
+| `cuStreamWaitValue32`，等本线程 launch 之后才写的主机内存 | 立即返回 | **永久死锁**（60 s 超时被杀） |
+
+gdb：`cuGraphLaunch` → `gap_end` → 轮询（main 上是 `cuEventSynchronize`）。所有 kernel launch hook 和 graph launch 都走这里。会触发的写法：`cuStreamWaitValue` 做主机-GPU 同步、外部信号量（Vulkan/DX 互操作）、host 回调等待应用线程、kernel 轮询主机在 launch 之后才写的标志。
+
+**修复**：`gap_end` 最多等 1 s（`GAP_WAIT_MAX_NS`），到点还没完成就放弃这次测量，不注入睡眠，照常记最后 launch 时间。代价是 GPU 时间超过 1 s 的 launch 拿不到这一次的占空比睡眠；这样长的 kernel 本来就由约 100 ms 一次的 NVML 采样控制，令牌桶不受影响。上限取 1 s：不至于漏掉正常 kernel 的测量（占空比睡眠本身封顶 500 ms），又把死锁变成一次最多 1 s 的延迟。
+
+**新用例 `test_gap_wait_bounded`**（driver API，随 `make test` 跑）：闲置 300 ms 后，stream 上排一个 `cuStreamWaitValue32`，等本线程在 launch 返回后才写的主机内存，graph launch 和 kernel launch（PTX JIT 的空 kernel）各一次；10 s 后看门狗写入，旧库判失败而不是挂死；0.5 s 内返回说明 gap 路径没有生效，判 SKIP。
+
+| | 旧库（eb811f3） | 新库 |
+|---|---|---|
+| graph launch | 10.0 s，FAIL | 1.0 s，PASS |
+| kernel launch | 10.0 s，FAIL | 1.0 s，PASS |
+| `gapdead waitvalue` | 永久死锁 | 1.0 s 返回 |
+| 不设算力限额 | — | SKIP |
+
+**3. [J] 每次约 47 s**：300 次 context 创建销毁本身的耗时，不是卡住。
+
+**修复后的重复**（新库，[P] 改为 0.3 s 放开）：`_ptsz` 和普通各 8 次，**16/16 通过**，每次 58–62 s（之前 90–316 s）。[Y] 16 次里 12 次 0.1–0.4 s，4 次 1.3–1.4 s：后者正是撞上占空比路径、被 1 s 上限截住，印证了上面对 [Y] 的判断。[P] 1.3–1.9 s。
+
+**回归（新库）**：`make test` 31/31 通过（跳过 5 个未安装的框架），含 `test_gap_wait_bounded` 和原有的占空比用例 `test_runtime_launch_gap`；`make test-probes` rc=0，fork 循环 60 次 0 挂起，graph 限流探针与之前一致（约 2.6 万次/s）；`make test-gpu-sanitize` 5/5。

@@ -2549,6 +2549,28 @@ void free_gpu_virt_memory_by_graph(CUgraph graph) {
   retire_capture_records(&sweep);
 }
 
+struct captured_sum {
+  int host_index;
+  size_t total;
+};
+
+/* Visits every record and retires none: see vmem_table_retire_if(). */
+static int add_captured(const memory_node_t *node, void *arg) {
+  struct captured_sum *sum = (struct captured_sum *)arg;
+  if (node->type == MEMORY_TYPE_CAPTURE && node->host_index == sum->host_index) {
+    sum->total += node->bytes;
+  }
+  return 0;
+}
+
+size_t get_captured_gpu_virt_memory(int host_index) {
+  struct captured_sum sum = {.host_index = host_index, .total = 0};
+  pthread_mutex_lock(&g_memory_node_lock);
+  vmem_table_retire_if(&g_vmem_table, add_captured, &sum);
+  pthread_mutex_unlock(&g_memory_node_lock);
+  return sum.total;
+}
+
 void free_gpu_virt_memory_by_ctx(CUcontext ctx) {
   struct capture_sweep_ctx sweep = {.graph = NULL, .ctx = ctx, .totals = {0}, .any = 0};
   if (ctx == NULL) return;

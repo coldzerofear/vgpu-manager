@@ -41,8 +41,8 @@ limitations under the License.
  * where 80 such OOM retries happen).
  *
  * Our exposure to that was narrower, not absent: the table is only fed by the
- * oversold UVA fallback, explicit cuMemAllocManaged, graph-capture accounting
- * and the cuMemAllocAsync bridge -- so a PyTorch workload that uses none of
+ * oversold UVA fallback, explicit cuMemAllocManaged and graph-capture
+ * accounting -- so a PyTorch workload that uses none of
  * those keeps M at zero or a small transient. The quadratic behaviour was
  * real but hidden behind that usage, which is a bad thing to rely on: bucket
  * the lookups and the hazard is gone for every path at once, present and

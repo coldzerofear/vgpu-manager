@@ -38,6 +38,7 @@
 #include "include/array_size.h"
 #include "include/cgroup_match.h"
 #include "include/slot_table.h"
+#include "include/graph_pool_sim.h"
 
 #define DEVICE_BATCH_SIZE        4
 
@@ -223,6 +224,16 @@ static const struct timespec g_cycle = {
  * Design: docs/sm_core_limit_gap_throttle_design.md. */
 #define GAP_THRESHOLD_NS   (200LL * 1000000LL)   /* idle > 200ms => a "gap"   */
 #define GAP_MAX_SLEEP_MS   500.0                 /* clamp pathological spikes */
+#define GAP_POLL_MIN_US    20                    /* gap_end polls the end marker  */
+#define GAP_POLL_MAX_US    512                   /* from 20 us, doubling to this */
+/* How long gap_end waits for the end marker. It completes only once everything queued
+ * on the stream before the launch has run too, and that may wait on the host -- a
+ * cuStreamWaitValue32 on host memory, a host function waiting on the application, an
+ * external semaphore -- for something this thread does only after its launch returns:
+ * waiting without end hung such a launch for good (docs 6.18). A launch whose marker is
+ * not done by then is not measured, so gets no duty-cycle sleep; the watcher, sampling
+ * every ~100 ms, holds kernels that long to the limit anyway. */
+#define GAP_WAIT_MAX_NS    (1000LL * 1000000LL)
 
 /* Per-device thread mutex: protects the process-private cuEvent pair and the
  * g_gap_dc snapshot from concurrent launcher threads. NOT a cross-process
@@ -273,12 +284,14 @@ static unsigned int g_share_log_tick[MAX_DEVICE_COUNT] = {0};
  * resetting it would just multiply-register on every fork generation. */
 static void capture_reg_reset_after_fork(void);
 static void pool_dev_reset_after_fork(void);
+static void graph_use_reset_after_fork(void);
 
 void child_after_fork(void) {
   g_init_set = (pthread_once_t)PTHREAD_ONCE_INIT;
   /* Captures do not cross fork, and the registry lock may be held mid-update. */
   capture_reg_reset_after_fork();
   pool_dev_reset_after_fork();   /* pool handles do not cross fork either */
+  graph_use_reset_after_fork();  /* nor blocks held from the graph pools, nor events */
   /* Drop the inherited sampling-lock descriptor. An OFD lock belongs to the
    * open file description, which fork SHARES -- so keeping this fd would
    * either make parent and child both think they own sampling (once
@@ -344,11 +357,42 @@ static int load_limited_memory_view(CUdevice device, int *host_index,
                                     int *lock_fd, size_t *used,
                                     size_t *vmem_used);
 
-static memory_path_t prepare_memory_allocation(CUdevice device,
-                                               size_t request_size,
-                                               int allow_uva,
-                                               int *host_index,
-                                               int *lock_fd) {
+/* What of a graph allocation the device's idle graph pool would hold. NVML reports the
+ * pool, and a captured or hand-built allocation takes its memory from it when the graph
+ * is mapped, so counting it in full refuses what is already there: capture a graph, run
+ * it, capture another of the same size. The pool holds this allocation and the ones
+ * charged to open captures, as far as it goes, less the blocks graphs left allocated.
+ * Their overlap with the pool, if they were to run at once, is for graph_mem_admit() to
+ * check. */
+static size_t graph_held_on(int dev);
+static int stream_is_capturing(CUstream stream, int ptsz);
+
+static size_t graph_pool_absorbs(CUdevice device, int host_index, size_t request_size) {
+  cuuint64_t reserved = 0;
+  if (!CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceGetGraphMemAttribute) ||
+      CUDA_INTERNAL_CHECK(cuda_library_entry, cuDeviceGetGraphMemAttribute, device,
+                          CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT, &reserved) != CUDA_SUCCESS ||
+      reserved == 0) {
+    return 0;
+  }
+  size_t held = graph_held_on((int)device);   /* blocks graphs left allocated stay theirs */
+  size_t lendable = (size_t)reserved > held ? (size_t)reserved - held : 0;
+  size_t wanted = get_captured_gpu_virt_memory(host_index);
+  wanted = wanted > SIZE_MAX - request_size ? SIZE_MAX : wanted + request_size;
+  return wanted < lendable ? wanted : lendable;
+}
+
+/* in_graph: 0 a plain allocation, 1 one a graph will hold (an alloc node), 2 one on
+ * stream, which a graph will hold if the stream is in capture. Whether it is, and what
+ * the pool absorbs, is only asked when the allocation would not fit without it. */
+static memory_path_t prepare_allocation(CUdevice device,
+                                        size_t request_size,
+                                        int allow_uva,
+                                        int in_graph,
+                                        CUstream stream,
+                                        int ptsz,
+                                        int *host_index,
+                                        int *lock_fd) {
   size_t used = 0;
   size_t vmem_used = 0;
 
@@ -360,13 +404,22 @@ static memory_path_t prepare_memory_allocation(CUdevice device,
    * memory_oversold and real_memory must be read as a consistent set, or
    * OOM/UVA routing could mix a new total with an old oversold flag. */
   device_t d = get_device_snapshot(*host_index);
-  if ((used + vmem_used + request_size) > d.total_memory) {
+  size_t absorbed = 0;
+  size_t wanted = used + vmem_used + request_size;
+  if (wanted > d.total_memory && in_graph != 0 &&
+      (in_graph == 1 || stream_is_capturing(stream, ptsz))) {
+    absorbed = graph_pool_absorbs(device, *host_index, request_size);
+    wanted = wanted > absorbed ? wanted - absorbed : 0;
+  }
+  if (wanted > d.total_memory) {
     // It is necessary to check and clean up virtual memory usage
     if (vmem_used > 0 && (used + request_size) <= d.total_memory) {
       check_cleanup_vmem_nodes_by_device(*host_index);
       get_used_gpu_virt_memory((void *)&vmem_used, *host_index);
+      wanted = used + vmem_used + request_size;
+      wanted = wanted > absorbed ? wanted - absorbed : 0;
     }
-    if ((used + vmem_used + request_size) > d.total_memory) {
+    if (wanted > d.total_memory) {
       return MEMORY_PATH_OOM;
     }
   }
@@ -382,6 +435,14 @@ static memory_path_t prepare_memory_allocation(CUdevice device,
   }
 
   return MEMORY_PATH_GPU;
+}
+
+static memory_path_t prepare_memory_allocation(CUdevice device,
+                                               size_t request_size,
+                                               int allow_uva,
+                                               int *host_index,
+                                               int *lock_fd) {
+  return prepare_allocation(device, request_size, allow_uva, 0, NULL, 0, host_index, lock_fd);
 }
 
 static int load_limited_memory_view(CUdevice device,
@@ -569,6 +630,9 @@ CUresult cuMemGetDefaultMemPool(CUmemoryPool *pool_out, CUmemLocation *location,
 CUresult cuMemGetMemPool(CUmemoryPool *pool, CUmemLocation *location, CUmemAllocationType type);
 CUresult cuStreamDestroy_v2(CUstream hStream);
 CUresult cuStreamDestroy(CUstream hStream);
+CUresult cuStreamSynchronize(CUstream hStream);
+CUresult cuStreamSynchronize_ptsz(CUstream hStream);
+CUresult cuCtxSynchronize(void);
 CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
                                  CUmemoryPool pool, CUstream hStream);
 CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
@@ -658,6 +722,9 @@ entry_t cuda_hooks_entry[] = {
     {.name = "cuMemGetMemPool", .fn_ptr = cuMemGetMemPool},
     {.name = "cuStreamDestroy_v2", .fn_ptr = cuStreamDestroy_v2},
     {.name = "cuStreamDestroy", .fn_ptr = cuStreamDestroy},
+    {.name = "cuStreamSynchronize", .fn_ptr = cuStreamSynchronize},
+    {.name = "cuStreamSynchronize_ptsz", .fn_ptr = cuStreamSynchronize_ptsz},
+    {.name = "cuCtxSynchronize", .fn_ptr = cuCtxSynchronize},
     {.name = "cuMemAllocFromPoolAsync", .fn_ptr = cuMemAllocFromPoolAsync},
     {.name = "cuMemAllocFromPoolAsync_ptsz", .fn_ptr = cuMemAllocFromPoolAsync_ptsz},
     {.name = "cuGraphAddMemAllocNode", .fn_ptr = cuGraphAddMemAllocNode},
@@ -1986,6 +2053,41 @@ typedef struct {
 
 static slot_table_t g_capture_reg = SLOT_TABLE_INIT(capture_reg_t, 64, 1u << 16);
 static pthread_mutex_t g_capture_reg_lock = PTHREAD_MUTEX_INITIALIZER;
+/* A capture begun that the registry could not take (no graph to key it by, or no room):
+ * from then on the process counts as capturing, for capture_reg_any(). */
+static int g_capture_untracked;
+/* cuEventQuery and cuEventSynchronize while another thread captures in global mode break
+ * that capture (900, and 901 at its end; driver 595), so "is a capture open? then this
+ * event call" must not interleave with a capture beginning. Held for reading across the
+ * two; held for writing only to count a capture as beginning (g_capture_beginning), from
+ * before the driver begins it until it is registered.
+ * Nothing that can block is ever called under it, nor under the locks taken inside it:
+ * with another thread blocked enqueuing on a full stream, cuStreamBeginCapture,
+ * cuEventCreate / Destroy, cuEventRecord on that stream and cuMemAlloc all wait until
+ * the stream drains (driver 595), and if what drains it is a launch waiting here, that
+ * is forever (docs 6.17). cuEventQuery and cuEventElapsedTime return.
+ * Writers first, where glibc offers it: a stream of launches must not hold a capture off. */
+#ifdef PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP
+#define CAPTURE_GATE_INITIALIZER PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP
+#else
+#define CAPTURE_GATE_INITIALIZER PTHREAD_RWLOCK_INITIALIZER
+#endif
+static pthread_rwlock_t g_capture_gate = CAPTURE_GATE_INITIALIZER;
+/* Captures between capture_announce() and capture_settled(). */
+static int g_capture_beginning;
+
+/* Before the driver begins a capture: from here on capture_reg_any() is 1, and any event
+ * call made under the gate before it has returned. */
+static void capture_announce(void) {
+  pthread_rwlock_wrlock(&g_capture_gate);
+  __atomic_add_fetch(&g_capture_beginning, 1, __ATOMIC_RELAXED);
+  pthread_rwlock_unlock(&g_capture_gate);
+}
+
+/* After the driver's answer, and the registration if it began one. */
+static void capture_settled(void) {
+  __atomic_sub_fetch(&g_capture_beginning, 1, __ATOMIC_RELEASE);
+}
 
 /* NULL means the default stream of the family: per-thread for _ptsz entries,
  * legacy otherwise, spelled out as its special handle since 0 is no key. Each context
@@ -2008,7 +2110,10 @@ static void capture_reg_key(CUstream stream, int ptsz, uintptr_t *key, uintptr_t
  * ending it, most likely. Nothing else would retire its charges now that its key
  * is taken. */
 static void capture_reg_begin(CUstream stream, int ptsz, CUgraph graph, const capture_origin_t *origin) {
-  if (graph == NULL) return;
+  if (graph == NULL) {
+    __atomic_store_n(&g_capture_untracked, 1, __ATOMIC_RELAXED);
+    return;
+  }
   CUcontext ctx = NULL;
   if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetCurrent, &ctx) != CUDA_SUCCESS) {
     ctx = NULL;
@@ -2026,6 +2131,7 @@ static void capture_reg_begin(CUstream stream, int ptsz, CUgraph graph, const ca
     e->stream_ctx = origin->ctx;
     e->stream_dev = origin->dev;
   } else {
+    __atomic_store_n(&g_capture_untracked, 1, __ATOMIC_RELAXED);
     LOGGER(VERBOSE, "capture registry full, graph %p falls back to lookup at end of capture",
            (void *)graph);
   }
@@ -2043,6 +2149,19 @@ static CUgraph capture_reg_graph(CUstream stream, int ptsz) {
   if (e != NULL) graph = e->graph;
   pthread_mutex_unlock(&g_capture_reg_lock);
   return graph;
+}
+
+/* Whether any capture may be open in the process. A record left by a thread that exited
+ * mid-capture, or a capture the registry could not take, keeps it 1: what depends on it
+ * then does less, never more. */
+static int capture_reg_any(void) {
+  if (__atomic_load_n(&g_capture_untracked, __ATOMIC_RELAXED)) return 1;
+  /* Acquire: having seen the count drop, the registration made before it is seen too. */
+  if (__atomic_load_n(&g_capture_beginning, __ATOMIC_ACQUIRE)) return 1;
+  pthread_mutex_lock(&g_capture_reg_lock);
+  int any = g_capture_reg.count != 0;
+  pthread_mutex_unlock(&g_capture_reg_lock);
+  return any;
 }
 
 /* The device and context of a stream about to begin a capture. The last moment
@@ -2089,9 +2208,20 @@ static CUresult async_alloc_device(CUstream stream, int ptsz, CUdevice *device) 
   return CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, device);
 }
 
+/* An allocation on a stream in capture comes out of the graph pool: graph_pool_absorbs(). */
+static memory_path_t prepare_async_allocation(CUdevice device, size_t request_size, int allow_uva,
+                                              CUstream stream, int ptsz, int *host_index, int *lock_fd) {
+  return prepare_allocation(device, request_size, allow_uva, 2, stream, ptsz, host_index, lock_fd);
+}
+
 static void capture_reg_reset_after_fork(void) {
   slot_table_abandon(&g_capture_reg);
   pthread_mutex_init(&g_capture_reg_lock, NULL);
+  g_capture_untracked = 0;
+  g_capture_beginning = 0;   /* only the forking thread lives on, and it was not beginning one */
+  /* Copied from the initializer, so that writers still come first in the child. */
+  static const pthread_rwlock_t fresh_gate = CAPTURE_GATE_INITIALIZER;
+  memcpy(&g_capture_gate, &fresh_gate, sizeof(g_capture_gate));
 }
 
 static int capture_reg_of_graph(void *cell, void *arg) {
@@ -2165,9 +2295,11 @@ static int gap_begin(int host_index, CUstream stream) {
     return 0;
   }
 
-  if (stream_is_capturing(stream, __CUDA_API_IS_PTSZ)) {
+  if (stream_is_capturing(stream, __CUDA_API_IS_PTSZ) || capture_reg_any()) {
     /* capturing (or query failed) -> don't inject events; if the symbol is
-     * absent the driver predates CUDA graphs, so there is nothing to guard. */
+     * absent the driver predates CUDA graphs, so there is nothing to guard.
+     * Nor with a capture open on another thread: gap_end's cuEventSynchronize
+     * would break it if global (900, and 901 at its end; RTX 3080, 595). */
     pthread_mutex_unlock(&g_gap_lock[host_index]);
     return 0;
   }
@@ -2186,15 +2318,50 @@ static int gap_begin(int host_index, CUstream stream) {
  * Always stamps last-launch and releases the lock. delay = gpu_ms*(100/dc-1). */
 static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
   uint64_t gpu_us = 0, sleep_us = 0;   /* stay 0 if measurement fails */
-  if (launch_ret == CUDA_SUCCESS &&
+  float gpu_ms = 0.0f;
+  int measured = 0;
+  /* A capture may have begun on another thread since gap_begin, and cuEventQuery /
+   * cuEventSynchronize would break it if global (900, and 901 at its end). So the end
+   * marker is waited for by polling, for GAP_WAIT_MAX_NS at most, each query with
+   * g_capture_gate held for reading and the check repeated; a capture beginning gives
+   * the measurement up. The gate is
+   * never held while waiting: a capture beginning on another thread would wait on this
+   * stream, and with writers first every launch behind it too -- forever, if the stream
+   * waits on one of them (docs 6.17). Nor across the record, which waits while another
+   * thread is blocked enqueuing on this stream; it does not disturb another thread's
+   * capture, and the check before it only spares the work when the result could not be
+   * read. The elapsed time comes from the events, so the polling does not change it;
+   * the sleep comes after, unlocked. g_gap_lock stays held throughout, as before:
+   * others only try it. */
+  if (launch_ret == CUDA_SUCCESS && !capture_reg_any() &&
       CUDA_INTERNAL_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuEventRecord),
-                         g_gap_end[host_index], stream) == CUDA_SUCCESS &&
-      CUDA_INTERNAL_CALL(cuda_library_entry, cuEventSynchronize,
-                         g_gap_end[host_index]) == CUDA_SUCCESS) {
-    float gpu_ms = 0.0f;
-    if (CUDA_INTERNAL_CALL(cuda_library_entry, cuEventElapsedTime, &gpu_ms,
-                           g_gap_start[host_index], g_gap_end[host_index]) == CUDA_SUCCESS
-        && gpu_ms > 0.0f) {
+                         g_gap_end[host_index], stream) == CUDA_SUCCESS) {
+    useconds_t backoff_us = GAP_POLL_MIN_US;
+    int64_t deadline = monotonic_ns() + GAP_WAIT_MAX_NS;
+    for (;;) {
+      CUresult q = CUDA_ERROR_UNKNOWN;
+      pthread_rwlock_rdlock(&g_capture_gate);
+      if (!capture_reg_any()) {
+        q = CUDA_INTERNAL_CALL(cuda_library_entry, cuEventQuery, g_gap_end[host_index]);
+        if (q == CUDA_SUCCESS &&
+            CUDA_INTERNAL_CALL(cuda_library_entry, cuEventElapsedTime, &gpu_ms,
+                               g_gap_start[host_index], g_gap_end[host_index]) == CUDA_SUCCESS) {
+          measured = 1;
+        }
+      }
+      pthread_rwlock_unlock(&g_capture_gate);
+      if (q != CUDA_ERROR_NOT_READY) break;   /* done, failed, or a capture began */
+      if (monotonic_ns() >= deadline) {
+        LOGGER(VERBOSE, "gap throttle: launch on device %d not done after %lld ms, not measured",
+               host_index, GAP_WAIT_MAX_NS / 1000000LL);
+        break;
+      }
+      usleep(backoff_us);
+      if (backoff_us < GAP_POLL_MAX_US) backoff_us *= 2;
+    }
+  }
+  if (measured) {
+    if (gpu_ms > 0.0f) {
       int dc = g_gap_dc[host_index];
       double sleep_ms = (double)gpu_ms * (100.0 / (double)dc - 1.0);
       if (sleep_ms > GAP_MAX_SLEEP_MS) sleep_ms = GAP_MAX_SLEEP_MS;
@@ -3760,7 +3927,7 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  path = prepare_memory_allocation(device, request_size, 1, &host_index, &lock_fd);
+  path = prepare_async_allocation(device, request_size, 1, hStream, __CUDA_API_IS_PTSZ, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
@@ -3783,17 +3950,9 @@ ALLOCATED_TO_GPU:
       goto DONE;
     }
   } else if (ret == CUDA_SUCCESS && lock_fd >= 0) {
-    if (!stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
-      /* Bridge the allocation into the shared view before the lock is dropped,
-       * so a concurrent allocator counts it while it is still in flight. */
-      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_ASYNC_BRIDGE, host_index);
-      unlock_gpu_device(lock_fd);
-      lock_fd = -1;
-      /* Switching from capture to synchronous operation, off the device lock. */
-      CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
-      /* Release internal accounting only once NVML is guaranteed to see it. */
-      free_gpu_virt_memory(*dptr);
-    } else {
+    /* Outside a capture nothing is charged: the driver has the memory by the time the
+     * call returns, however busy the stream, and NVML reports it (docs 6.16). */
+    if (stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
       /* Charge the capture so that several allocations inside one capture
        * accumulate against the limit. Chargeable only while the owning graph is
        * known, because that is what lets cuStreamEndCapture retire it. */
@@ -3843,7 +4002,7 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  path = prepare_memory_allocation(device, request_size, 1, &host_index, &lock_fd);
+  path = prepare_async_allocation(device, request_size, 1, hStream, 1, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
@@ -3865,17 +4024,9 @@ ALLOCATED_TO_GPU:
       goto DONE;
     }
   } else if (ret == CUDA_SUCCESS && lock_fd >= 0) {
-    if (!stream_is_capturing(hStream, 1)) {
-      /* Bridge the allocation into the shared view before the lock is dropped,
-       * so a concurrent allocator counts it while it is still in flight. */
-      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_ASYNC_BRIDGE, host_index);
-      unlock_gpu_device(lock_fd);
-      lock_fd = -1;
-      /* Switching from capture to synchronous operation, off the device lock. */
-      CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
-      /* Release internal accounting only once NVML is guaranteed to see it. */
-      free_gpu_virt_memory(*dptr);
-    } else {
+    /* Outside a capture nothing is charged: the driver has the memory by the time the
+     * call returns, however busy the stream, and NVML reports it (docs 6.16). */
+    if (stream_is_capturing(hStream, 1)) {
       /* Charge the capture so that several allocations inside one capture
        * accumulate against the limit. Chargeable only while the owning graph is
        * known, because that is what lets cuStreamEndCapture retire it. */
@@ -4532,16 +4683,220 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
  * cuMemAlloc's device is. */
 typedef struct {
   int dev;          /* CUDA ordinal, 0 <= dev < MAX_DEVICE_COUNT */
-  size_t need;      /* bytes of its alloc nodes, saturating */
+  size_t need;      /* what they take from the pool: include/graph_pool_sim.h */
+  size_t kept;      /* of which allocated and never freed by the graph: held after a launch */
+  size_t own_held;  /* of those, held now (graph_cost_lookup): the exec relaunched gets them back */
 } graph_mem_dev_t;
 typedef struct {
   int n;                                  /* entries in use in d[] */
+  int side;                               /* its record has a graph_side_t */
   graph_mem_dev_t d[MAX_DEVICE_COUNT];    /* one per device, distinct dev */
 } graph_mem_t;
 
-/* Adds bytes on dev, merging with the device's entry. Devices outside the
- * library's range are ignored, as cuMemAlloc on them is not limited either. */
-static void graph_mem_add(graph_mem_t *mem, int dev, size_t bytes) {
+/* What a launch changes in what the process holds from the pools: the allocations the
+ * graph leaves allocated, and the ones from elsewhere its free nodes give back. Only
+ * graphs that have either carry one. */
+typedef struct {
+  CUdeviceptr dptr;
+  size_t bytes;
+  int dev;
+} graph_kept_t;
+typedef struct {
+  size_t nkept;
+  graph_kept_t *kept;
+  size_t nforeign;
+  CUdeviceptr *foreign;
+} graph_side_t;
+
+static void graph_side_free(graph_side_t *side) {
+  if (side == NULL) return;
+  free(side->kept);
+  free(side->foreign);
+  free(side);
+}
+
+/* Which nodes depend on which, for the pool model: per node, a bit for each free node
+ * it depends on, directly or not. Built for the top-level graph when it frees
+ * anything; when the bit matrix would pass GRAPH_DEPS_MAX_WORDS 64-bit words (8 MiB),
+ * the model goes by node order alone. */
+#define GRAPH_DEPS_MAX_WORDS ((size_t)1 << 20)
+typedef struct {
+  size_t n, words;
+  int *free_index;      /* per node: its number among the free nodes, -1 for others */
+  uint64_t *bits;       /* n rows of `words` */
+} graph_deps_t;
+
+static int graph_deps_depends(void *ctx, int earlier, int later) {
+  const graph_deps_t *d = (const graph_deps_t *)ctx;
+  if (earlier < 0 || later < 0 || (size_t)earlier >= d->n || (size_t)later >= d->n) return 0;
+  int f = d->free_index[earlier];
+  if (f < 0) return 0;
+  return (int)((d->bits[(size_t)later * d->words + (size_t)f / 64] >> ((unsigned)f % 64)) & 1);
+}
+
+typedef struct {
+  CUgraphNode node;
+  size_t index;
+} graph_node_index_t;
+
+static int graph_node_index_cmp(const void *a, const void *b) {
+  uintptr_t x = (uintptr_t)((const graph_node_index_t *)a)->node;
+  uintptr_t y = (uintptr_t)((const graph_node_index_t *)b)->node;
+  return x < y ? -1 : x > y;
+}
+
+static long graph_node_lookup(const graph_node_index_t *sorted, size_t n, CUgraphNode node) {
+  size_t lo = 0, hi = n;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if ((uintptr_t)sorted[mid].node < (uintptr_t)node) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo < n && sorted[lo].node == node ? (long)sorted[lo].index : -1;
+}
+
+/* One entry point's go at the graph's edges. */
+static int graph_edges_with(CUgraph graph, int v2, CUgraphNode **from, CUgraphNode **to, size_t *nedges) {
+  size_t count = 0;
+  CUresult r = v2 ? CUDA_INTERNAL_CALL(cuda_library_entry, cuGraphGetEdges_v2, graph, NULL, NULL, NULL, &count)
+                  : CUDA_INTERNAL_CALL(cuda_library_entry, cuGraphGetEdges, graph, NULL, NULL, &count);
+  if (r != CUDA_SUCCESS) return 0;
+  if (count == 0) return 1;
+  *from = (CUgraphNode *)malloc(count * sizeof(**from));
+  *to = (CUgraphNode *)malloc(count * sizeof(**to));
+  CUgraphEdgeData *data = v2 ? (CUgraphEdgeData *)malloc(count * sizeof(*data)) : NULL;
+  size_t got = count;
+  if (*from == NULL || *to == NULL || (v2 && data == NULL)) {
+    r = CUDA_ERROR_OUT_OF_MEMORY;
+  } else if (v2) {
+    r = CUDA_INTERNAL_CALL(cuda_library_entry, cuGraphGetEdges_v2, graph, *from, *to, data, &got);
+  } else {
+    r = CUDA_INTERNAL_CALL(cuda_library_entry, cuGraphGetEdges, graph, *from, *to, &got);
+  }
+  free(data);
+  if (r != CUDA_SUCCESS || got > count) {
+    free(*from);
+    free(*to);
+    *from = *to = NULL;
+    return 0;
+  }
+  *nedges = got;
+  return 1;
+}
+
+/* The graph's edges, from[i] -> to[i], *nedges of them. The original entry point first,
+ * which refuses with CUDA_ERROR_LOSSY_QUERY a graph with non-default edge data; _v2
+ * then. 0 if they could not be had, which is not the same as a graph without edges. */
+static int graph_edges(CUgraph graph, CUgraphNode **from, CUgraphNode **to, size_t *nedges) {
+  *from = *to = NULL;
+  *nedges = 0;
+  if (CUDA_FIND_ENTRY(cuda_library_entry, cuGraphGetEdges) && graph_edges_with(graph, 0, from, to, nedges)) {
+    return 1;
+  }
+  return CUDA_FIND_ENTRY(cuda_library_entry, cuGraphGetEdges_v2) && graph_edges_with(graph, 1, from, to, nedges);
+}
+
+/* 0 if the dependencies could not be worked out: the model then goes by node order. */
+static int graph_deps_build(CUgraph graph, const CUgraphNode *nodes, const CUgraphNodeType *types,
+                            size_t n, graph_deps_t *deps) {
+  memset(deps, 0, sizeof(*deps));
+  size_t nfree = 0;
+  for (size_t i = 0; i < n; i++) nfree += types[i] == CU_GRAPH_NODE_TYPE_MEM_FREE;
+  if (nfree == 0) return 0;
+  size_t words = (nfree + 63) / 64;
+  if (n > GRAPH_DEPS_MAX_WORDS / words) return 0;
+  CUgraphNode *from = NULL, *to = NULL;
+  size_t nedges = 0;
+  if (!graph_edges(graph, &from, &to, &nedges)) return 0;
+  graph_node_index_t *sorted = (graph_node_index_t *)malloc(n * sizeof(*sorted));
+  size_t *indeg = (size_t *)calloc(n, sizeof(*indeg));
+  size_t *first = (size_t *)calloc(n + 1, sizeof(*first));   /* CSR by source */
+  size_t *succ = (size_t *)malloc((nedges ? nedges : 1) * sizeof(*succ));
+  size_t *queue = (size_t *)malloc(n * sizeof(*queue));
+  long *src = (long *)malloc((nedges ? nedges : 1) * sizeof(*src));
+  long *dst = (long *)malloc((nedges ? nedges : 1) * sizeof(*dst));
+  deps->free_index = (int *)malloc(n * sizeof(*deps->free_index));
+  deps->bits = (uint64_t *)calloc(n * words, sizeof(*deps->bits));
+  int ok = sorted && indeg && first && succ && queue && src && dst && deps->free_index && deps->bits;
+  size_t done = 0;
+  if (ok) {
+    for (size_t i = 0; i < n; i++) {
+      sorted[i].node = nodes[i];
+      sorted[i].index = i;
+    }
+    qsort(sorted, n, sizeof(*sorted), graph_node_index_cmp);
+    for (size_t e = 0; e < nedges && ok; e++) {
+      src[e] = graph_node_lookup(sorted, n, from[e]);
+      dst[e] = graph_node_lookup(sorted, n, to[e]);
+      if (src[e] < 0 || dst[e] < 0) ok = 0;
+      else first[src[e] + 1]++;
+    }
+  }
+  if (ok) {
+    for (size_t i = 0; i < n; i++) first[i + 1] += first[i];
+    size_t *fill = queue;   /* borrowed as the write cursor per source */
+    for (size_t i = 0; i < n; i++) fill[i] = first[i];
+    for (size_t e = 0; e < nedges; e++) {
+      succ[fill[src[e]]++] = (size_t)dst[e];
+      indeg[dst[e]]++;
+    }
+    int f = 0;
+    for (size_t i = 0; i < n; i++) {
+      deps->free_index[i] = types[i] == CU_GRAPH_NODE_TYPE_MEM_FREE ? f++ : -1;
+    }
+    /* Kahn: a node's bits are final once all it depends on have passed theirs on. */
+    size_t head = 0, tail = 0;
+    for (size_t i = 0; i < n; i++) {
+      if (indeg[i] == 0) queue[tail++] = i;
+    }
+    while (head < tail) {
+      size_t u = queue[head++];
+      done++;
+      uint64_t *bu = &deps->bits[u * words];
+      int fu = deps->free_index[u];
+      if (fu >= 0) bu[(size_t)fu / 64] |= 1ull << ((unsigned)fu % 64);
+      for (size_t k = first[u]; k < first[u + 1]; k++) {
+        size_t v = succ[k];
+        uint64_t *bv = &deps->bits[v * words];
+        for (size_t w = 0; w < words; w++) bv[w] |= bu[w];
+        if (--indeg[v] == 0) queue[tail++] = v;
+      }
+    }
+    ok = done == n;
+  }
+  free(from);
+  free(to);
+  free(sorted);
+  free(indeg);
+  free(first);
+  free(succ);
+  free(queue);
+  free(src);
+  free(dst);
+  if (!ok) {
+    free(deps->free_index);
+    free(deps->bits);
+    memset(deps, 0, sizeof(*deps));
+    return 0;
+  }
+  deps->n = n;
+  deps->words = words;
+  return 1;
+}
+
+/* One walk of one graph: the model per device, the dependencies, and the frees of
+ * memory from elsewhere. */
+typedef struct {
+  graph_pool_sim_t sims[MAX_DEVICE_COUNT];   /* with mem->d[] */
+  graph_deps_t deps;
+  int have_deps;
+  CUdeviceptr *foreign;
+  size_t nforeign, cap_foreign;
+} graph_walk_t;
+
+/* An alloc node on dev, node its index. Devices outside the library's range are
+ * ignored, as cuMemAlloc on them is not limited either. */
+static void graph_mem_alloc(graph_mem_t *mem, graph_walk_t *w, int dev, CUdeviceptr dptr, size_t bytes, int node) {
   if (dev < 0 || dev >= MAX_DEVICE_COUNT) return;
   int i = 0;
   while (i < mem->n && mem->d[i].dev != dev) i++;
@@ -4549,10 +4904,30 @@ static void graph_mem_add(graph_mem_t *mem, int dev, size_t bytes) {
     if (mem->n >= MAX_DEVICE_COUNT) return;   /* unreachable: dev values are distinct */
     mem->d[i].dev = dev;
     mem->d[i].need = 0;
+    mem->d[i].kept = 0;
+    mem->d[i].own_held = 0;
+    graph_pool_sim_init(&w->sims[i]);
+    if (w->have_deps) graph_pool_sim_set_depends(&w->sims[i], graph_deps_depends, &w->deps);
     mem->n++;
   }
-  size_t *need = &mem->d[i].need;
-  *need = *need > SIZE_MAX - bytes ? SIZE_MAX : *need + bytes;
+  graph_pool_sim_alloc(&w->sims[i], (uint64_t)dptr, bytes, node);
+  mem->d[i].need = w->sims[i].top;
+}
+
+/* A free node. Of memory allocated elsewhere it makes nothing available to this graph,
+ * but gives it back to the process when the graph runs. */
+static void graph_mem_free(const graph_mem_t *mem, graph_walk_t *w, CUdeviceptr dptr, int node) {
+  for (int i = 0; i < mem->n; i++) {
+    if (graph_pool_sim_free(&w->sims[i], (uint64_t)dptr, node)) return;
+  }
+  if (w->nforeign == w->cap_foreign) {
+    size_t cap = w->cap_foreign ? w->cap_foreign * 2 : 8;
+    CUdeviceptr *grown = (CUdeviceptr *)realloc(w->foreign, cap * sizeof(*grown));
+    if (grown == NULL) return;   /* the block stays held in our books: a little too much */
+    w->foreign = grown;
+    w->cap_foreign = cap;
+  }
+  w->foreign[w->nforeign++] = dptr;
 }
 
 /* One live exec. Growable (include/slot_table.h), because vLLM's default piecewise
@@ -4568,6 +4943,7 @@ typedef struct {
   int mem_n;              /* devices allocated on, as graph_mem_t.n */
   graph_mem_dev_t mem1;   /* mem_n == 1 */
   graph_mem_dev_t *mem_more;  /* mem_n > 1: mem_n entries */
+  graph_side_t *side;     /* NULL unless the graph keeps or frees memory from elsewhere */
 } graph_cost_entry_t;
 static slot_table_t g_graph_cost = SLOT_TABLE_INIT(graph_cost_entry_t, 4096, 1u << 20);
 static pthread_mutex_t g_graph_cost_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -4584,7 +4960,7 @@ static void graph_cost_after_fork(void) {
 
 extern CUresult _cuGraphKernelNodeGetParams(CUgraphNode hNode, CUDA_KERNEL_NODE_PARAMS *nodeParams);
 
-static void walk_graph_cost(CUgraph graph, int64_t *tokens, graph_mem_t *mem) {
+static void walk_graph_nodes(CUgraph graph, int64_t *tokens, graph_mem_t *mem, graph_walk_t *w, int as_node) {
   if (unlikely(!graph)) return;
   /* Driver-availability guard: CUDA_INTERNAL_CHECK calls fn_ptr directly
    * without a NULL check, and cuGraphInstantiate succeeding doesn't
@@ -4607,12 +4983,24 @@ static void walk_graph_cost(CUgraph graph, int64_t *tokens, graph_mem_t *mem) {
   if (unlikely(!nodes)) return;
   r = CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphGetNodes,
                           graph, nodes, &num_nodes);
-  if (r == CUDA_SUCCESS) {
+  /* Types first: whether the dependencies are worth working out depends on them. */
+  CUgraphNodeType *types = r == CUDA_SUCCESS ? (CUgraphNodeType *)malloc(num_nodes * sizeof(*types)) : NULL;
+  if (types != NULL) {
+    int allocs = 0, frees = 0;
     for (size_t i = 0; i < num_nodes; i++) {
-      CUgraphNodeType type;
-      if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphNodeGetType, nodes[i], &type) != CUDA_SUCCESS) {
-        continue;
+      if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphNodeGetType, nodes[i], &types[i]) != CUDA_SUCCESS) {
+        types[i] = CU_GRAPH_NODE_TYPE_EMPTY;
       }
+      allocs |= types[i] == CU_GRAPH_NODE_TYPE_MEM_ALLOC;
+      frees |= types[i] == CU_GRAPH_NODE_TYPE_MEM_FREE;
+    }
+    if (as_node < 0 && allocs && frees && !w->have_deps) {
+      w->have_deps = graph_deps_build(graph, nodes, types, num_nodes, &w->deps);
+    }
+    for (size_t i = 0; i < num_nodes; i++) {
+      CUgraphNodeType type = types[i];
+      /* A child graph's nodes count as the child node itself, in the parent's order. */
+      int node = as_node >= 0 ? as_node : (int)(i > INT32_MAX ? INT32_MAX : i);
       if (type == CU_GRAPH_NODE_TYPE_KERNEL && kernel_api) {
         CUDA_KERNEL_NODE_PARAMS params = {0};
         if (_cuGraphKernelNodeGetParams(nodes[i], &params) != CUDA_SUCCESS) continue;
@@ -4626,7 +5014,7 @@ static void walk_graph_cost(CUgraph graph, int64_t *tokens, graph_mem_t *mem) {
         CUgraph child = NULL;
         if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphChildGraphNodeGetGraph,
                                 nodes[i], &child) == CUDA_SUCCESS) {
-          walk_graph_cost(child, tokens, mem);
+          walk_graph_nodes(child, tokens, mem, w, node);
         }
       } else if (type == CU_GRAPH_NODE_TYPE_MEM_ALLOC &&
                  CUDA_FIND_ENTRY(cuda_library_entry, cuGraphMemAllocNodeGetParams)) {
@@ -4637,12 +5025,61 @@ static void walk_graph_cost(CUgraph graph, int64_t *tokens, graph_mem_t *mem) {
           continue;
         }
         if (params.poolProps.location.type == CU_MEM_LOCATION_TYPE_DEVICE) {
-          graph_mem_add(mem, params.poolProps.location.id, params.bytesize);
+          graph_mem_alloc(mem, w, params.poolProps.location.id, params.dptr, params.bytesize, node);
+        }
+      } else if (type == CU_GRAPH_NODE_TYPE_MEM_FREE &&
+                 CUDA_FIND_ENTRY(cuda_library_entry, cuGraphMemFreeNodeGetParams)) {
+        CUdeviceptr dptr = 0;
+        if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphMemFreeNodeGetParams,
+                                nodes[i], &dptr) == CUDA_SUCCESS) {
+          graph_mem_free(mem, w, dptr, node);
         }
       }
     }
   }
+  free(types);
   free(nodes);
+}
+
+/* Node by node in the order cuGraphGetNodes gives, the creation order, which is the
+ * driver's: see include/graph_pool_sim.h. *side, if asked for, gets what a launch
+ * changes in what the process holds, or NULL. */
+static void walk_graph_cost(CUgraph graph, int64_t *tokens, graph_mem_t *mem, graph_side_t **side) {
+  graph_walk_t *w = (graph_walk_t *)calloc(1, sizeof(*w));
+  if (side != NULL) *side = NULL;
+  if (w == NULL) return;   /* nothing is learnt: tokens stay, the graph goes unchecked */
+  walk_graph_nodes(graph, tokens, mem, w, -1);
+  size_t nkept = 0;
+  for (int i = 0; i < mem->n; i++) {
+    mem->d[i].kept = w->sims[i].live_bytes;
+    if (!w->sims[i].degraded) nkept += w->sims[i].nlive;
+  }
+  if (side != NULL && (nkept > 0 || w->nforeign > 0)) {
+    graph_side_t *sd = (graph_side_t *)calloc(1, sizeof(*sd));
+    if (sd != NULL && nkept > 0) sd->kept = (graph_kept_t *)malloc(nkept * sizeof(*sd->kept));
+    if (sd != NULL && (nkept == 0 || sd->kept != NULL)) {
+      for (int i = 0; i < mem->n; i++) {
+        if (w->sims[i].degraded) continue;
+        for (size_t k = 0; k < w->sims[i].nlive; k++) {
+          sd->kept[sd->nkept].dptr = (CUdeviceptr)w->sims[i].live[k].key;
+          sd->kept[sd->nkept].bytes = w->sims[i].live[k].size;
+          sd->kept[sd->nkept].dev = mem->d[i].dev;
+          sd->nkept++;
+        }
+      }
+      sd->foreign = w->foreign;
+      sd->nforeign = w->nforeign;
+      w->foreign = NULL;
+      *side = sd;
+    } else {
+      graph_side_free(sd);
+    }
+  }
+  for (int i = 0; i < mem->n; i++) graph_pool_sim_destroy(&w->sims[i]);
+  free(w->deps.free_index);
+  free(w->deps.bits);
+  free(w->foreign);
+  free(w);
 }
 
 static void graph_cost_store_mem(graph_cost_entry_t *e, const graph_mem_t *mem) {
@@ -4667,7 +5104,8 @@ static void graph_cost_store_mem(graph_cost_entry_t *e, const graph_mem_t *mem) 
  * An update changes what the exec does, not whose it is: its context and device stay
  * as they were, whatever is current now. A new exec overwrites all of a record: one
  * at that address belongs to an exec long gone. */
-static void graph_cost_remember(CUgraphExec exec, int64_t tokens, const graph_mem_t *mem, int update) {
+static void graph_cost_remember(CUgraphExec exec, int64_t tokens, const graph_mem_t *mem,
+                                graph_side_t *side, int update) {
   if (unlikely(!exec)) return;
   if (tokens <= 0) tokens = 1;
   CUcontext ctx = NULL;
@@ -4690,6 +5128,10 @@ static void graph_cost_remember(CUgraphExec exec, int64_t tokens, const graph_me
       e->launch_dev = launch_dev;
     }
     graph_cost_store_mem(e, mem);
+    if (created) e->side = NULL;
+    graph_side_free(e->side);
+    e->side = side;
+    side = NULL;
   } else if (!g_graph_cost_full_warned) {
     g_graph_cost_full_warned = 1;
     LOGGER(WARNING, "graph cost table full (%zu entries); newly-instantiated "
@@ -4697,7 +5139,10 @@ static void graph_cost_remember(CUgraphExec exec, int64_t tokens, const graph_me
                     "checked, at cuGraphLaunch", g_graph_cost.count);
   }
   pthread_mutex_unlock(&g_graph_cost_lock);
+  graph_side_free(side);
 }
+
+static void graph_own_held(const graph_side_t *side, graph_mem_t *mem);
 
 /* mem and launch_dev may be NULL; outputs are left untouched when exec is not cached. */
 static int graph_cost_lookup(CUgraphExec exec, int64_t *tokens, graph_mem_t *mem, int *launch_dev) {
@@ -4709,11 +5154,14 @@ static int graph_cost_lookup(CUgraphExec exec, int64_t *tokens, graph_mem_t *mem
     if (launch_dev != NULL) *launch_dev = e->launch_dev;
     if (mem != NULL) {
       mem->n = e->mem_n;
+      mem->side = e->side != NULL;
       if (e->mem_n == 1) {
         mem->d[0] = e->mem1;
       } else if (e->mem_n > 1) {
         memcpy(mem->d, e->mem_more, (size_t)e->mem_n * sizeof(mem->d[0]));
       }
+      for (int i = 0; i < mem->n; i++) mem->d[i].own_held = 0;
+      if (e->side != NULL && e->side->nkept > 0) graph_own_held(e->side, mem);
     }
   }
   pthread_mutex_unlock(&g_graph_cost_lock);
@@ -4726,6 +5174,7 @@ static void graph_cost_forget(CUgraphExec exec) {
   graph_cost_entry_t *e = (graph_cost_entry_t *)slot_table_find(&g_graph_cost, (uintptr_t)exec, 0);
   if (e != NULL) {
     free(e->mem_more);
+    graph_side_free(e->side);
     slot_table_remove(&g_graph_cost, e);
   }
   pthread_mutex_unlock(&g_graph_cost_lock);
@@ -4735,6 +5184,7 @@ static int graph_cost_of_ctx(void *cell, void *arg) {
   graph_cost_entry_t *e = (graph_cost_entry_t *)cell;
   if (e->ctx != (CUcontext)arg) return 0;
   free(e->mem_more);
+  graph_side_free(e->side);
   return 1;
 }
 
@@ -4752,9 +5202,11 @@ static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph, int update) 
   int64_t total = 0;
   graph_mem_t mem;
   mem.n = 0;
-  walk_graph_cost(src_graph, &total, &mem);
-  if (total > 0 || mem.n > 0) {
-    graph_cost_remember(exec, total, &mem, update);
+  mem.side = 0;
+  graph_side_t *side = NULL;
+  walk_graph_cost(src_graph, &total, &mem, &side);
+  if (total > 0 || mem.n > 0 || side != NULL) {
+    graph_cost_remember(exec, total, &mem, side, update);
     return;
   }
   /* Walk found no kernel work in this graph. For cuGraphInstantiate this
@@ -4769,6 +5221,536 @@ static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph, int update) 
   graph_cost_forget(exec);
 }
 
+/* What of the graph pools this process cannot reuse, though they have it reserved
+ * (drivers 580, 595; docs/library_graph_memory_accounting.md 6.15):
+ *
+ *   held     blocks a graph allocated and left allocated. They stay the process's after
+ *            the exec, the graph and even the context are gone (a primary-context reset
+ *            too), until cuMemFree / cuMemFreeAsync from any context, or a graph whose
+ *            free node names them runs. Counted from a launch: an upload maps them, but
+ *            the pool still lends them out.
+ *   running  the pool memory of a graph on another stream that has not finished on the
+ *            GPU: the driver lends it to nobody else, whether or not the host waited.
+ *            One record per stream (a default stream per context, the per-thread one
+ *            per context and thread), with the memory of every device the graph uses,
+ *            claimed at the launch's admission. While a device has seen graphs
+ *            launched on one stream only, nothing more is done (the usual case pays no
+ *            event); from the second stream on, an event of the stream's context goes
+ *            behind each launch. What ran before that counts as finished: a little
+ *            short at that one moment, never asked of the application's stream. A
+ *            synchronize of the stream or its context settles what it waited for.
+ *            Nothing of it is done while any capture is open in the process --
+ *            querying an event then breaks another thread's global capture (901,
+ *            driver 595); recording one is left out with it.
+ *
+ * Without these a launch was checked against the pool's whole reservation, and a
+ * process could keep adding to it: launch a graph that leaves its block allocated, and
+ * the next one sees the reservation already big enough. */
+typedef struct {
+  slot_header_t h;   /* the block's address */
+  int dev;
+  size_t bytes;
+} graph_held_t;
+static slot_table_t g_graph_held = SLOT_TABLE_INIT(graph_held_t, 64, 1u << 20);
+static size_t g_graph_held_bytes[MAX_DEVICE_COUNT];
+static size_t g_graph_held_count;   /* also read without the lock, by the free hooks */
+
+/* One record per stream, keyed as graph_stream_key() says. Records are kept while their
+ * graph may run; past GRAPH_RUNNING_KEEP of them, an idle one is recycled for a new stream
+ * rather than the table growing, but one still running is never dropped. */
+#define GRAPH_RUNNING_KEEP 64
+typedef struct {
+  slot_header_t h;     /* the stream: see graph_stream_key() */
+  CUcontext ctx;       /* the event's; without one, the context current at the last launch */
+  CUevent ev;
+  CUgraphExec exec;    /* the last launched, whose own memory it does not count against */
+  uint64_t seq;        /* claim order */
+  uint64_t submitted;  /* when its last launch returned, for the synchronize hooks */
+  int active;          /* GRAPH_RUN_* */
+  size_t need[MAX_DEVICE_COUNT];   /* pool memory in use, per device, until the event completes */
+} graph_running_t;
+#define GRAPH_RUN_DONE 0       /* nothing of it running, or not known to be */
+#define GRAPH_RUN_EVENT 1      /* an event behind its last launch */
+#define GRAPH_RUN_NO_EVENT 2   /* no event: its devices have seen one stream only so far */
+#define GRAPH_RUN_PENDING 3    /* claimed, its launch or its event under way: counts as running */
+static slot_table_t g_graph_running = SLOT_TABLE_INIT(graph_running_t, 32, 1u << 16);
+static size_t g_graph_running_count;   /* also read without the lock, by the synchronize hooks */
+static uint64_t g_graph_running_seq;
+static uint64_t g_graph_submitted;     /* read without the lock before a synchronize */
+/* Per device: the stream of the last launch, and whether another one was ever seen. */
+static struct {
+  uintptr_t key, key2;
+  int seen, several;
+} g_graph_streams[MAX_DEVICE_COUNT];
+/* Taken alone, inside g_graph_cost_lock or inside g_capture_gate (read), never the other
+ * way round. The only driver call made under it is cuEventQuery, which returns at once;
+ * cuEventRecord / Create / Destroy can wait on another thread's enqueue (see
+ * g_capture_gate), so they are made off it. */
+static pthread_mutex_t g_graph_use_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Read around destroying a record's event off g_graph_use_lock, written around
+ * forgetting a context's records: an event is destroyed only while its context is known
+ * alive. A destroy can wait on another thread's enqueue; read, it holds off no other
+ * destroy, so a launch giving an event back never waits for an unrelated one, only a
+ * context being destroyed does. Taken before g_graph_use_lock. */
+static pthread_rwlock_t g_graph_ev_lock = PTHREAD_RWLOCK_INITIALIZER;
+/* Bumped whenever a context's records are forgotten, under both locks. */
+static uint64_t g_graph_ctx_gen;
+/* Numbers threads for their per-thread default stream. Never reused, unlike thread ids,
+ * so a thread that exits leaves a record no new thread can be taken for. */
+static uint64_t g_graph_threads;
+static __thread uint64_t t_graph_thread;
+
+/* Which stream a launch goes to, as a record key. A named stream is its handle. The
+ * legacy default stream is one per context, and the per-thread one one per context and
+ * thread: those go by the context current at the call, which is theirs by definition,
+ * and key2 tells them apart from a handle (1 legacy, 2 and up a thread). */
+typedef struct {
+  uintptr_t key, key2;
+} graph_skey_t;
+
+static void graph_stream_key(CUstream stream, int ptsz, CUcontext ctx, graph_skey_t *k) {
+  if (stream == CU_STREAM_PER_THREAD || (stream == NULL && ptsz)) {
+    if (t_graph_thread == 0) t_graph_thread = __atomic_add_fetch(&g_graph_threads, 1, __ATOMIC_RELAXED);
+    k->key = (uintptr_t)ctx;
+    k->key2 = (uintptr_t)(t_graph_thread + 1);
+  } else if (stream == NULL || stream == CU_STREAM_LEGACY) {
+    k->key = (uintptr_t)ctx;
+    k->key2 = 1;
+  } else {
+    k->key = (uintptr_t)stream;
+    k->key2 = 0;
+  }
+}
+
+/* A default stream's key without a context is no key: such a launch is not tracked. */
+static int graph_skey_valid(const graph_skey_t *k) { return k->key != 0; }
+
+/* A launch's claim on its stream's record, taken at its admission, before the driver maps
+ * anything: from then on other launches count it as running (docs 6.17). */
+typedef struct {
+  int claimed;
+  int created;             /* the record is new: a launch that does not happen removes it */
+  int several;             /* an event goes behind the launch */
+  CUcontext ctx;           /* current at the launch */
+  graph_skey_t k;
+  graph_running_t saved;   /* the record as it was, for a launch that does not happen */
+  uint64_t seq, gen;
+  CUevent ev;              /* the record's event, taken out to record */
+  CUcontext ev_ctx;        /* its context */
+  CUevent dropped;         /* a recycled record's event of another context, to destroy */
+} graph_run_ticket_t;
+
+static void graph_held_drop_locked(graph_held_t *e) {
+  size_t *b = &g_graph_held_bytes[e->dev];
+  *b = *b > e->bytes ? *b - e->bytes : 0;
+}
+
+static void graph_held_add_locked(CUdeviceptr dptr, int dev, size_t bytes) {
+  if (dev < 0 || dev >= MAX_DEVICE_COUNT || dptr == 0) return;
+  int created;
+  graph_held_t *e = (graph_held_t *)slot_table_insert(&g_graph_held, (uintptr_t)dptr, 0, &created);
+  if (e == NULL) return;   /* out of memory: counted short, NVML has it */
+  if (!created) graph_held_drop_locked(e);
+  e->dev = dev;
+  e->bytes = bytes;
+  g_graph_held_bytes[dev] = graph_pool_add_sat(g_graph_held_bytes[dev], bytes);
+  __atomic_store_n(&g_graph_held_count, g_graph_held.count, __ATOMIC_RELAXED);
+}
+
+static void graph_held_remove_locked(CUdeviceptr dptr) {
+  graph_held_t *e = (graph_held_t *)slot_table_find(&g_graph_held, (uintptr_t)dptr, 0);
+  if (e == NULL) return;
+  graph_held_drop_locked(e);
+  slot_table_remove(&g_graph_held, e);
+  __atomic_store_n(&g_graph_held_count, g_graph_held.count, __ATOMIC_RELAXED);
+}
+
+/* Of the blocks side's graph keeps, those held now, per device of mem. Called with
+ * g_graph_cost_lock held. */
+static void graph_own_held(const graph_side_t *side, graph_mem_t *mem) {
+  pthread_mutex_lock(&g_graph_use_lock);
+  for (size_t k = 0; k < side->nkept; k++) {
+    const graph_held_t *h =
+        (const graph_held_t *)slot_table_find(&g_graph_held, (uintptr_t)side->kept[k].dptr, 0);
+    if (h == NULL) continue;
+    for (int i = 0; i < mem->n; i++) {
+      if (mem->d[i].dev == h->dev) mem->d[i].own_held = graph_pool_add_sat(mem->d[i].own_held, h->bytes);
+    }
+  }
+  pthread_mutex_unlock(&g_graph_use_lock);
+}
+
+/* Held blocks on dev, which no allocation in a graph can take. */
+static size_t graph_held_on(int dev) {
+  if (dev < 0 || dev >= MAX_DEVICE_COUNT) return 0;
+  pthread_mutex_lock(&g_graph_use_lock);
+  size_t held = g_graph_held_bytes[dev];
+  pthread_mutex_unlock(&g_graph_use_lock);
+  return held;
+}
+
+/* A block freed outside any graph. Free calls pay a relaxed load when nothing is held. */
+static void graph_held_release(CUdeviceptr dptr) {
+  if (likely(__atomic_load_n(&g_graph_held_count, __ATOMIC_RELAXED) == 0)) return;
+  pthread_mutex_lock(&g_graph_use_lock);
+  graph_held_remove_locked(dptr);
+  pthread_mutex_unlock(&g_graph_use_lock);
+}
+
+static void graph_event_destroy(CUevent ev, uint64_t gen);
+
+static void graph_running_count_locked(void) {
+  __atomic_store_n(&g_graph_running_count, g_graph_running.count, __ATOMIC_RELAXED);
+}
+
+/* A record of ctx: its event is ctx's, or its key is one of ctx's default streams. */
+static int graph_running_of_ctx(void *cell, void *arg) {
+  const graph_running_t *r = (const graph_running_t *)cell;
+  return r->ctx == (CUcontext)arg || (r->h.key2 != 0 && r->h.key == (uintptr_t)arg);
+}
+
+/* The context's events went with it: forgotten, not destroyed. Its held blocks did not. */
+static void graph_use_forget_ctx(CUcontext ctx) {
+  if (ctx == NULL) return;
+  pthread_rwlock_wrlock(&g_graph_ev_lock);
+  pthread_mutex_lock(&g_graph_use_lock);
+  slot_table_retire_if(&g_graph_running, graph_running_of_ctx, ctx);
+  graph_running_count_locked();
+  g_graph_ctx_gen++;
+  pthread_mutex_unlock(&g_graph_use_lock);
+  pthread_rwlock_unlock(&g_graph_ev_lock);
+}
+
+/* A stream gone: its record must not be matched by a new stream at the same address.
+ * Its event is destroyed, off the lock: still of a live context, since the stream's
+ * context outlived it. A launch still claiming the record finds it gone. */
+static void graph_use_forget_stream(CUstream stream) {
+  CUevent ev = NULL;
+  uint64_t gen;
+  pthread_mutex_lock(&g_graph_use_lock);
+  graph_running_t *r = (graph_running_t *)slot_table_find(&g_graph_running, (uintptr_t)stream, 0);
+  if (r != NULL) {
+    ev = r->ev;
+    slot_table_remove(&g_graph_running, r);
+    graph_running_count_locked();
+  }
+  gen = g_graph_ctx_gen;
+  pthread_mutex_unlock(&g_graph_use_lock);
+  graph_event_destroy(ev, gen);
+}
+
+static void graph_use_forget_exec(CUgraphExec exec) {
+  pthread_mutex_lock(&g_graph_use_lock);
+  for (size_t i = 0; i < g_graph_running.capacity; i++) {
+    graph_running_t *r = (graph_running_t *)slot_table_cell(&g_graph_running, i);
+    if (r->h.key != 0 && r->exec == exec) r->exec = NULL;
+  }
+  pthread_mutex_unlock(&g_graph_use_lock);
+}
+
+/* Nothing of it is valid in a child, and the lock may have been held at fork. */
+static void graph_use_reset_after_fork(void) {
+  slot_table_abandon(&g_graph_held);
+  memset(g_graph_held_bytes, 0, sizeof(g_graph_held_bytes));
+  slot_table_abandon(&g_graph_running);
+  memset(g_graph_streams, 0, sizeof(g_graph_streams));
+  g_graph_held_count = 0;
+  g_graph_running_count = 0;
+  pthread_mutex_init(&g_graph_use_lock, NULL);
+  pthread_rwlock_init(&g_graph_ev_lock, NULL);
+}
+
+/* 1 while the record's last launch has not finished on the GPU. */
+static int graph_running_busy_locked(graph_running_t *r) {
+  if (r->active == GRAPH_RUN_PENDING) return 1;
+  if (r->active != GRAPH_RUN_EVENT) return 0;
+  CUresult q = CUDA_INTERNAL_CALL(cuda_library_entry, cuEventQuery, r->ev);
+  if (q == CUDA_ERROR_NOT_READY) return 1;
+  r->active = GRAPH_RUN_DONE;
+  if (q != CUDA_SUCCESS) r->ev = NULL;   /* not ours to destroy any more */
+  return 0;
+}
+
+/* A launch on stream k: from a device's second stream on, the launches get events. */
+static void graph_streams_note_locked(int dev, const graph_skey_t *k) {
+  if (dev < 0 || dev >= MAX_DEVICE_COUNT) return;
+  if (g_graph_streams[dev].seen && !g_graph_streams[dev].several &&
+      (g_graph_streams[dev].key != k->key || g_graph_streams[dev].key2 != k->key2)) {
+    g_graph_streams[dev].several = 1;
+    /* What ran before counts as finished: see the comment above graph_held_t. */
+    for (size_t i = 0; i < g_graph_running.capacity; i++) {
+      graph_running_t *r = (graph_running_t *)slot_table_cell(&g_graph_running, i);
+      if (r->h.key != 0 && r->active == GRAPH_RUN_NO_EVENT && r->need[dev] != 0) r->active = GRAPH_RUN_DONE;
+    }
+  }
+  g_graph_streams[dev].seen = 1;
+  g_graph_streams[dev].key = k->key;
+  g_graph_streams[dev].key2 = k->key2;
+}
+
+/* The record a launch goes to: its stream's, or a new one -- taking the place of an
+ * idle record once GRAPH_RUNNING_KEEP are kept, and its event if that is of ctx, the
+ * current context. One of another context goes to *dropped, to be destroyed off the
+ * locks: that context may be destroyed by another thread meanwhile, and the handle of
+ * an event recorded then could already be a new one of the application's. NULL if the
+ * table can hold no more (the launch then goes untracked). Called with the gate (read)
+ * and g_graph_use_lock held. */
+static graph_running_t *graph_running_slot_locked(const graph_skey_t *k, CUcontext ctx, int *created,
+                                                  CUevent *dropped) {
+  graph_running_t *r = (graph_running_t *)slot_table_find(&g_graph_running, k->key, k->key2);
+  *created = 0;
+  if (r != NULL) return r;
+  CUevent ev = NULL;
+  CUcontext ev_ctx = NULL;
+  if (g_graph_running.count >= GRAPH_RUNNING_KEEP) {
+    for (size_t i = 0; i < g_graph_running.capacity; i++) {
+      graph_running_t *idle = (graph_running_t *)slot_table_cell(&g_graph_running, i);
+      if (idle->h.key == 0 || idle->active == GRAPH_RUN_PENDING || graph_running_busy_locked(idle)) continue;
+      ev = idle->ev;
+      ev_ctx = idle->ctx;
+      slot_table_remove(&g_graph_running, idle);
+      break;
+    }
+  }
+  /* After a removal the insert always finds room: NULL means nothing was removed. */
+  r = (graph_running_t *)slot_table_insert(&g_graph_running, k->key, k->key2, created);
+  if (r == NULL) return NULL;
+  memset((char *)r + sizeof(r->h), 0, sizeof(*r) - sizeof(r->h));
+  if (ev != NULL && ev_ctx != ctx) {
+    *dropped = ev;
+  } else {
+    r->ev = ev;
+    r->ctx = ev_ctx;
+  }
+  graph_running_count_locked();
+  return r;
+}
+
+/* Marks the record of a launch on stream k of a graph using mem's pool memory, with
+ * t->ctx current: pending (counted as running) once one of its devices has seen several
+ * streams, its event taken out to be recorded off the locks; otherwise no event, as
+ * before. Called with the gate (read) and g_graph_use_lock held, no capture open. */
+static void graph_running_claim_locked(const graph_mem_t *mem, const graph_skey_t *k,
+                                       CUgraphExec exec, graph_run_ticket_t *t) {
+  int created;
+  t->dropped = NULL;
+  graph_running_t *r = graph_running_slot_locked(k, t->ctx, &created, &t->dropped);
+  if (r == NULL) return;
+  t->k = *k;
+  t->created = created;
+  t->saved = *r;
+  t->ev = NULL;
+  t->ev_ctx = NULL;
+  t->gen = g_graph_ctx_gen;
+  /* On one stream the driver reuses what the earlier launches use: the larger counts,
+   * until a look from another stream finds them done, or the stream is synchronized. */
+  if (!r->active) memset(r->need, 0, sizeof(r->need));
+  int several = 0;
+  for (int i = 0; i < mem->n; i++) {
+    int dev = mem->d[i].dev;
+    size_t need = mem->d[i].need > mem->d[i].kept ? mem->d[i].need - mem->d[i].kept : 0;
+    if (dev < 0 || dev >= MAX_DEVICE_COUNT || need == 0) continue;
+    if (r->need[dev] < need) r->need[dev] = need;
+    graph_streams_note_locked(dev, k);
+    several |= g_graph_streams[dev].several;
+  }
+  r->exec = exec;
+  r->seq = ++g_graph_running_seq;
+  t->seq = r->seq;
+  t->several = several;
+  t->claimed = 1;
+  if (!several) {
+    if (r->ev == NULL || r->ctx == t->ctx) r->ctx = t->ctx;   /* an event stays with its own */
+    r->active = GRAPH_RUN_NO_EVENT;
+    return;
+  }
+  /* The event leaves the record while it is recorded, so nothing else queries or
+   * destroys it. Whose context it is, recording it tells. */
+  t->ev = r->ev;
+  t->ev_ctx = r->ctx;
+  r->ev = NULL;
+  if (t->ev == NULL) r->ctx = t->ctx;
+  r->active = GRAPH_RUN_PENDING;
+}
+
+/* Destroys ev, of a context alive when gen was read, unless one has gone since: then it
+ * may have been this one, and its events went with it. Off g_graph_use_lock. */
+static void graph_event_destroy(CUevent ev, uint64_t gen) {
+  if (ev == NULL) return;
+  pthread_rwlock_rdlock(&g_graph_ev_lock);
+  if (g_graph_ctx_gen == gen) {
+    if (CUDA_FIND_ENTRY(cuda_library_entry, cuEventDestroy_v2)) {
+      CUDA_INTERNAL_CALL(cuda_library_entry, cuEventDestroy_v2, ev);
+    } else {
+      CUDA_INTERNAL_CALL(cuda_library_entry, cuEventDestroy, ev);
+    }
+  }
+  pthread_rwlock_unlock(&g_graph_ev_lock);
+}
+
+static CUresult graph_event_record(CUevent ev, CUstream stream, int ptsz) {
+  return ptsz ? CUDA_INTERNAL_CALL(cuda_library_entry, cuEventRecord_ptsz, ev, stream)
+              : CUDA_INTERNAL_CALL(cuda_library_entry, cuEventRecord, ev, stream);
+}
+
+/* An event of ctx, made with ctx pushed if it is not the current one. */
+static CUevent graph_event_create(CUcontext ctx, CUcontext current) {
+  CUevent ev = NULL;
+  CUcontext popped = NULL;
+  if (ctx == NULL || (ctx != current && _cuCtxPushCurrent(ctx) != CUDA_SUCCESS)) return NULL;
+  if (CUDA_INTERNAL_CALL(cuda_library_entry, cuEventCreate, &ev, CU_EVENT_DISABLE_TIMING) != CUDA_SUCCESS) {
+    ev = NULL;
+  }
+  if (ctx != current) _cuCtxPopCurrent(&popped);
+  return ev;
+}
+
+/* After the launch went through: the event is recorded off the locks, then put back,
+ * unless another launch took the record meanwhile. An event that does not take (none
+ * yet, or of another context than the stream's) is replaced by one of the stream's
+ * context, which may not be the current one. */
+static void graph_running_finish(graph_run_ticket_t *t, CUstream stream, int ptsz) {
+  if (t == NULL || !t->claimed) return;
+  t->claimed = 0;
+  graph_event_destroy(t->dropped, t->gen);
+  if (!t->several) return;
+  CUevent ev = t->ev;
+  CUcontext ev_ctx = t->ev_ctx;
+  int recorded = ev != NULL && graph_event_record(ev, stream, ptsz) == CUDA_SUCCESS;
+  if (!recorded) {
+    graph_event_destroy(ev, t->gen);
+    /* A default stream is the current context's; a named one says whose it is. */
+    ev_ctx = t->k.key2 != 0 ? t->ctx : stream_context(stream, ptsz);
+    ev = graph_event_create(ev_ctx, t->ctx);
+    recorded = ev != NULL && graph_event_record(ev, stream, ptsz) == CUDA_SUCCESS;
+  }
+  pthread_mutex_lock(&g_graph_use_lock);
+  graph_running_t *r = (graph_running_t *)slot_table_find(&g_graph_running, t->k.key, t->k.key2);
+  if (r != NULL && r->seq == t->seq && r->active == GRAPH_RUN_PENDING) {
+    r->ev = ev;
+    if (ev != NULL) r->ctx = ev_ctx;
+    r->active = recorded ? GRAPH_RUN_EVENT : GRAPH_RUN_DONE;
+    /* Release: a synchronize that reads this count began after the launch returned. */
+    r->submitted = __atomic_add_fetch(&g_graph_submitted, 1, __ATOMIC_RELEASE);
+    ev = NULL;
+  }
+  pthread_mutex_unlock(&g_graph_use_lock);
+  graph_event_destroy(ev, t->gen);   /* the record went to another launch meanwhile */
+}
+
+/* The launch did not happen (refused, or the driver failed it): the record goes back to
+ * what it was, or away if the claim made it, unless another launch took it meanwhile. */
+static void graph_running_cancel(graph_run_ticket_t *t) {
+  if (t == NULL || !t->claimed) return;
+  t->claimed = 0;
+  graph_event_destroy(t->dropped, t->gen);
+  CUevent ev = t->ev, dropped = NULL;
+  pthread_mutex_lock(&g_graph_use_lock);
+  graph_running_t *r = (graph_running_t *)slot_table_find(&g_graph_running, t->k.key, t->k.key2);
+  if (r != NULL && r->seq == t->seq) {
+    if (t->created) {
+      dropped = r->ev;   /* an idle record's, taken over */
+      slot_table_remove(&g_graph_running, r);
+      graph_running_count_locked();
+    } else {
+      *r = t->saved;     /* its event, taken out, goes back with it */
+      ev = NULL;
+      /* Claimed over another launch still under way on the stream, which may have found
+       * the record taken and dropped its event already: nothing would settle a pending
+       * record again. Not counted, rather than counted for good. */
+      if (r->active == GRAPH_RUN_PENDING) r->active = GRAPH_RUN_DONE;
+    }
+  }
+  pthread_mutex_unlock(&g_graph_use_lock);
+  graph_event_destroy(ev, t->gen);
+  graph_event_destroy(dropped, t->gen);
+}
+
+/* The part of reserved this process could reuse for exec launched on stream k. With t,
+ * the launch's record is claimed in the same hold, so that a launch admitted after this
+ * one counts it, from before the driver maps anything. */
+static size_t graph_pool_available(int dev, size_t reserved, const graph_skey_t *k,
+                                   CUgraphExec exec, size_t own_held, graph_run_ticket_t *t,
+                                   const graph_mem_t *mem) {
+  size_t unavailable = 0;
+  pthread_rwlock_rdlock(&g_capture_gate);
+  int quiet = capture_reg_any();   /* no event call with a capture open: see above */
+  pthread_mutex_lock(&g_graph_use_lock);
+  if (dev >= 0 && dev < MAX_DEVICE_COUNT) {
+    size_t held = g_graph_held_bytes[dev];
+    unavailable = held > own_held ? held - own_held : 0;
+    if (!quiet && graph_skey_valid(k)) graph_streams_note_locked(dev, k);
+  }
+  for (size_t i = 0; i < g_graph_running.capacity && !quiet && dev >= 0 && dev < MAX_DEVICE_COUNT; i++) {
+    graph_running_t *r = (graph_running_t *)slot_table_cell(&g_graph_running, i);
+    if (r->h.key == 0 || !r->active || r->need[dev] == 0) continue;
+    if ((r->h.key == k->key && r->h.key2 == k->key2) || (exec != NULL && r->exec == exec)) continue;
+    if (graph_running_busy_locked(r)) unavailable = graph_pool_add_sat(unavailable, r->need[dev]);
+  }
+  if (t != NULL && !t->claimed && !quiet) graph_running_claim_locked(mem, k, exec, t);
+  pthread_mutex_unlock(&g_graph_use_lock);
+  pthread_rwlock_unlock(&g_capture_gate);
+  return reserved > unavailable ? reserved - unavailable : 0;
+}
+
+/* After a launch on stream k of a graph using mem's pool memory, with ctx current, that
+ * claimed nothing at its admission (its devices' limits off, or a capture open then). */
+static void graph_running_note(const graph_mem_t *mem, const graph_skey_t *k, CUstream stream, int ptsz,
+                               CUgraphExec exec, CUcontext ctx) {
+  graph_run_ticket_t t;
+  t.claimed = 0;
+  t.ctx = ctx;
+  pthread_rwlock_rdlock(&g_capture_gate);
+  if (capture_reg_any()) {   /* the slot search queries events: see g_capture_gate */
+    pthread_rwlock_unlock(&g_capture_gate);
+    return;
+  }
+  pthread_mutex_lock(&g_graph_use_lock);
+  graph_running_claim_locked(mem, k, exec, &t);
+  pthread_mutex_unlock(&g_graph_use_lock);
+  pthread_rwlock_unlock(&g_capture_gate);
+  graph_running_finish(&t, stream, ptsz);
+}
+
+/* Whether a launch of a graph using mem is tracked as running at all: some of its pool
+ * memory is not left allocated for good. */
+static int graph_mem_runs(const graph_mem_t *mem) {
+  for (int i = 0; i < mem->n; i++) {
+    if (mem->d[i].need > mem->d[i].kept) return 1;
+  }
+  return 0;
+}
+
+/* After a successful launch of an exec with alloc nodes or frees from elsewhere. A launch
+ * into a capture is refused by the driver (900, drivers 580 and 595); should one ever
+ * succeed, it maps nothing now, so nothing is recorded. */
+static void graph_launched(CUgraphExec exec, const graph_mem_t *mem, CUstream stream, int ptsz,
+                           graph_run_ticket_t *t) {
+  if (stream_is_capturing(stream, ptsz)) {
+    graph_running_cancel(t);
+    return;
+  }
+  if (mem->side) {
+    pthread_mutex_lock(&g_graph_cost_lock);
+    graph_cost_entry_t *e = (graph_cost_entry_t *)slot_table_find(&g_graph_cost, (uintptr_t)exec, 0);
+    if (e != NULL && e->side != NULL) {
+      pthread_mutex_lock(&g_graph_use_lock);
+      for (size_t i = 0; i < e->side->nforeign; i++) graph_held_remove_locked(e->side->foreign[i]);
+      for (size_t i = 0; i < e->side->nkept; i++) {
+        graph_held_add_locked(e->side->kept[i].dptr, e->side->kept[i].dev, e->side->kept[i].bytes);
+      }
+      pthread_mutex_unlock(&g_graph_use_lock);
+    }
+    pthread_mutex_unlock(&g_graph_cost_lock);
+  }
+  if (t == NULL) return;
+  if (t->claimed) {
+    graph_running_finish(t, stream, ptsz);
+  } else {
+    graph_running_note(mem, &t->k, stream, ptsz, exec, t->ctx);
+  }
+}
+
 /* Graph-memory admission (window B).
  *
  * A graph's alloc nodes are mapped from the device's graph pool inside
@@ -4781,11 +5763,12 @@ static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph, int update) 
  *
  * So the check happens at the mapping itself, on each device the allocations
  * reside on (their pool location, not the current context), like cuMemAlloc.
- * The pool grows by about need - reserved (CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT):
- * exact for a first launch, a launch after a trim, and graphs replayed in
- * sequence on one stream; it under-estimates graphs launched concurrently on
- * several streams and graphs whose allocations are left unfreed, which keep
- * their pages (a known boundary: NVML counts the overshoot afterwards).
+ * The pool grows by about need - available: need is what the graph's allocations take
+ * with their reuse (include/graph_pool_sim.h, dependencies included), available what
+ * of CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT the process can reuse -- not blocks graphs
+ * left allocated, nor the memory of graphs still running on other streams (see
+ * graph_pool_available). Where the model is unsure it errs low, on purpose: NVML counts
+ * the overshoot once mapped, while over-estimating refuses a graph that fits.
  *
  * The pool is queried on every upload/launch (~10 ns, RTX 2080 Ti) rather than
  * trusting an earlier one: besides cuDeviceGraphMemTrim, the driver itself
@@ -4806,8 +5789,12 @@ static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph, int update) 
  *    the first mapping of a multi-device graph). */
 
 /* One device: *lock_fd is set (-1 = not held) on CUDA_SUCCESS; on
- * CUDA_ERROR_OUT_OF_MEMORY nothing is held. */
-static CUresult graph_mem_admit_dev(const graph_mem_dev_t *d, int *lock_fd) {
+ * CUDA_ERROR_OUT_OF_MEMORY nothing is held. exec relaunched with its blocks still held
+ * gets them back first (AUTO_FREE_ON_LAUNCH; otherwise the driver refuses it). With t,
+ * the launch's record is claimed with the check (see graph_pool_available), and given
+ * back if refused. */
+static CUresult graph_mem_admit_dev(const graph_mem_dev_t *d, const graph_mem_t *mem, const graph_skey_t *k,
+                                    CUgraphExec exec, int *lock_fd, graph_run_ticket_t *t) {
   *lock_fd = -1;
   if (d->need == 0) return CUDA_SUCCESS;
   int host_index = get_host_device_index_by_cuda_device((CUdevice)d->dev);
@@ -4817,9 +5804,11 @@ static CUresult graph_mem_admit_dev(const graph_mem_dev_t *d, int *lock_fd) {
                           CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT, &reserved) != CUDA_SUCCESS) {
     reserved = 0;   /* unknown: assume the whole need is new */
   }
-  size_t growth = d->need > reserved ? d->need - (size_t)reserved : 0;
+  size_t available = graph_pool_available(d->dev, (size_t)reserved, k, exec, d->own_held, t, mem);
+  size_t growth = d->need > available ? d->need - available : 0;
   if (growth == 0) return CUDA_SUCCESS;
   if (prepare_memory_allocation((CUdevice)d->dev, growth, 0, &host_index, lock_fd) == MEMORY_PATH_OOM) {
+    graph_running_cancel(t);
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     LOGGER(VERBOSE, "graph upload/launch refused: device %d pool would grow by %zu bytes",
            d->dev, growth);
@@ -4831,18 +5820,48 @@ static CUresult graph_mem_admit_dev(const graph_mem_dev_t *d, int *lock_fd) {
 }
 
 /* Sets *lock_fd (-1 = not held; only ever set for a single-device graph) and
- * returns CUDA_SUCCESS, or returns CUDA_ERROR_OUT_OF_MEMORY holding nothing. */
-static CUresult graph_mem_admit(const graph_mem_t *mem, int *lock_fd) {
+ * returns CUDA_SUCCESS, or returns CUDA_ERROR_OUT_OF_MEMORY holding nothing, t given back.
+ * t (a launch's, or NULL) claims the stream's record at the first device checked, with
+ * the pool memory of every device the graph uses. */
+static CUresult graph_mem_admit(const graph_mem_t *mem, const graph_skey_t *k, CUgraphExec exec,
+                                int *lock_fd, graph_run_ticket_t *t) {
   *lock_fd = -1;
   if (likely(mem->n == 0)) return CUDA_SUCCESS;
-  if (likely(mem->n == 1)) return graph_mem_admit_dev(&mem->d[0], lock_fd);
+  if (likely(mem->n == 1)) return graph_mem_admit_dev(&mem->d[0], mem, k, exec, lock_fd, t);
   for (int i = 0; i < mem->n; i++) {
     int fd = -1;
-    CUresult r = graph_mem_admit_dev(&mem->d[i], &fd);
+    CUresult r = graph_mem_admit_dev(&mem->d[i], mem, k, exec, &fd, t);
     unlock_gpu_device(fd);   /* released at once: never two locks held */
-    if (r != CUDA_SUCCESS) return r;
+    if (r != CUDA_SUCCESS) {
+      graph_running_cancel(t);   /* a later device refused: the claim goes */
+      return r;
+    }
   }
   return CUDA_SUCCESS;
+}
+
+/* The stream key of an upload or launch on stream (see graph_stream_key()); the context
+ * is asked for only for a default stream. */
+static void graph_skey_of(CUstream stream, int ptsz, graph_skey_t *k) {
+  CUcontext ctx = NULL;
+  int named = !(stream == NULL || stream == CU_STREAM_PER_THREAD || stream == CU_STREAM_LEGACY);
+  if (!named && CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetCurrent, &ctx) != CUDA_SUCCESS) ctx = NULL;
+  graph_stream_key(stream, ptsz, ctx, k);
+}
+
+/* The ticket a launch claims its stream's record with, or NULL when it is not tracked as
+ * running: no pool memory of it is given back, or no context is current. */
+static graph_run_ticket_t *graph_run_ticket(graph_run_ticket_t *t, const graph_mem_t *mem,
+                                            CUstream stream, int ptsz) {
+  t->claimed = 0;
+  t->ctx = NULL;
+  memset(&t->k, 0, sizeof(t->k));
+  if (!graph_mem_runs(mem)) return NULL;
+  if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetCurrent, &t->ctx) != CUDA_SUCCESS || t->ctx == NULL) {
+    return NULL;
+  }
+  graph_stream_key(stream, ptsz, t->ctx, &t->k);
+  return t;
 }
 
 /* cuGraphInstantiate and cuGraphInstantiate_v2 share an identical body:
@@ -4901,8 +5920,11 @@ static CUresult instantiate_with_params(CUgraphExec *phGraphExec, CUgraph hGraph
     int64_t tokens = 0;
     graph_mem_t mem;
     mem.n = 0;   /* only n needs initialising: entries past it are never read */
-    walk_graph_cost(hGraph, &tokens, &mem);
-    CUresult admit = graph_mem_admit(&mem, &lock_fd);
+    mem.side = 0;
+    walk_graph_cost(hGraph, &tokens, &mem, NULL);
+    graph_skey_t k;
+    graph_skey_of(instantiateParams->hUploadStream, ptsz, &k);
+    CUresult admit = graph_mem_admit(&mem, &k, NULL, &lock_fd, NULL);
     if (unlikely(admit != CUDA_SUCCESS)) {
       instantiateParams->result_out = CUDA_GRAPH_INSTANTIATE_ERROR;
       return admit;
@@ -4935,6 +5957,7 @@ CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
   int64_t tokens = 1;
   graph_mem_t mem;
   mem.n = 0;   /* only n needs initialising: entries past it are never read */
+  mem.side = 0;
   int launch_dev = -1;
   graph_cost_lookup(hGraphExec, &tokens, &mem, &launch_dev);
   CUdevice current = -1;
@@ -4950,7 +5973,11 @@ CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
    * the headroom while this one sleeps. */
   rate_limiter(tokens, host_index);
   int lock_fd = -1;
-  ret = graph_mem_admit(&mem, &lock_fd);
+  graph_run_ticket_t ticket;
+  graph_run_ticket_t *t = graph_run_ticket(&ticket, &mem, hStream, __CUDA_API_IS_PTSZ);
+  graph_skey_t k = ticket.k;
+  if (t == NULL && mem.n > 0) graph_skey_of(hStream, __CUDA_API_IS_PTSZ, &k);
+  ret = graph_mem_admit(&mem, &k, hGraphExec, &lock_fd, t);
   if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
   int gap = graph_gap_begin(host_index, hStream, current == device);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuGraphLaunch),
@@ -4958,6 +5985,11 @@ CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
   /* The mapping is done once the call returns; gap_end may synchronize and
    * sleep, which must not happen under the device lock. */
   unlock_gpu_device(lock_fd);
+  if (ret == CUDA_SUCCESS && (mem.n > 0 || mem.side)) {
+    graph_launched(hGraphExec, &mem, hStream, __CUDA_API_IS_PTSZ, t);
+  } else {
+    graph_running_cancel(t);
+  }
   if (gap) gap_end(host_index, hStream, ret);
 DONE:
   return ret;
@@ -4968,6 +6000,7 @@ CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
   int64_t tokens = 1;
   graph_mem_t mem;
   mem.n = 0;   /* only n needs initialising: entries past it are never read */
+  mem.side = 0;
   int launch_dev = -1;
   graph_cost_lookup(hGraphExec, &tokens, &mem, &launch_dev);
   CUdevice current = -1;
@@ -4983,7 +6016,11 @@ CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
    * the headroom while this one sleeps. */
   rate_limiter(tokens, host_index);
   int lock_fd = -1;
-  ret = graph_mem_admit(&mem, &lock_fd);
+  graph_run_ticket_t ticket;
+  graph_run_ticket_t *t = graph_run_ticket(&ticket, &mem, hStream, 1);
+  graph_skey_t k = ticket.k;
+  if (t == NULL && mem.n > 0) graph_skey_of(hStream, 1, &k);
+  ret = graph_mem_admit(&mem, &k, hGraphExec, &lock_fd, t);
   if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
   int gap = graph_gap_begin(host_index, hStream, current == device);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphLaunch_ptsz,
@@ -4991,6 +6028,11 @@ CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
   /* The mapping is done once the call returns; gap_end may synchronize and
    * sleep, which must not happen under the device lock. */
   unlock_gpu_device(lock_fd);
+  if (ret == CUDA_SUCCESS && (mem.n > 0 || mem.side)) {
+    graph_launched(hGraphExec, &mem, hStream, 1, t);
+  } else {
+    graph_running_cancel(t);
+  }
   if (gap) gap_end(host_index, hStream, ret);
 DONE:
   return ret;
@@ -5001,9 +6043,12 @@ static CUresult graph_upload_admitted(CUgraphExec hGraphExec, CUstream hStream, 
   int64_t tokens = 1;
   graph_mem_t mem;
   mem.n = 0;   /* only n needs initialising: entries past it are never read */
+  mem.side = 0;
   graph_cost_lookup(hGraphExec, &tokens, &mem, NULL);
   int lock_fd = -1;
-  CUresult ret = graph_mem_admit(&mem, &lock_fd);
+  graph_skey_t k;
+  graph_skey_of(hStream, ptsz, &k);
+  CUresult ret = graph_mem_admit(&mem, &k, hGraphExec, &lock_fd, NULL);
   if (unlikely(ret != CUDA_SUCCESS)) return ret;
   ret = ptsz ? CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphUpload_ptsz, hGraphExec, hStream)
              : CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphUpload, hGraphExec, hStream);
@@ -5023,6 +6068,7 @@ CUresult cuGraphExecDestroy(CUgraphExec hGraphExec) {
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecDestroy, hGraphExec);
   if (ret == CUDA_SUCCESS) {
     graph_cost_forget(hGraphExec);
+    graph_use_forget_exec(hGraphExec);
   }
   return ret;
 }
@@ -5206,7 +6252,7 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
     goto DONE;
   }
   size_t request_size = bytesize;
-  path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
+  path = prepare_async_allocation(device, request_size, 0, hStream, __CUDA_API_IS_PTSZ, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
@@ -5215,17 +6261,9 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync), dptr, bytesize, pool, hStream);
   if (ret == CUDA_SUCCESS && lock_fd >= 0) {
-    if (!stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
-      /* Bridge the allocation into the shared view before the lock is dropped,
-       * so a concurrent allocator counts it while it is still in flight. */
-      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_ASYNC_BRIDGE, host_index);
-      unlock_gpu_device(lock_fd);
-      lock_fd = -1;
-      /* Switching from capture to synchronous operation, off the device lock. */
-      CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
-      /* Release internal accounting only once NVML is guaranteed to see it. */
-      free_gpu_virt_memory(*dptr);
-    } else {
+    /* Outside a capture nothing is charged: the driver has the memory by the time the
+     * call returns, however busy the stream, and NVML reports it (docs 6.16). */
+    if (stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
       /* Charge the capture so that several allocations inside one capture
        * accumulate against the limit. Chargeable only while the owning graph is
        * known, because that is what lets cuStreamEndCapture retire it. */
@@ -5259,7 +6297,7 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
     goto DONE;
   }
   size_t request_size = bytesize;
-  path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
+  path = prepare_async_allocation(device, request_size, 0, hStream, 1, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
@@ -5269,17 +6307,9 @@ CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocFromPoolAsync_ptsz, dptr, bytesize, pool, hStream);
   // Confirm successful locking and waive the cost of unopened containers
   if (ret == CUDA_SUCCESS && lock_fd >= 0) {
-    if (!stream_is_capturing(hStream, 1)) {
-      /* Bridge the allocation into the shared view before the lock is dropped,
-       * so a concurrent allocator counts it while it is still in flight. */
-      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_ASYNC_BRIDGE, host_index);
-      unlock_gpu_device(lock_fd);
-      lock_fd = -1;
-      /* Switching from capture to synchronous operation, off the device lock. */
-      CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
-      /* Release internal accounting only once NVML is guaranteed to see it. */
-      free_gpu_virt_memory(*dptr);
-    } else {
+    /* Outside a capture nothing is charged: the driver has the memory by the time the
+     * call returns, however busy the stream, and NVML reports it (docs 6.16). */
+    if (stream_is_capturing(hStream, 1)) {
       /* Charge the capture so that several allocations inside one capture
        * accumulate against the limit. Chargeable only while the owning graph is
        * known, because that is what lets cuStreamEndCapture retire it. */
@@ -5296,8 +6326,8 @@ DONE:
   return ret;
 }
 
-/* An explicit graph allocation, checked against the limit like
- * cuMemAllocFromPoolAsync but never charged: the node only fixes a virtual
+/* An explicit graph allocation, checked against the limit like a captured one
+ * (graph_pool_absorbs) but never charged: the node only fixes a virtual
  * address, physical memory is mapped from the device's graph pool at
  * cuGraphUpload or cuGraphLaunch (RTX 3080: not at the node, nor at
  * instantiation), where graph_mem_admit() checks the whole graph's
@@ -5319,7 +6349,7 @@ CUresult cuGraphAddMemAllocNode(CUgraphNode *phGraphNode, CUgraph hGraph,
     goto CALL;
   }
   CUdevice device = (CUdevice)nodeParams->poolProps.location.id;
-  path = prepare_memory_allocation(device, nodeParams->bytesize, 0, &host_index, &lock_fd);
+  path = prepare_allocation(device, nodeParams->bytesize, 0, 1, NULL, 0, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
@@ -5352,6 +6382,7 @@ CUresult _cuMemFree(CUdeviceptr dptr) {
   }
   if (likely(ret == CUDA_SUCCESS)) {
     free_gpu_virt_memory(dptr);
+    graph_held_release(dptr);
   }
 DONE:
   return ret;
@@ -5416,6 +6447,11 @@ CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
     if (type != 0) {
       free_gpu_virt_memory(dptr);
     }
+    /* In a capture it becomes a free node, which gives the block back when its graph runs. */
+    if (unlikely(__atomic_load_n(&g_graph_held_count, __ATOMIC_RELAXED) != 0) &&
+        !stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
+      graph_held_release(dptr);
+    }
   }
   return ret;
 }
@@ -5432,12 +6468,18 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
     if (type != 0) {
       free_gpu_virt_memory(dptr);
     }
+    /* In a capture it becomes a free node, which gives the block back when its graph runs. */
+    if (unlikely(__atomic_load_n(&g_graph_held_count, __ATOMIC_RELAXED) != 0) &&
+        !stream_is_capturing(hStream, 1)) {
+      graph_held_release(dptr);
+    }
   }
   return ret;
 }
 
 /* Beginning a capture records its graph (capture_reg_begin), which is the
- * only point the graph is certain to be known: see the registry. One wrapper
+ * only point the graph is certain to be known: see the registry. Announced
+ * first (capture_announce), so no event call of ours falls between the two. One wrapper
  * per ABI, each reaching the entry of its own name -- cuda.h declares
  * cuStreamBeginCapture(CUstream) and cuStreamBeginCapture_v2(CUstream,
  * CUstreamCaptureMode) in its __CUDA_API_VERSION_INTERNAL block, and crossing
@@ -5445,37 +6487,45 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
  * unset register in the other. */
 CUresult cuStreamBeginCapture(CUstream hStream) {
   capture_origin_t origin = stream_origin_before_capture(hStream, __CUDA_API_IS_PTSZ);
+  capture_announce();
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture), hStream);
   if (ret == CUDA_SUCCESS) {
     capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ), &origin);
   }
+  capture_settled();
   return ret;
 }
 
 CUresult cuStreamBeginCapture_v2(CUstream hStream, CUstreamCaptureMode mode) {
   capture_origin_t origin = stream_origin_before_capture(hStream, __CUDA_API_IS_PTSZ);
+  capture_announce();
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCapture_v2), hStream, mode);
   if (ret == CUDA_SUCCESS) {
     capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, stream_capture_graph(hStream, __CUDA_API_IS_PTSZ), &origin);
   }
+  capture_settled();
   return ret;
 }
 
 CUresult cuStreamBeginCapture_ptsz(CUstream hStream) {
   capture_origin_t origin = stream_origin_before_capture(hStream, 1);
+  capture_announce();
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamBeginCapture_ptsz, hStream);
   if (ret == CUDA_SUCCESS) {
     capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1), &origin);
   }
+  capture_settled();
   return ret;
 }
 
 CUresult cuStreamBeginCapture_v2_ptsz(CUstream hStream, CUstreamCaptureMode mode) {
   capture_origin_t origin = stream_origin_before_capture(hStream, 1);
+  capture_announce();
   CUresult ret = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamBeginCapture_v2_ptsz, hStream, mode);
   if (ret == CUDA_SUCCESS) {
     capture_reg_begin(hStream, 1, stream_capture_graph(hStream, 1), &origin);
   }
+  capture_settled();
   return ret;
 }
 
@@ -5484,12 +6534,14 @@ CUresult cuStreamBeginCaptureToGraph(CUstream hStream, CUgraph hGraph,
                                      const CUgraphEdgeData *dependencyData,
                                      size_t numDependencies, CUstreamCaptureMode mode) {
   capture_origin_t origin = stream_origin_before_capture(hStream, __CUDA_API_IS_PTSZ);
+  capture_announce();
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamBeginCaptureToGraph),
                                   hStream, hGraph, dependencies, dependencyData,
                                   numDependencies, mode);
   if (ret == CUDA_SUCCESS) {
     capture_reg_begin(hStream, __CUDA_API_IS_PTSZ, hGraph, &origin);
   }
+  capture_settled();
   return ret;
 }
 
@@ -5498,12 +6550,14 @@ CUresult cuStreamBeginCaptureToGraph_ptsz(CUstream hStream, CUgraph hGraph,
                                           const CUgraphEdgeData *dependencyData,
                                           size_t numDependencies, CUstreamCaptureMode mode) {
   capture_origin_t origin = stream_origin_before_capture(hStream, 1);
+  capture_announce();
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamBeginCaptureToGraph_ptsz,
                                   hStream, hGraph, dependencies, dependencyData,
                                   numDependencies, mode);
   if (ret == CUDA_SUCCESS) {
     capture_reg_begin(hStream, 1, hGraph, &origin);
   }
+  capture_settled();
   return ret;
 }
 
@@ -5555,6 +6609,9 @@ extern CUresult _cuStreamDestroy(CUstream hStream);
 
 static CUresult stream_destroy_and_discharge(CUstream hStream) {
   CUgraph capturing = capture_reg_graph(hStream, 0);
+  /* Before the handle is given up: once it is, another thread's new stream can get the
+   * same address, and its record would be the one forgotten. */
+  if (hStream != NULL) graph_use_forget_stream(hStream);
   CUresult ret = _cuStreamDestroy(hStream);
   if (ret == CUDA_SUCCESS && capturing != NULL) {
     free_gpu_virt_memory_by_graph(capturing);
@@ -5569,6 +6626,68 @@ CUresult cuStreamDestroy_v2(CUstream hStream) {
 
 CUresult cuStreamDestroy(CUstream hStream) {
   return stream_destroy_and_discharge(hStream);
+}
+
+/* Before a synchronize: the launches that had returned by then, as a count (0: no record
+ * to settle, the usual case, one relaxed load). */
+static uint64_t graph_sync_snapshot(void) {
+  if (likely(__atomic_load_n(&g_graph_running_count, __ATOMIC_RELAXED) == 0)) return 0;
+  return __atomic_load_n(&g_graph_submitted, __ATOMIC_ACQUIRE);
+}
+
+/* After a synchronize of stream (or of the current context, whole_ctx) succeeded: the
+ * graphs whose launches returned before it began have finished. Their records stop
+ * counting, and stop holding on to the largest need of their stream. A launch still
+ * under way when it began (pending, or returned after the snapshot) is left alone. */
+static void graph_running_synced(CUstream stream, int ptsz, int whole_ctx, uint64_t snap) {
+  if (snap == 0) return;
+  CUcontext ctx = NULL;
+  graph_skey_t k;
+  memset(&k, 0, sizeof(k));
+  if (whole_ctx || stream == NULL || stream == CU_STREAM_PER_THREAD || stream == CU_STREAM_LEGACY) {
+    if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetCurrent, &ctx) != CUDA_SUCCESS || ctx == NULL) return;
+  }
+  if (!whole_ctx) {
+    graph_stream_key(stream, ptsz, ctx, &k);
+    if (!graph_skey_valid(&k)) return;
+  }
+  pthread_mutex_lock(&g_graph_use_lock);
+  if (!whole_ctx) {
+    graph_running_t *r = (graph_running_t *)slot_table_find(&g_graph_running, k.key, k.key2);
+    if (r != NULL && r->active == GRAPH_RUN_EVENT && r->submitted != 0 && r->submitted <= snap) {
+      r->active = GRAPH_RUN_DONE;
+    }
+  } else {
+    for (size_t i = 0; i < g_graph_running.capacity; i++) {
+      graph_running_t *r = (graph_running_t *)slot_table_cell(&g_graph_running, i);
+      if (r->h.key != 0 && r->active == GRAPH_RUN_EVENT && r->submitted != 0 && r->submitted <= snap &&
+          graph_running_of_ctx(r, ctx)) {
+        r->active = GRAPH_RUN_DONE;
+      }
+    }
+  }
+  pthread_mutex_unlock(&g_graph_use_lock);
+}
+
+CUresult cuStreamSynchronize(CUstream hStream) {
+  uint64_t snap = graph_sync_snapshot();
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
+  if (ret == CUDA_SUCCESS) graph_running_synced(hStream, __CUDA_API_IS_PTSZ, 0, snap);
+  return ret;
+}
+
+CUresult cuStreamSynchronize_ptsz(CUstream hStream) {
+  uint64_t snap = graph_sync_snapshot();
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
+  if (ret == CUDA_SUCCESS) graph_running_synced(hStream, 1, 0, snap);
+  return ret;
+}
+
+CUresult cuCtxSynchronize(void) {
+  uint64_t snap = graph_sync_snapshot();
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxSynchronize);
+  if (ret == CUDA_SUCCESS) graph_running_synced(NULL, 0, 1, snap);
+  return ret;
 }
 
 /* Second, deterministic discharge point for capture charges. cuStreamEnd
@@ -5626,6 +6745,10 @@ static CUcontext primary_ctx_handle(CUdevice dev) {
 
 CUresult _cuCtxDestroy(CUcontext ctx) {
   CUresult ret = CUDA_ERROR_NOT_FOUND;
+  /* Before the driver frees its events: an event of ctx destroyed after that could be a
+   * new one of the application's at the same address. Should the destroy fail, the
+   * records are lost and their events leak, both harmless. */
+  graph_use_forget_ctx(ctx);
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDestroy_v2, ctx);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuCtxDestroy))) {
@@ -5662,6 +6785,7 @@ CUresult _cuDevicePrimaryCtxRelease(CUdevice dev) {
     free_gpu_virt_memory_by_ctx(ctx);
     capture_reg_forget(NULL, ctx);
     graph_cost_forget_ctx(ctx);
+    graph_use_forget_ctx(ctx);
   }
   return ret;
 }
@@ -5680,6 +6804,7 @@ CUresult cuDevicePrimaryCtxRelease(CUdevice dev) {
 CUresult _cuDevicePrimaryCtxReset(CUdevice dev) {
   CUcontext ctx = primary_ctx_handle(dev);
   CUresult ret = CUDA_ERROR_NOT_FOUND;
+  graph_use_forget_ctx(ctx);   /* before its events go: see _cuCtxDestroy() */
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxReset_v2, dev);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDevicePrimaryCtxReset))) {
@@ -5763,7 +6888,9 @@ DONE:
  * this may run from a signal handler, and a torn reading of two counters is fine. */
 void log_graph_table_stats(void) {
   LOGGER(VERBOSE, "table stats: cost capacity=%zu count=%zu, capture capacity=%zu count=%zu, "
-                  "pool capacity=%zu count=%zu",
+                  "pool capacity=%zu count=%zu, held capacity=%zu count=%zu, "
+                  "running capacity=%zu count=%zu",
          g_graph_cost.capacity, g_graph_cost.count, g_capture_reg.capacity, g_capture_reg.count,
-         g_pool_dev.capacity, g_pool_dev.count);
+         g_pool_dev.capacity, g_pool_dev.count, g_graph_held.capacity, g_graph_held.count,
+         g_graph_running.capacity, g_graph_running.count);
 }

@@ -25,7 +25,7 @@ RUN if [ -n "$DNF_MIRROR" ]; then \
       sed -e 's|^mirrorlist=|#mirrorlist=|g' \
           -e "s|^#baseurl=http://dl\.rockylinux\.org/\$contentdir|baseurl=${DNF_MIRROR}|g" \
           -i.bak /etc/yum.repos.d/Rocky-*.repo; \
-    fi && dnf makecache && dnf install -y make cmake gcc-c++ && dnf clean all
+    fi && dnf makecache && dnf install -y --nobest make cmake gcc-c++ && dnf clean all
 
 WORKDIR /vgpu-controller
 

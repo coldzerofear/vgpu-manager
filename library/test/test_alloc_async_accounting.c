@@ -2,13 +2,9 @@
  * Async / graph-capture memory accounting regression test.
  *
  * The limit check reads NVML plus our own virtual-memory ledger, because an
- * allocation the driver has not physically made yet is invisible to NVML. Two
- * kinds of allocation are in that state, and each is covered by a charge the
- * hook adds and later retires:
+ * allocation in a capture is invisible to NVML: no memory exists yet. It is
+ * covered by a charge the hook adds and later retires:
  *
- *   in flight  cuMemAllocAsync is stream-ordered, so between the driver call
- *              and the synchronize that follows it, the memory is promised but
- *              not committed (MEMORY_TYPE_ASYNC_BRIDGE).
  *   captured   an allocation made during graph capture cannot be synchronized
  *              at all -- that would invalidate the capture -- so it stays
  *              charged for the length of the capture (MEMORY_TYPE_CAPTURE).
@@ -22,12 +18,10 @@
  * What each case fails on -- worth re-checking by hand (comment the line out,
  * rebuild, expect red) whenever this file or the hooks are touched:
  *
- *   [A] the bridge charge in the non-capture branch of cuMemAllocAsync /
- *       cuMemAllocFromPoolAsync. The charge only exists between the driver call
- *       and the synchronize, so it is invisible to the thread doing the
- *       allocating -- it exists for OTHER allocators. This case parks the
- *       stream so the allocation cannot complete, and has a second thread read
- *       the ledger while the allocating thread is still inside the hook.
+ *   [A] outside a capture nothing is charged and nothing is waited for: with the
+ *       stream parked, cuMemAllocAsync and cuMemAllocFromPoolAsync return at once
+ *       and the limit view already counts the memory, because the driver has it
+ *       when the call returns (docs 6.16).
  *
  *   [B] the capture charge (malloc_gpu_virt_memory_captured).
  *
@@ -168,143 +162,77 @@ static int can_assert(void) {
 }
 
 /* --------------------------------------------------------------------- [A] --
- *
- * A host function parks the stream until another thread lets it go.
- *
- * This is what gives [A] its teeth. A stream-ordered allocation only becomes
- * physical -- and only then visible to NVML -- when the stream reaches it. On an
- * idle stream that happens within microseconds, so the bridge charge would come
- * and go faster than anything could observe. Parking the stream holds the
- * allocation in flight for as long as we like, which is exactly the window the
- * bridge exists to cover. */
-typedef struct {
-  pthread_mutex_t m;
-  pthread_cond_t  cv;
-  int       entered;      /* the stream reached the host function */
-  int       release;      /* let it go */
-  long long charged;      /* ledger reading taken while the alloc was in flight */
-  long long baseline;     /* ledger reading taken before it started */
-  long long want;         /* the allocation's size: the charge to wait for */
-} stream_gate_t;
+ * A host function parks the stream until the checks are done, so the allocation
+ * behind it cannot have been reached. It must return regardless -- a library that
+ * waited for the stream would hang here until the bound below -- and the memory must
+ * count against the limit by then, for the allocator after us. */
+static volatile int g_a_release;
 
-static void CUDA_CB gate_hold(void *user) {
-  stream_gate_t *g = (stream_gate_t *)user;
-  pthread_mutex_lock(&g->m);
-  g->entered = 1;
-  pthread_cond_broadcast(&g->cv);
-  while (!g->release) pthread_cond_wait(&g->cv, &g->m);
-  pthread_mutex_unlock(&g->m);
+static void CUDA_CB a_hold(void *user) {
+  (void)user;
+  for (int i = 0; !g_a_release && i < 10000; i++) usleep(1000);   /* 10 s at most */
 }
 
-/* Wait for the stream to park, sample the ledger while the allocating thread is
- * still inside the hook, then release. Bounded waits only: a gate that never
- * arrives must let the case finish and be judged, not wedge the suite. */
-static void *gate_observer(void *user) {
-  stream_gate_t *g = (stream_gate_t *)user;
-  for (int i = 0; i < 2000; i++) {          /* up to ~2s for the gate to arrive */
-    pthread_mutex_lock(&g->m);
-    int in = g->entered;
-    pthread_mutex_unlock(&g->m);
-    if (in) break;
-    usleep(1000);
-  }
-  /* The stream reaching the gate says nothing about how far the allocating
-   * thread has got: it may still be inside the hook ahead of the charge (the
-   * NVML query, the device lock), and on a loaded machine that took longer than
-   * a fixed 50 ms -- a flaky FAIL with the charge simply not made yet. The
-   * allocation cannot complete while the gate holds, so poll, for up to 2 s,
-   * until the charge shows: seen here, it was made while in flight. */
-  for (int i = 0; i < 2000; i++) {
-    g->charged = ledger_used_self();
-    if (g->charged < 0 || g->charged - g->baseline >= g->want) break;
-    usleep(1000);
-  }
-
-  pthread_mutex_lock(&g->m);
-  g->release = 1;
-  pthread_cond_broadcast(&g->cv);
-  pthread_mutex_unlock(&g->m);
-  return NULL;
-}
-
-/* [A] An allocation that has not landed yet must still be charged, so that a
- * concurrent allocator counts it. */
-static int inflight_allocation_is_charged(CUstream stream) {
-  { int _pre = can_assert(); if (_pre != 0) return _pre; }   /* -1 skip, 1 fail */
-
-  size_t freeb = 0;
-  if (headroom(&freeb) != CUDA_SUCCESS) return 1;
-  size_t chunk = freeb / 4;
+static int inflight_case(CUstream stream, CUmemoryPool pool, const char *what) {
+  size_t before = 0, after = 0, total = 0;
+  if (cuMemGetInfo(&before, &total) != CUDA_SUCCESS) return 1;
+  size_t chunk = before / 4;
   if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
+  long long ledger_before = ledger_used_self();
 
-  stream_gate_t gate;
-  pthread_mutex_init(&gate.m, NULL);
-  pthread_cond_init(&gate.cv, NULL);
-  gate.entered = gate.release = 0;
-  gate.charged = -1;
-  gate.baseline = ledger_used_self();
-  gate.want = (long long)chunk;
-
-  CUresult g = cuLaunchHostFunc(stream, gate_hold, &gate);
+  g_a_release = 0;
+  CUresult g = cuLaunchHostFunc(stream, a_hold, NULL);
   if (g != CUDA_SUCCESS) {
     describe("cuLaunchHostFunc (park the stream)", g);
     printf("  SKIP (cannot hold the stream, so nothing would be proven)\n");
     return -1;
   }
 
-  pthread_t observer;
-  if (pthread_create(&observer, NULL, gate_observer, &gate) != 0) {
-    printf("  FAIL: could not start the observer thread\n");
-    pthread_mutex_lock(&gate.m);
-    gate.release = 1;
-    pthread_cond_broadcast(&gate.cv);
-    pthread_mutex_unlock(&gate.m);
-    cuStreamSynchronize(stream);
-    return 1;
-  }
-
-  /* Queued behind the parked host function, so it cannot complete until the
-   * observer has had its look. */
   CUdeviceptr dptr = 0;
-  CUresult a = cuMemAllocAsync(&dptr, chunk, stream);
-  pthread_join(observer, NULL);
+  CUresult a = pool != NULL ? cuMemAllocFromPoolAsync(&dptr, chunk, pool, stream)
+                            : cuMemAllocAsync(&dptr, chunk, stream);
+  CUresult busy = cuStreamQuery(stream);
+  CUresult info = cuMemGetInfo(&after, &total);
+  long long ledger_after = ledger_used_self();
+  g_a_release = 1;
+  cuStreamSynchronize(stream);
 
   int failed = 0;
-  if (a != CUDA_SUCCESS) {
-    describe("cuMemAllocAsync (behind the gate)", a);
+  describe(what, a);
+  printf("  headroom %.0f -> %.0f MiB, stream %s, ledger %.0f -> %.0f MiB\n", MIB(before), MIB(after),
+         busy == CUDA_ERROR_NOT_READY ? "still busy" : "no longer busy", MIB(ledger_before), MIB(ledger_after));
+  if (a != CUDA_SUCCESS || info != CUDA_SUCCESS) {
     failed = 1;
   } else {
-    long long delta = gate.charged - gate.baseline;
-    printf("  ledger while in flight: %.0f MiB (was %.0f MiB, allocation %.0f MiB)\n",
-           MIB(gate.charged), MIB(gate.baseline), MIB(chunk));
-    if (gate.charged < 0) {
-      printf("  FAIL: could not read the ledger\n");
+    if (busy != CUDA_ERROR_NOT_READY) {
+      /* Waiting for the stream would have run it out: the hold gives up after its bound. */
+      printf("  FAIL: the call waited for the stream, or the stream was not held\n");
       failed = 1;
-    } else if (delta < (long long)chunk) {
-      printf("  FAIL: an in-flight allocation of %.0f MiB added only %.0f MiB to\n"
-             "  the ledger -- a concurrent allocator would not see it and could\n"
-             "  be handed memory that is already spoken for\n", MIB(chunk), MIB(delta));
+    }
+    if (before < after + chunk - (32u << 20)) {
+      printf("  FAIL: a pending allocation of %.0f MiB is not counted against the limit\n", MIB(chunk));
+      failed = 1;
+    }
+    if (ledger_after != ledger_before) {
+      printf("  FAIL: %.0f MiB charged for memory NVML already reports\n", MIB(ledger_after - ledger_before));
       failed = 1;
     }
     cuMemFreeAsync(dptr, stream);
   }
-
   cuStreamSynchronize(stream);
-
-  /* And it must not stay charged once the allocation is real: from here on NVML
-   * reports it, so keeping the charge would count it twice. */
-  if (!failed) {
-    long long after = ledger_used_self();
-    if (after > gate.baseline) {
-      printf("  FAIL: %.0f MiB still charged after the allocation completed\n",
-             MIB(after - gate.baseline));
-      failed = 1;
-    }
-  }
-
-  pthread_cond_destroy(&gate.cv);
-  pthread_mutex_destroy(&gate.m);
   return failed;
+}
+
+/* [A] An allocation the stream has not reached counts against the limit at once, and is
+ * not waited for. */
+static int async_allocation_counts_unwaited(CUstream stream, CUdevice device) {
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }   /* -1 skip, 1 fail */
+  CUmemoryPool pool = NULL;
+  int rc = inflight_case(stream, NULL, "cuMemAllocAsync (behind the parked stream)");
+  if (rc != 0) return rc;
+  if (cuDeviceGetDefaultMemPool(&pool, device) != CUDA_SUCCESS) return 1;
+  cuMemPoolTrimTo(pool, 0);
+  return inflight_case(stream, pool, "cuMemAllocFromPoolAsync (behind the parked stream)");
 }
 
 /* --------------------------------------------------------------------- [B] --
@@ -1809,8 +1737,8 @@ int main(void) {
       if (rc < 0) skipped++; else failures += rc;                             \
     } while (0)
 
-  RUN_CASE("[A] an in-flight async allocation is charged while it is pending",
-           inflight_allocation_is_charged(stream));
+  RUN_CASE("[A] an async allocation behind a parked stream counts at once, unwaited",
+           async_allocation_counts_unwaited(stream, device));
   RUN_CASE("[B] an allocation made during capture is charged, and released at end",
            capture_allocation_is_charged(stream));
   RUN_CASE("[C] repeated capture cycles do not accumulate charges",

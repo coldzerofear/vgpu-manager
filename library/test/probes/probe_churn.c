@@ -235,6 +235,98 @@ static void m_capture_thread_exit(void) {
   pthread_join(t, NULL);
 }
 
+/* ---- the table of blocks graphs left allocated ---- */
+static CUgraphExec unfreed_exec(CUdeviceptr *dptr) {
+  CUgraph g;
+  CUgraphExec e;
+  CUgraphNode n;
+  CUDA_MEM_ALLOC_NODE_PARAMS a;
+  memset(&a, 0, sizeof(a));
+  a.poolProps.allocType = CU_MEM_ALLOCATION_TYPE_PINNED;
+  a.poolProps.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  a.poolProps.location.id = g_dev;
+  a.bytesize = 1 << 20;
+  CHECK(cuGraphCreate(&g, 0));
+  CHECK(cuGraphAddMemAllocNode(&n, g, NULL, 0, &a));
+  CHECK(cuGraphInstantiateWithFlags(&e, g, 0));
+  CHECK(cuGraphDestroy(g));
+  *dptr = a.dptr;
+  return e;
+}
+
+static void m_held(void) {
+  CUdeviceptr p;
+  CUgraphExec e = unfreed_exec(&p);
+  COUNT_FAILURE(cuGraphLaunch(e, g_stream));
+  COUNT_FAILURE(cuStreamSynchronize(g_stream));
+  COUNT_FAILURE(cuGraphExecDestroy(e));
+  COUNT_FAILURE(cuMemFree(p));
+}
+
+static void m_held_ctx(void) {
+  CUcontext x = new_context();
+  CUstream s;
+  CUdeviceptr p;
+  CHECK(cuStreamCreate(&s, 0));
+  CUgraphExec e = unfreed_exec(&p);
+  COUNT_FAILURE(cuGraphLaunch(e, s));
+  COUNT_FAILURE(cuStreamSynchronize(s));
+  COUNT_FAILURE(cuCtxDestroy(x));
+  cuCtxSetCurrent(g_ctx);
+  /* The block outlives its context; freed from another. */
+  COUNT_FAILURE(cuMemFree(p));
+}
+
+/* ---- the records of graphs running on several streams ---- */
+/* Two streams of a context of its own, each running a graph, then the context going:
+ * the events behind the launches go with it and must be forgotten, not destroyed. */
+static void m_running_ctx(void) {
+  CUcontext x = new_context();
+  CUstream s1, s2;
+  CUgraph g;
+  CUgraphExec e;
+  CUgraphNode prev = NULL;
+  CHECK(cuStreamCreate(&s1, 0));
+  CHECK(cuStreamCreate(&s2, 0));
+  CHECK(cuGraphCreate(&g, 0));
+  add_alloc_free(g, g_dev, &prev);
+  CHECK(cuGraphInstantiateWithFlags(&e, g, 0));
+  COUNT_FAILURE(cuGraphLaunch(e, s1));
+  COUNT_FAILURE(cuGraphLaunch(e, s2));
+  COUNT_FAILURE(cuGraphLaunch(e, s1));
+  COUNT_FAILURE(cuCtxDestroy(x));
+  cuCtxSetCurrent(g_ctx);
+}
+
+/* Streams coming and going while graphs run on them. */
+static void m_running_streams(void) {
+  CUstream s;
+  CHECK(cuStreamCreate(&s, 0));
+  static CUgraphExec e;
+  if (e == NULL) e = make_exec(g_dev, 0);
+  COUNT_FAILURE(cuGraphLaunch(e, s));
+  COUNT_FAILURE(cuGraphLaunch(e, g_stream));
+  COUNT_FAILURE(cuStreamDestroy(s));
+  COUNT_FAILURE(cuStreamSynchronize(g_stream));
+}
+
+/* Threads coming and going, each launching on its per-thread default stream: a record
+ * per thread, which no destroy hook retires. Idle ones are recycled past 64. */
+static void *running_thread_body(void *arg) {
+  CUgraphExec e = (CUgraphExec)arg;
+  cuCtxSetCurrent(g_ctx);
+  COUNT_FAILURE(cuGraphLaunch(e, CU_STREAM_PER_THREAD));
+  COUNT_FAILURE(cuStreamSynchronize(CU_STREAM_PER_THREAD));
+  return NULL;
+}
+
+static void m_running_threads(void) {
+  static CUgraphExec e;
+  if (e == NULL) e = make_exec(g_dev, 0);
+  pthread_t t;
+  if (pthread_create(&t, NULL, running_thread_body, e) == 0) pthread_join(t, NULL);
+}
+
 /* ---- the pool table ---- */
 static void m_pool(void) { COUNT_FAILURE(cuMemPoolDestroy(make_pool())); }
 
@@ -255,7 +347,8 @@ static const struct {
   {"ctx", m_ctx, 0},
   {"ctx_not_current", m_ctx_not_current, 0},
   {"ctx_multi", m_ctx_multi, 1},
-  {"primary_release", m_primary_release, 0},
+  /* On one device this is not the last reference, and its execs stay, rightly. */
+  {"primary_release", m_primary_release, 1},
   {"primary_reset", m_primary_reset, 0},
   {"capture", m_capture, 0},
   {"capture_invalidated", m_capture_invalidated, 0},
@@ -265,6 +358,11 @@ static const struct {
   {"capture_other_ctx_destroyed", m_capture_other_ctx_destroyed, 0},
   {"capture_begin_ctx_destroyed", m_capture_begin_ctx_destroyed, 0},
   {"capture_thread_exit", m_capture_thread_exit, 0},
+  {"held", m_held, 0},
+  {"held_ctx", m_held_ctx, 0},
+  {"running_ctx", m_running_ctx, 0},
+  {"running_streams", m_running_streams, 0},
+  {"running_threads", m_running_threads, 0},
   {"pool", m_pool, 0},
   {"pool_get", m_pool_get, 0},
 };

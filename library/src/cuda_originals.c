@@ -171,9 +171,8 @@ CUresult cuCtxSetSharedMemConfig(CUsharedconfig config) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxSetSharedMemConfig, config);
 }
 
-CUresult cuCtxSynchronize(void) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxSynchronize);
-}
+/* cuCtxSynchronize: public symbol now provided by the hook in cuda_hook.c, which
+ * settles the records of graphs running in the context. */
 
 CUresult cuModuleUnload(CUmodule hmod) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuModuleUnload, hmod);
@@ -1301,13 +1300,8 @@ CUresult cuStreamAddCallback_ptsz(CUstream hStream, CUstreamCallback callback,
                          callback, userData, flags);
 }
 
-CUresult cuStreamSynchronize(CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
-}
-
-CUresult cuStreamSynchronize_ptsz(CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
-}
+/* cuStreamSynchronize, cuStreamSynchronize_ptsz: public symbols now provided by the hook
+ * in cuda_hook.c, which settles the record of graphs running on the stream. */
 
 CUresult cuStreamQuery(CUstream hStream) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamQuery), hStream);

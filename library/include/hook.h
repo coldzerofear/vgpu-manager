@@ -507,18 +507,18 @@ typedef struct {
  *
  * UVA_SYNC/UVA_ASYNC name memory the oversold path handed out as managed
  * memory; only UVA_ASYNC has to drain the stream and fall back to
- * cuMemFree. CAPTURE and ASYNC_BRIDGE both name ordinary device memory
- * that's only being ACCOUNTED for, covering a window where the allocation
- * is invisible to NVML: ASYNC_BRIDGE spans the driver call to the stream
- * synchronize, CAPTURE spans the capture itself (cuMemAllocAsync only
- * reserves an address during capture -- no physical memory exists until
- * the graph launches and NVML reports the pool). cuStreamEndCapture
+ * cuMemFree. CAPTURE names ordinary device memory that's only being
+ * ACCOUNTED for, covering a window where the allocation is invisible to
+ * NVML: the capture itself (cuMemAllocAsync only reserves an address during
+ * capture -- no physical memory exists until the graph launches and NVML
+ * reports the pool). A cuMemAllocAsync outside a capture has no such window:
+ * the driver has the memory, and NVML shows it, when the call returns,
+ * however busy the stream is. cuStreamEndCapture
  * retires the CAPTURE charge, since holding it past launch would
  * double-count against NVML. */
 #define MEMORY_TYPE_UVA_SYNC     1
 #define MEMORY_TYPE_UVA_ASYNC    2
 #define MEMORY_TYPE_CAPTURE      3
-#define MEMORY_TYPE_ASYNC_BRIDGE 4
 
 /* One virtual-memory record. Process-private heap, never shared memory (the
  * chain pointer alone rules that out), so it carries no layout contract with
@@ -1028,6 +1028,9 @@ void free_gpu_virt_memory_by_graph(CUgraph graph);
  * destroys its graphs with no cuGraphDestroy to retire them by.
  */
 void free_gpu_virt_memory_by_ctx(CUcontext ctx);
+
+/* Bytes this process has charged to captures still open on the host device. */
+size_t get_captured_gpu_virt_memory(int host_index);
 
 int get_gpu_virt_memory_type(CUdeviceptr dptr);
 
