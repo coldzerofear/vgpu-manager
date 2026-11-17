@@ -50,7 +50,7 @@ require (
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd
 	sigs.k8s.io/controller-runtime v0.25.2
 	sigs.k8s.io/dra-driver-nvidia-gpu v0.5.1
-	tags.cncf.io/container-device-interface v1.1.1
+	tags.cncf.io/container-device-interface v1.1.2
 	tags.cncf.io/container-device-interface/specs-go v1.1.1
 	volcano.sh/apis v1.15.3
 )
