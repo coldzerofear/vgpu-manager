@@ -113,6 +113,8 @@ const (
 	HonorPreAllocatedDeviceIDs featuregate.Feature = util.HonorPreAllocatedDeviceIDs
 	// RemoteGPUSupport feature gate allows this node to serve its GPUs to remote vGPU pods.
 	RemoteGPUSupport featuregate.Feature = util.RemoteGPUSupport
+	// DeviceCGroupMemoryLimit feature will implement additional cgroup level device memory restrictions to improve memory isolation.
+	DeviceCGroupMemoryLimit featuregate.Feature = util.DeviceCGroupMemoryLimit
 )
 
 var (
@@ -127,6 +129,7 @@ var (
 		DevicePluginClientMode:      {Default: false, PreRelease: featuregate.Alpha},
 		HonorPreAllocatedDeviceIDs:  {Default: false, PreRelease: featuregate.Alpha},
 		RemoteGPUSupport:            {Default: false, PreRelease: featuregate.Alpha},
+		DeviceCGroupMemoryLimit:     {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 

@@ -98,7 +98,7 @@ func MustInitCGroupDriver(cgroupDriver string) CGroupDriver {
 func readKubeletConfigCgroupDriver() (CGroupDriver, error) {
 	configBytes, err := os.ReadFile(KubeletConfigPath)
 	if err != nil {
-		return "", fmt.Errorf("read kubelet-config file <%s> failed: %v", KubeletConfigPath, err)
+		return "", fmt.Errorf("read kubelet-config file %q failed: %v", KubeletConfigPath, err)
 	}
 	var kubelet kubeletConfig
 	if err = yaml.Unmarshal(configBytes, &kubelet); err != nil {
@@ -110,7 +110,7 @@ func readKubeletConfigCgroupDriver() (CGroupDriver, error) {
 	case string(CGROUPFS):
 		return CGROUPFS, nil
 	case "":
-		return "", fmt.Errorf("cgroup driver not found in kubelet-config <%s>", KubeletConfigPath)
+		return "", fmt.Errorf("cgroup driver not found in kubelet-config %q", KubeletConfigPath)
 	default:
 		return "", fmt.Errorf("invalid cgroup driver in kubelet-config: %s", kubelet.CgroupDriver)
 	}
@@ -120,13 +120,13 @@ func readKubeletConfigCgroupDriver() (CGroupDriver, error) {
 func readKubeadmFlagsCgroupDriver() (CGroupDriver, error) {
 	configBytes, err := os.ReadFile(KubeadmFlagsPath)
 	if err != nil {
-		return "", fmt.Errorf("read kubeadm-flags file <%s> failed: %v", KubeadmFlagsPath, err)
+		return "", fmt.Errorf("read kubeadm-flags file %q failed: %v", KubeadmFlagsPath, err)
 	}
 	content := string(configBytes)
 
 	// Look for --cgroup-driver in command line arguments
 	if !strings.Contains(content, "--cgroup-driver") {
-		return "", fmt.Errorf("cgroup driver not found in kubelet-flags <%s>", KubeadmFlagsPath)
+		return "", fmt.Errorf("cgroup driver not found in kubelet-flags %q", KubeadmFlagsPath)
 	}
 	driver := ""
 	lines := strings.Split(content, "\n")
@@ -393,8 +393,8 @@ func convertCGroupfsFullPath(
 	if !util.PathIsNotExist(fullPath) {
 		return fullPath, nil
 	}
-	klog.Infof("Possible upgrade required to adapt container runtime <%s> CGroup driver <%s>", containerId.Type, "cgroupfs")
-	return "", fmt.Errorf("container CGroup full path <%s> not exist", fullPath)
+	klog.Infof("Possible upgrade required to adapt container runtime %q CGroup driver %q", containerId.Type, CGROUPFS)
+	return "", fmt.Errorf("container CGroup full path %q not exist", fullPath)
 }
 
 func convertSystemdFullPath(
@@ -411,7 +411,7 @@ func convertSystemdFullPath(
 	}
 	switch containerId.Type {
 	case "containerd":
-		klog.Warningf("CGroup full path <%s> not exist", fullPath)
+		klog.Warningf("CGroup full path %q not exist", fullPath)
 		var toSystemd = func(cgroupName CgroupName) string {
 			if len(cgroupName) == 0 || (len(cgroupName) == 1 && cgroupName[0] == "") {
 				return "/"
@@ -429,15 +429,15 @@ func convertSystemdFullPath(
 			return fullPath, nil
 		}
 	case "docker":
-		klog.Warningf("CGroup full path <%s> not exist", fullPath)
+		klog.Warningf("CGroup full path %q not exist", fullPath)
 		cgroupPath = fmt.Sprintf("%s/%s", cgroupName.ToSystemd(), containerId.ID)
 		if fullPath = getFullPath(cgroupPath); !util.PathIsNotExist(fullPath) {
 			return fullPath, nil
 		}
 	default:
 	}
-	klog.Infof("Possible upgrade required to adapt container runtime <%s> CGroup driver <%s>", containerId.Type, "systemd")
-	return "", fmt.Errorf("container CGroup full path <%s> not exist", fullPath)
+	klog.Infof("Possible upgrade required to adapt container runtime %q CGroup driver %q", containerId.Type, SYSTEMD)
+	return "", fmt.Errorf("container CGroup full path %q not exist", fullPath)
 }
 
 // GetContainerStatus returns the ContainerStatus entry for the named container
@@ -476,16 +476,22 @@ func GetContainerPidsFunc(pod *corev1.Pod, containerName string, fullPath func(s
 		klog.Errorln(err)
 		return nil
 	}
-	klog.V(4).InfoS("Get container cgroup path", "pod", klog.KObj(pod),
-		"container", containerName, "cgroupPath", cgroupFullPath)
+	klog.V(4).InfoS("Get container cgroup path",
+		"pod", klog.KObj(pod),
+		"container", containerName,
+		"cgroupPath", cgroupFullPath)
 	pids, err := cgroups.GetAllPids(cgroupFullPath)
 	if err != nil {
 		klog.ErrorS(err, "Failed to retrieve container pids",
-			"pod", klog.KObj(pod), "container", containerName)
+			"pod", klog.KObj(pod),
+			"container", containerName)
 		return nil
 	}
-	klog.V(5).InfoS("Get container all pids", "pod", klog.KObj(pod),
-		"container", containerName, "cgroupPath", cgroupFullPath, "pids", pids)
+	klog.V(5).InfoS("Get container all pids",
+		"pod", klog.KObj(pod),
+		"container", containerName,
+		"cgroupPath", cgroupFullPath,
+		"pids", pids)
 	if len(funcs) > 0 {
 		for _, pid := range pids {
 			for _, fn := range funcs {

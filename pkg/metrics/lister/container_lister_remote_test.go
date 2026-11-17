@@ -153,7 +153,7 @@ func TestContainerListerRemoteSessions(t *testing.T) {
 		Name:         containerName,
 		DeviceClaims: []device.DeviceClaim{{Id: 0, Uuid: gpuUUID, Cores: 20, Memory: 1024}},
 	}
-	require.NoError(t, vgpu.WriteVGPUConfigFile(quotaFile, devManager, pod, claims, false, &corev1.Node{}))
+	require.NoError(t, vgpu.WriteVGPUConfigFile(quotaFile, devManager, &corev1.Node{}, pod, claims))
 
 	contLister := NewContainerLister(nodeName, managerRoot, sessionBase, podLister)
 	require.NoError(t, contLister.update())
@@ -213,7 +213,7 @@ func TestContainerListerReleasesVanishedDirectories(t *testing.T) {
 		DeviceClaims: []device.DeviceClaim{{Id: 0, Uuid: gpuUUID, Cores: 20, Memory: 1024}},
 	}
 	require.NoError(t, vgpu.WriteVGPUConfigFile(
-		filepath.Join(contDir, util.Config, dpvgpu.VGPUConfigFileName), devManager, pod, claims, false, node))
+		filepath.Join(contDir, util.Config, dpvgpu.VGPUConfigFileName), devManager, node, pod, claims))
 
 	contLister := NewContainerLister(nodeName, managerRoot, "", podLister)
 	require.NoError(t, contLister.update())

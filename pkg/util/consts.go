@@ -506,6 +506,10 @@ const (
 	// RemoteGPUSupport is the feature gate name shared by the kubelet-plugin
 	// and the device-monitor registries.
 	RemoteGPUSupport = "RemoteGPUSupport"
+
+	// DeviceCGroupMemoryLimit Enabling will attempt to implement device level cgroup memory limits using dmem
+	// There are additional requirements for cgroup, kernel, and driver versions.
+	DeviceCGroupMemoryLimit = "DeviceCGroupMemoryLimit"
 )
 
 // CompatibilityMode Container environment compatibility mode type

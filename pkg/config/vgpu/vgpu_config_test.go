@@ -240,7 +240,7 @@ func Test_WriDriverConfigFile(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			for _, node := range test.nodes {
 				func() {
-					err = WriteVGPUConfigFile(test.path, devManager, test.pod, test.devices, false, node)
+					err = WriteVGPUConfigFile(test.path, devManager, node, test.pod, test.devices)
 					if err != nil {
 						t.Fatal(err)
 					}

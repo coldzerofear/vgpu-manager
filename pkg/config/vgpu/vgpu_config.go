@@ -621,19 +621,21 @@ func (r *MmapResourceData) GetDeviceSnapshot(deviceIndex int) *DeviceT {
 	return nil
 }
 
-func WriteVGPUConfigFile(
-	filePath string, devManager *manager.DeviceManager, pod *corev1.Pod,
-	contClaim device.ContainerDeviceClaim, memoryOversold bool, node *corev1.Node,
+func WriteVGPUConfigFile(filePath string,
+	devManager *manager.DeviceManager,
+	node *corev1.Node, pod *corev1.Pod,
+	claim device.ContainerDeviceClaim,
 ) error {
 	if _, err := os.Stat(filePath); err != nil {
 		if !os.IsNotExist(err) {
 			return err
 		}
+		memoryOversold := util.PodContainerEnvEnabled(pod, claim.Name, util.CudaMemoryOversoldEnv)
 		data := NewResourceDataWithOptions(ResourceOption{},
 			WithPodInfo(pod),
 			WithDeviceManager(devManager),
-			WithContainerName(contClaim.Name),
-			WithDeviceClaims(contClaim.DeviceClaims),
+			WithContainerName(claim.Name),
+			WithDeviceClaims(claim.DeviceClaims),
 			WithMemoryOversold(memoryOversold),
 			WithComputePolicy(GetDefaultComputePolicy(pod, node)),
 		)

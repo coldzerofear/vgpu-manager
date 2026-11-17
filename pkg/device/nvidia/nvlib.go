@@ -671,3 +671,16 @@ func (l DeviceLib) SetComputeMode(uuids []string, mode string) error {
 	}
 	return nil
 }
+
+func (l DeviceLib) SetMemoryLimits(uuid string, namespace string, requests uint64, limits uint64) nvml.Return {
+	if l.Extensions().LookupSymbol("nvmlDeviceSetMemoryLimits_v1") == nil {
+		return nvml.ERROR_NOT_SUPPORTED
+	}
+
+	dev, ret := l.DeviceGetHandleByUUID(uuid)
+	if ret != nvml.SUCCESS {
+		return ret
+	}
+
+	return dev.SetMemoryLimits_v1(namespace, requests, limits)
+}

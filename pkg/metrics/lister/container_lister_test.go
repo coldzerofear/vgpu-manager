@@ -170,7 +170,7 @@ func Test_ContainerLister(t *testing.T) {
 		path = filepath.Join(path, dpvgpu.VGPUConfigFileName)
 		deviceClaims := contDevClaimsMap[container.Name]
 		assignDevices := device.ContainerDeviceClaim{Name: container.Name, DeviceClaims: deviceClaims}
-		err = vgpu.WriteVGPUConfigFile(path, devManager, pod, assignDevices, false, node)
+		err = vgpu.WriteVGPUConfigFile(path, devManager, node, pod, assignDevices)
 		if err != nil {
 			t.Error(err)
 		}
