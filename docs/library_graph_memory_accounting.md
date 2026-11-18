@@ -1135,7 +1135,7 @@ main 上若两个不释放的 graph 都先建好、再依次 launch，同样绕�
 
 | 复核发现 | 判断 | 修正 | 验证 |
 |---|---|---|---|
-| 在途记录用的 `cuEventRecord`/`cuEventQuery` 不看进程里有没有别的捕获 | **成立，严重**：别的线程以 global 模式捕获时，记 event 会把它弄坏（对方 End 返回 901）。main 没有这些调用，是本分支引入的 | 进程里有任何捕获打开（捕获登记表非空）就不查询、不记 event，按已完成算 | 新用例 [R]；去掉记 event 前的检查，[R] 两次都红（901）；去掉查询前的检查不变红：这个驱动上 `cuEventQuery` 不弄坏捕获，检查留作防御 |
+| 在途记录用的 `cuEventRecord`/`cuEventQuery` 不看进程里有没有别的捕获 | **成立，严重**：别的线程以 global 模式捕获时，记 event 会把它弄坏（对方 End 返回 901）。main 没有这些调用，是本分支引入的 | 进程里有任何捕获打开（捕获登记表非空）就不查询、不记 event，按已完成算（6.20 起：查询改为切到 RELAXED 后照查，record 仍不做） | 新用例 [R]；去掉记 event 前的检查，[R] 两次都红（901）；去掉查询前的检查不变红：这个驱动上 `cuEventQuery` 不弄坏捕获，检查留作防御 |
 | 往捕获里 launch graph 也会进上面的路径 | 驱动本身就拒绝：无论有没有内存节点、哪种模式，不加载库也返回 900 并作废捕获 | 只改注释 | `exp/intocap`，加载与不加载库结果相同 |
 | 单 stream 过渡时问 `cuStreamQuery`，那个流一直有别的工作就一直算作在途 | 成立：会持续多算，还在应用的流上调用 | 去掉 `cuStreamQuery`：第二个 stream 出现时，之前没有 event 的记录直接算完成（只在那一刻可能少算） | [P] 第一段 |
 | per-thread 默认流是所有线程共用的一个句柄；legacy 流的记录跨设备会被覆盖 | 成立，少算或问错流 | per-thread 默认流不做在途记录；记录匹配加上设备 | — |
@@ -1211,7 +1211,7 @@ main 上若两个不释放的 graph 都先建好、再依次 launch，同样绕�
 | 非捕获的 `cuMemAllocAsync`/`cuMemAllocFromPoolAsync` 之后 `cuStreamSynchronize`（为让 NVML 看见再退掉过渡记账） | 同步 | 不会多弄坏捕获：别的线程开着 global 捕获时，应用的这次分配本身就被拒（900），走不到同步。但同步本身是多余的：595 上调用返回时 NVML 已可见。去掉它要先在旧驱动上测过，本次不改 |
 | 超分 UVA 内存的 `cuMemFreeAsync` 改为同步后 `cuMemFree` | 同步、释放 | 同上：应用原本的 `cuMemFreeAsync` 也会被拒，结果不比不用库更糟。不改 |
 | 算力占空比：空闲后第一次 launch 的 `gap_end` 里 `cuEventSynchronize` | 同步 | **会**：应用自己的 launch 是允许的，库加的同步把对方弄坏。已修：有捕获打开时不走占空比，`gap_end` 在 `g_capture_gate` 读锁下再查一次，sleep 在锁外 |
-| 在途记录的 `cuEventQuery` | 查询 | 已在 6.15 修（有捕获打开时不查） |
+| 在途记录的 `cuEventQuery` | 查询 | 已在 6.15 修（有捕获打开时不查）；6.20 起改为切到 RELAXED 后照查 |
 
 验证（RTX 3080 单卡，595.84，无 torch）：
 
