@@ -365,7 +365,9 @@ static int load_limited_memory_view(CUdevice device, int *host_index,
  * Their overlap with the pool, if they were to run at once, is for graph_mem_admit() to
  * check. */
 static size_t graph_held_on(int dev);
+static size_t graph_pool_idle(int dev, size_t reserved);
 static int stream_is_capturing(CUstream stream, int ptsz);
+static int capture_reg_any(void);
 
 static size_t graph_pool_absorbs(CUdevice device, int host_index, size_t request_size) {
   cuuint64_t reserved = 0;
@@ -382,9 +384,49 @@ static size_t graph_pool_absorbs(CUdevice device, int host_index, size_t request
   return wanted < lendable ? wanted : lendable;
 }
 
+/* An allocation outside any graph, refused for want of shortfall bytes, while this
+ * process's own graph pool sits idle: the pool is given back and what it shrank by
+ * returned (0: not trimmed). The driver does the same unasked when a cuMemAlloc outgrows
+ * the free device memory (docs 6.5), but under a limit the device is never short, so
+ * without this the allocation is refused where a device of the limit's size would grant
+ * it. Only when the idle part covers the shortfall: a trim that cannot make the
+ * allocation fit would only cost the next launch its mapping. Not with a capture open:
+ * whether a trim is safe beside another thread's global capture is not known.
+ * The pool is read before and after; the difference is exact, while NVML, read again,
+ * could still show the old pool. Called with the device lock held, so a launch that
+ * would grow the pool waits; graph_pool_idle() only takes locks nothing blocks under. */
+static size_t graph_pool_trim(CUdevice device, size_t shortfall) {
+  if (!CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceGraphMemTrim) ||
+      !CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceGetGraphMemAttribute)) {
+    return 0;
+  }
+  cuuint64_t before = 0, after = 0;
+  if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuDeviceGetGraphMemAttribute, device,
+                          CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT, &before) != CUDA_SUCCESS ||
+      (size_t)before < shortfall) {
+    return 0;
+  }
+  if (capture_reg_any() || graph_pool_idle((int)device, (size_t)before) < shortfall) {
+    return 0;
+  }
+  if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuDeviceGraphMemTrim, device) != CUDA_SUCCESS ||
+      CUDA_INTERNAL_CHECK(cuda_library_entry, cuDeviceGetGraphMemAttribute, device,
+                          CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT, &after) != CUDA_SUCCESS) {
+    return 0;   /* nothing known to be given back: refused as before */
+  }
+  size_t freed = before > after ? (size_t)(before - after) : 0;
+  LOGGER(VERBOSE, "device %d: idle graph pool trimmed by %zu bytes for an allocation %zu bytes short",
+         device, freed, shortfall);
+  return freed;
+}
+
 /* in_graph: 0 a plain allocation, 1 one a graph will hold (an alloc node), 2 one on
- * stream, which a graph will hold if the stream is in capture. Whether it is, and what
- * the pool absorbs, is only asked when the allocation would not fit without it. */
+ * stream, which a graph will hold if the stream is in capture, 3 the growth of a graph's
+ * pool at its upload or launch (graph_mem_admit_dev). Whether a stream is in capture,
+ * and what the pool absorbs, is only asked when the allocation would not fit without
+ * it. Only an allocation outside any graph has the idle pool trimmed for it: one in a
+ * graph is mapped from the pool, whose idle part graph_pool_absorbs() and
+ * graph_pool_available() already count. */
 static memory_path_t prepare_allocation(CUdevice device,
                                         size_t request_size,
                                         int allow_uva,
@@ -406,8 +448,10 @@ static memory_path_t prepare_allocation(CUdevice device,
   device_t d = get_device_snapshot(*host_index);
   size_t absorbed = 0;
   size_t wanted = used + vmem_used + request_size;
-  if (wanted > d.total_memory && in_graph != 0 &&
+  int graph_alloc = in_graph == 3;
+  if (wanted > d.total_memory && (in_graph == 1 || in_graph == 2) &&
       (in_graph == 1 || stream_is_capturing(stream, ptsz))) {
+    graph_alloc = 1;
     absorbed = graph_pool_absorbs(device, *host_index, request_size);
     wanted = wanted > absorbed ? wanted - absorbed : 0;
   }
@@ -418,6 +462,13 @@ static memory_path_t prepare_allocation(CUdevice device,
       get_used_gpu_virt_memory((void *)&vmem_used, *host_index);
       wanted = used + vmem_used + request_size;
       wanted = wanted > absorbed ? wanted - absorbed : 0;
+    }
+    if (wanted > d.total_memory && !graph_alloc) {
+      size_t freed = graph_pool_trim(device, wanted - d.total_memory);
+      if (freed > 0) {
+        used = used > freed ? used - freed : 0;
+        wanted = used + vmem_used + request_size;   /* absorbed is 0 outside a graph */
+      }
     }
     if (wanted > d.total_memory) {
       return MEMORY_PATH_OOM;
@@ -5693,6 +5744,15 @@ static size_t graph_pool_available(int dev, size_t reserved, const graph_skey_t 
   return reserved > unavailable ? reserved - unavailable : 0;
 }
 
+/* The part of dev's pool no graph is using or holding: what a trim could give back. No
+ * stream is the asker's own, so every running launch counts. With a capture open the
+ * running launches are not looked at, and the answer is too high: graph_pool_trim()
+ * does not ask then. */
+static size_t graph_pool_idle(int dev, size_t reserved) {
+  const graph_skey_t none = {0, 0};
+  return graph_pool_available(dev, reserved, &none, NULL, 0, NULL, NULL);
+}
+
 /* After a launch on stream k of a graph using mem's pool memory, with ctx current, that
  * claimed nothing at its admission (its devices' limits off, or a capture open then). */
 static void graph_running_note(const graph_mem_t *mem, const graph_skey_t *k, CUstream stream, int ptsz,
@@ -5807,7 +5867,7 @@ static CUresult graph_mem_admit_dev(const graph_mem_dev_t *d, const graph_mem_t 
   size_t available = graph_pool_available(d->dev, (size_t)reserved, k, exec, d->own_held, t, mem);
   size_t growth = d->need > available ? d->need - available : 0;
   if (growth == 0) return CUDA_SUCCESS;
-  if (prepare_memory_allocation((CUdevice)d->dev, growth, 0, &host_index, lock_fd) == MEMORY_PATH_OOM) {
+  if (prepare_allocation((CUdevice)d->dev, growth, 0, 3, NULL, 0, &host_index, lock_fd) == MEMORY_PATH_OOM) {
     graph_running_cancel(t);
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     LOGGER(VERBOSE, "graph upload/launch refused: device %d pool would grow by %zu bytes",

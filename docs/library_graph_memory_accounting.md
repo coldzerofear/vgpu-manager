@@ -107,6 +107,7 @@ T2 也是 6.1 节"不能把记账持有到首次 launch"的实证：持有的话
 - alloc node 跨多个设备的 graph 逐卡检查、每张卡检查完立即放锁（6.5）：检查到 launch 之间别的进程若在已检查的卡上分配，会低估（仅多卡 graph 的首次映射）。
 - 捕获登记表可增长（6.9），只有内存耗尽写不进去时才退回到结束时查询，此时被作废的捕获仍会遗留记账，直到 context 拆除或进程退出，捕获内的异步分配也按当前 context 查卡。接入捕获的 stream 同样按当前 context 查卡（6.6）。
 - 导入的池、host 位置的池按当前 context 查卡（6.7）。
+- 普通分配因本进程空闲的 graph 池超限时，先 trim 再检查（6.19）。有捕获打开时不 trim（仍误拒）；trim 与另一线程"增长为 0、不拿锁"的 graph launch 并发时可能越限，上限是那个 graph 的池内存（6.19）。
 - `cuDevicePrimaryCtxRelease` 的"查状态 → retain"之间若另一线程释放了最后一个引用，retain 会重新创建 primary context，随即被撤销的 release 销毁；记账结果不受影响。
 
 ## 6. 空窗 B：研究与实现
@@ -979,7 +980,7 @@ TSan（一次性，换 `-fsanitize=thread` 构建；这台 7.0 内核要 `vm.mma
 
 - 依赖无关的并行分支、并发 launch：按节点顺序模拟会低估（两条线各 256，实际 512，估算 256）。映射后 NVML 能看到。**6.15 已修正，并发现不释放的块会造成可叠加的绕过。**
 - 捕获打开期间的**普通**分配（别的线程的 `cuMemAlloc`）还是 `NVML + 捕获记账`，和池重复计算：只在捕获窗口内，可能偏严。
-- 空闲的 graph 池对普通分配仍然算占用，那是真实占用（6.5）。
+- 空闲的 graph 池对普通分配仍然算占用，那是真实占用（6.5）。**6.19 更正**：驱动在物理显存不足时会为 `cuMemAlloc` 自行回收空闲池，限额下驱动看不到压力，于是这里会误拒；6.19 改为超限时先 trim。
 - **570、550 没有验证**：这台机器内核 7.0，这两个驱动的模块编不过。捕获中查 `cuDeviceGetGraphMemAttribute` 的安全性和复用模型只在 580、595 上测过。如果旧驱动的模型不同，偏差方向由上表决定，少算有 NVML 兜底。
 - 跨卡路径没有上 GPU（这台只有一张卡）：[H]、`exec_multi`、`ctx_multi` 打印跳过。每张卡一个模拟器，逻辑上互不相关，但没有跑过。
 - Warp、mjlab、vLLM 本身没有跑。
@@ -1659,3 +1660,57 @@ gdb：`cuGraphLaunch` → `gap_end` → 轮询（main 上是 `cuEventSynchronize
 **修复后的重复**（新库，[P] 改为 0.3 s 放开）：`_ptsz` 和普通各 8 次，**16/16 通过**，每次 58–62 s（之前 90–316 s）。[Y] 16 次里 12 次 0.1–0.4 s，4 次 1.3–1.4 s：后者正是撞上占空比路径、被 1 s 上限截住，印证了上面对 [Y] 的判断。[P] 1.3–1.9 s。
 
 **回归（新库）**：`make test` 31/31 通过（跳过 5 个未安装的框架），含 `test_gap_wait_bounded` 和原有的占空比用例 `test_runtime_launch_gap`；`make test-probes` rc=0，fork 循环 60 次 0 挂起，graph 限流探针与之前一致（约 2.6 万次/s）；`make test-gpu-sanitize` 5/5。
+
+### 6.19 普通分配超限时先 trim 本进程空闲的 graph 池（2026-11-18，分支 fix/graph-pool-trim-on-oom；只做了构建和无 GPU 测试，**未上 GPU**）
+
+#### 问题
+
+6.5 实测过：物理显存不够时，`cuMemAlloc` 会让驱动自行回收进程里空闲的 graph 池，然后分配成功（`cuMemAllocAsync` 不会）。限额小于物理显存时，驱动看不到压力，不会回收；NVML 又把空闲池算作占用，于是库会拒掉一次在"大小等于限额的卡"上能成功的分配。6.14 当时记为"那是真实占用"，没有考虑到驱动会隐式回收。
+
+触发条件：同一进程既用 graph 内存节点（`cudaMallocAsync` 后端捕获、手工建的分配节点），又做普通分配（cuBLAS workspace、NCCL、别的库的 `cudaMalloc`），且接近限额。
+
+#### 实现
+
+`prepare_allocation()` 判定超限后、返回 OOM 之前（在超分账本清理之后），对**不属于 graph 的分配**调用 `graph_pool_trim(device, 缺口)`：
+
+1. 查 `CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT`（`before`），小于缺口就不 trim。
+2. 有捕获打开（`capture_reg_any()`）不 trim：trim 在别的线程的 global 捕获旁边是否安全没有数据（`probe_capture_apis` 没测过它）。
+3. 估计空闲部分：`graph_pool_idle()` = 池 − 持有块 − 所有仍在运行的 launch 的需求（复用 `graph_pool_available()`，不指定 stream）。不足以补上缺口就不 trim：trim 了也放不下，只会让下一次 launch 重新映射。
+4. `cuDeviceGraphMemTrim(device)`，再查一次池（`after`），把 `before − after` 从 NVML 用量里扣掉，重新判定。用池的差值而不是重读 NVML：差值是驱动给的精确数，NVML 在 trim 之后可能还没更新（6.15 [Q] 疑似见过，未证实）。估计只用来决定"要不要试"，扣多少只看实测差值：驱动不会放掉正在运行或排队待运行的 graph 的块（单 stream 的运行记录不带事件，估计会把它们算成空闲，这时 trim 放不掉，差值为 0，照旧拒绝）。
+
+哪些路径会 trim（`in_graph` 参数）：
+
+| 调用 | 会不会 trim | 原因 |
+|---|---|---|
+| `cuMemAlloc`、`cuMemAllocPitch`、`cuMemAllocManaged`、数组、`cuMemCreate`、`cuMemHostAlloc`/`cuMemHostRegister` 的事后检查 | 会 | 不属于 graph |
+| `cuMemAllocAsync`/`cuMemAllocFromPoolAsync`（含 `_ptsz`），stream 不在捕获中 | 会 | 同上。原生驱动对它不回收，这里比原生宽松，但 trim 只放空闲页，没有副作用 |
+| 同上，stream 在捕获中；`cuGraphAddMemAllocNode` | 不会 | 从池里拿，空闲部分已由 `graph_pool_absorbs()` 计入 |
+| graph upload/launch、带 UPLOAD 的 instantiate 的增长量检查（`graph_mem_admit_dev`，新增 `in_graph = 3`） | 不会 | 增长量已扣掉池的空闲部分（`graph_pool_available()`）；trim 放掉的正是它要复用的页，放行反而越限。用例 [G] 专门检查这一条 |
+
+开销：正常路径（没超限）不变，只多一个整型比较。只有判定超限后才查池（约 10 ns）；有空闲池且足够时才 trim。trim 在持有设备文件锁时调用，和 hook 随后调用的 `cuMemAlloc` 一样；锁的顺序是"文件锁 → `g_capture_gate` 读锁 → `g_graph_use_lock`"，没有反向的路径（文件锁在 `load_limited_memory_view` 和 `nvml_hook.c` 的显存查询里拿，这些地方都不持 gate、`g_graph_use_lock` 或捕获登记表的锁；持这些锁的地方都不拿文件锁），gate 和 `g_graph_use_lock` 里只调用 `cuEventQuery`，不会阻塞。没有新增全局状态和堆内存，fork 后沿用已有的重置。
+
+#### 已知边界
+
+- **与"增长为 0"的 graph launch 并发**：另一线程的 launch 在准入时看到空闲池、算出增长为 0，就不拿设备锁；如果 trim 正好发生在它准入之后、驱动映射之前，它会重新映射新页，而 trim 这边已经把这部分算作释放并放行了分配。越限的上限是那个 graph 的池内存。要关掉这个窗口，launch 的热路径就得加原子计数或读写锁（每次 launch 十几到几十 ns），不划算；驱动自己的隐式回收也有同样的竞争（原生下表现为 launch 返回 OOM）。窗口只在"普通分配正好在限额边界"与"另一线程 launch 带内存节点的 graph"同时发生时出现。
+- **有捕获打开时不 trim**：仍按旧行为误拒。
+- **只 trim 本进程的池**：同容器别的进程的空闲池不动。
+- **超分（oversold）时**：只在超过限额时 trim；没超限额但超过物理显存、走 UVA 的分配不会先 trim（少了一次优化，不会越限）。
+- **trim 会不会等正在运行的 graph、会不会被别的线程塞满的 stream 挡住（6.17 那类）**：没有数据，[D] 用看门狗兜底并计时，上机确认。若会挡住，和 hook 在同一把文件锁下调用的 `cuMemAlloc` 是同一类暴露。
+
+#### 新用例 `test_graph_pool_trim`（driver API，随 `make test` 跑；需 `CUDA_MEM_LIMIT`）
+
+| 用例 | 场景 | 期望 |
+|---|---|---|
+| [A] | 一个 graph 跑完留下约 1/3 余量大小的空闲池，`cuMemAlloc(余量 + need/2)` | 放行，池归 0；随后 launch 该 graph 被拒（不越限），释放后 launch 成功 |
+| [B] | 同上，用不在捕获中的 `cuMemAllocAsync` | 放行，池归 0 |
+| [C] | 请求超过"余量 + 整个池" | 拒绝，池不变（不做无用的 trim） |
+| [D] | graph 排在 `cuStreamWaitValue32` 后面、已映射未运行，请求要用到它的池内存 | 拒绝（trim 放不掉，差值为 0）；放开后再请求放行 |
+| [E] | 池里既有 graph 留下的持有块 H，又有空闲块 I；请求的缺口大于 I、小于 H+I | 拒绝，池不变（把持有块算成空闲就会 trim、放掉 I，池变小，用例失败）；`cuMemFree` 持有块后放行 |
+| [F] | 另一个 stream 上开着 relaxed 捕获 | 拒绝，池不变；结束捕获后放行 |
+| [G] | 空闲池 a，另一个 graph 需要 2a，余量只剩 a/2 | launch 被拒，池不变（graph 准入不 trim） |
+
+变异预期（上机时验证）：去掉 trim → [A][B][D 第二步][E 第二步][F 第二步] 失败；用估计值代替实测差值 → [D] 越限放行；graph 准入也 trim → [G] 放行；去掉捕获检查 → [F] 第一步放行、池归 0；去掉"空闲不足不 trim" → [C] 池被清空；估计时不扣持有块 → [E] 第一步池变小。[D] 依赖单 stream 的运行记录不带事件（库会尝试 trim），如果之前的用例在第二条 stream 上 launch 过，[D] 就不再覆盖"按实测差值"这一点。
+
+#### 本地验证（无 GPU）
+
+`make build` 无告警；`make check` 通过（hook 一致性 608 项；结构体布局、ABI 签名因本机没有 CUDA 头跳过，本次没有改结构体）；`make cppcheck` 无报告；`make test-nogpu` 22/22；`make test-sanitize`（ASan+UBSan）22/22；独立代码审查一轮：没有阻断问题，指出的文档措辞、[E] 测不到持有块、[D] 的前提已据此修正；新用例和 `test_graph_mem_admission` 用 CUDA 13.4 的 `cuda.h` 做了 `-Wall -Wextra` 语法检查。**GPU 上的用例、回归和变异都还没有跑。**
