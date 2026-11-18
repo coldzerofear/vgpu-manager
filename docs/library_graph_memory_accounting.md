@@ -1758,3 +1758,28 @@ trim 会不会等正在运行的 graph：[D] 里 graph 被 `cuStreamWaitValue32`
 | `test_graph_pool_trim` 重复 20 次 | 20/20，每次 0.76–3.26 s |
 
 没有验证的：PyTorch（本机未装）；双卡；570、580、595 上的 trim 用例（595 上的旧用例照旧）。
+
+### 6.20 实验：切到 RELAXED 能否让内部查询不弄坏别的线程的 GLOBAL 捕获（2026-11-18，Tesla V100-PCIE-16GB，驱动 550.127.05，不加载本库）
+
+背景：库现在的做法是"进程里有捕获打开就不查 event、不记 event"（`capture_reg_any()` + `g_capture_gate`），代价是捕获期间运行中的 launch 一律按已完成算（少算）。另一种做法是在内部调用前后用 `cuThreadExchangeStreamCaptureMode` 把本线程切到 RELAXED 再切回来。这里实测它是否真的有效。
+
+方法（探针 `xmode`）：线程 A 在自己的 stream 上开始捕获并放入一个节点，然后线程 B 做一次调用，最后 A 结束捕获。每一项都重新开一次捕获，互不影响。"pending" 是一个排在 `cuStreamWaitValue32`（等一个直到最后才写的主机内存）后面的 event，"done" 是已经完成的 event。
+
+| A 的捕获 | B 的做法 | B 的调用 | B 得到 | A 结束捕获 |
+|---|---|---|---|---|
+| GLOBAL | 默认模式 | 什么都不做 | — | 0 |
+| GLOBAL | 默认模式 | `cuEventQuery`（done 与 pending）、`cuEventSynchronize`、`cuStreamQuery`/`cuStreamSynchronize`（B 自己的 stream）、`cuMemAlloc` | 900 | **901（被弄坏）** |
+| GLOBAL | 默认模式 | `cuEventRecord`（B 自己的 stream）、`cuEventCreate`+`Destroy`、`cuDeviceGetGraphMemAttribute`、`cuDeviceGraphMemTrim` | 0 | 0 |
+| GLOBAL | **调用前后切 RELAXED** | `cuEventQuery`（done 0、pending 600）、`cuEventSynchronize`、`cuStreamQuery`、`cuStreamSynchronize`、record、create/destroy、池查询、trim | 正常结果 | **0（不受影响）** |
+| GLOBAL | 切 RELAXED 再切回，然后调用 | `cuEventQuery`(pending) | 900 | 901：切回确实生效 |
+| THREAD_LOCAL、RELAXED | 默认模式 | `cuEventQuery`(pending) | 600 | 0：只有 GLOBAL 捕获会牵连别的线程 |
+| 本线程自己的 GLOBAL 捕获 | 默认模式 | `cuEventQuery`(pending) | 900 | 901 |
+| 本线程自己的 GLOBAL 捕获 | 调用前后切 RELAXED | `cuEventQuery`(pending) | 600 | 0 |
+
+开销：切过去再切回来一次 14.4 ns；同一台机器上 `cuEventQuery`（已完成的 event）一次约 1.1 µs。
+
+结论：
+
+1. 与 CUDA 文档描述的一致：调用前后切到 RELAXED，查询类调用就不会弄坏别的线程（以及本线程自己）的 GLOBAL 捕获。切回之后又恢复限制。
+2. **RELAXED 只是不再拒绝，调用该做的事照做**：`cuMemAlloc`+`cuMemFree` 在 RELAXED 下不再返回 900，而是真的做隐式同步，被那条一直挂着的 stream 挡住，探针在这一步卡死（已从 RELAXED 组里去掉）。所以它解决不了 6.17 那类阻塞问题，也解决不了"record 被捕获进用户 graph"的问题（与模式无关）。
+3. 附带：别的线程开着 GLOBAL 捕获时，`cuDeviceGetGraphMemAttribute` 和 `cuDeviceGraphMemTrim` 在默认模式下也不会弄坏它（550）。加上 6.19 的结果（本线程 GLOBAL、另一 stream 的 relaxed 捕获），trim 在 550 上没发现不安全的情况；库仍保留"有捕获就不 trim"，因为别的驱动版本没有数据。
