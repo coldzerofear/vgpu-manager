@@ -1661,7 +1661,7 @@ gdb：`cuGraphLaunch` → `gap_end` → 轮询（main 上是 `cuEventSynchronize
 
 **回归（新库）**：`make test` 31/31 通过（跳过 5 个未安装的框架），含 `test_gap_wait_bounded` 和原有的占空比用例 `test_runtime_launch_gap`；`make test-probes` rc=0，fork 循环 60 次 0 挂起，graph 限流探针与之前一致（约 2.6 万次/s）；`make test-gpu-sanitize` 5/5。
 
-### 6.19 普通分配超限时先 trim 本进程空闲的 graph 池（2026-11-18，分支 fix/graph-pool-trim-on-oom；只做了构建和无 GPU 测试，**未上 GPU**）
+### 6.19 普通分配超限时先 trim 本进程空闲的 graph 池（2026-11-18，分支 fix/graph-pool-trim-on-oom；Tesla V100-PCIE-16GB，驱动 550.127.05，CUDA 12.4 工具链）
 
 #### 问题
 
@@ -1714,3 +1714,47 @@ gdb：`cuGraphLaunch` → `gap_end` → 轮询（main 上是 `cuEventSynchronize
 #### 本地验证（无 GPU）
 
 `make build` 无告警；`make check` 通过（hook 一致性 608 项；结构体布局、ABI 签名因本机没有 CUDA 头跳过，本次没有改结构体）；`make cppcheck` 无报告；`make test-nogpu` 22/22；`make test-sanitize`（ASan+UBSan）22/22；独立代码审查一轮：没有阻断问题，指出的文档措辞、[E] 测不到持有块、[D] 的前提已据此修正；新用例和 `test_graph_mem_admission` 用 CUDA 13.4 的 `cuda.h` 做了 `-Wall -Wextra` 语法检查。**GPU 上的用例、回归和变异都还没有跑。**
+
+#### 上机验证（Tesla V100-PCIE-16GB 单卡，驱动 550.127.05，CUDA 12.4 工具链；限额 4096 MiB、算力 30）
+
+本节之前的所有 graph 记账验证都没有覆盖 550，这是第一次在 550 上跑。
+
+新用例 `test_graph_pool_trim`，分支与 main 对照：
+
+| 用例 | 分支 | main |
+|---|---|---|
+| [A] 池 1280 MiB 空闲、余量 2506 MiB，`cuMemAlloc(余量 + 640 MiB)` | 放行，池归 0；随后 launch 被拒，释放后成功 | **拒绝** |
+| [B] 同上，`cuMemAllocAsync` | 放行 | **拒绝** |
+| [C] 超过余量 + 整个池 | 拒绝，池不变 | 拒绝 |
+| [D] graph 排在 `cuStreamWaitValue32` 后面 | 拒绝；日志显示**尝试了 trim、放掉 0 字节**；分配 0.000 s 返回（trim 不等正在运行的 graph）；graph 跑完后放行 | 第一步拒绝，第二步**拒绝** |
+| [E] 持有块 + 空闲块（池 1440 MiB） | 拒绝，池不变；释放持有块后放行 | 第二步**拒绝** |
+| [F] 另一个 stream 开着 relaxed 捕获 | 拒绝，池不变；结束捕获后放行 | 第二步**拒绝** |
+| [G] graph launch 增长超过余量 | 拒绝，池不变 | 拒绝 |
+| 结果 | **PASS**，1.0 s | FAIL（5 处，与预期一致） |
+
+变异（只换 `cuda_hook.c`，其余相同）：
+
+| 变异 | 结果 |
+|---|---|
+| graph 增长量检查也 trim（`in_graph = 0`） | [G] 失败：launch 被放行 |
+| 去掉捕获检查 | [F] 失败：捕获打开时被放行（顺带看到：另一个 stream 开着 relaxed 捕获时 trim，捕获仍正常结束） |
+| 估计空闲时不扣持有块 | [E] 失败：池从 1440 MiB 掉到 960 MiB |
+| 用估计值代替实测差值 | [D] 失败：graph 仍在用池时放行，越限 |
+| 去掉"空闲不足不 trim" | [C] 失败：池从 1280 MiB 被清空到 0；[E] 失败：池从 1440 MiB 掉到 960 MiB |
+| 去掉 trim | [A]、[B]、[D] 第二步、[E] 第二步、[F] 第二步失败（与 main 相同） |
+
+trim 在捕获旁边是否安全（`probe_capture_apis`，550）：本线程开着 global 捕获时调用 `cuDeviceGraphMemTrim`，返回 0，捕获正常结束（0）；去掉捕获检查的变异里，另一个 stream 开着 relaxed 捕获时 trim，捕获也正常结束。库仍然在有捕获时不 trim：别的驱动版本、别的线程的 global 捕获都没有数据。
+
+trim 会不会等正在运行的 graph：[D] 里 graph 被 `cuStreamWaitValue32` 挡着，分配 0.000 s 返回，trim 放掉 0 字节，不等。
+
+回归（分支）：
+
+| 项目 | 结果 |
+|---|---|
+| `make test`（`run_tests_with_env.sh`） | 32/32 通过，5 个框架测试因未安装跳过（本机没有 torch） |
+| `test_graph_mem_admission` 及 `_ptsz` | 包含在上面，通过 |
+| `make test-probes` | rc=0；fork 循环 60 次，0 挂起、0 异常；graph 限流探针 6000 个 graph 4.57 s 实例化（36399 次 launch 同时进行） |
+| `make test-gpu-sanitize` | 6/6（`test_graph_pool_trim` 已加入列表） |
+| `test_graph_pool_trim` 重复 20 次 | 20/20，每次 0.76–3.26 s |
+
+没有验证的：PyTorch（本机未装）；双卡；570、580、595 上的 trim 用例（595 上的旧用例照旧）。
