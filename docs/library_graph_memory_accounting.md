@@ -1783,3 +1783,22 @@ trim 会不会等正在运行的 graph：[D] 里 graph 被 `cuStreamWaitValue32`
 1. 与 CUDA 文档描述的一致：调用前后切到 RELAXED，查询类调用就不会弄坏别的线程（以及本线程自己）的 GLOBAL 捕获。切回之后又恢复限制。
 2. **RELAXED 只是不再拒绝，调用该做的事照做**：`cuMemAlloc`+`cuMemFree` 在 RELAXED 下不再返回 900，而是真的做隐式同步，被那条一直挂着的 stream 挡住，探针在这一步卡死（已从 RELAXED 组里去掉）。所以它解决不了 6.17 那类阻塞问题，也解决不了"record 被捕获进用户 graph"的问题（与模式无关）。
 3. 附带：别的线程开着 GLOBAL 捕获时，`cuDeviceGetGraphMemAttribute` 和 `cuDeviceGraphMemTrim` 在默认模式下也不会弄坏它（550）。加上 6.19 的结果（本线程 GLOBAL、另一 stream 的 relaxed 捕获），trim 在 550 上没发现不安全的情况；库仍保留"有捕获就不 trim"，因为别的驱动版本没有数据。
+
+#### 据此修改：有捕获打开时仍判断已有的运行记录（同日，同一台 V100、550）
+
+原来有捕获打开（`capture_reg_any()`）时，`graph_pool_available()` 完全不看运行记录，**正在运行的 launch 一律当作已完成**。别的 stream 上的 launch 因此会算出增长为 0、不检查限额，而驱动不会复用正在用的块，只能映射新页，最多越限那个 graph 的池内存（6.15 那类绕过，只出现在捕获期间）。
+
+改法（`graph_event_query_relaxed()`、`graph_running_busy_locked(r, quiet)`）：有捕获打开时，对已有的、带事件的运行记录仍然 `cuEventQuery`，查询前后把本线程切到 RELAXED 再切回。只改查询：仍然不新建记录、不 claim、不 record（record 可能落进捕获，与模式无关）；capture gate 保留；占空比路径不变。切换失败或查询返回别的错误时，按旧行为当作已完成，记录不动。正常路径（没有捕获打开）不变；有捕获打开时每次查询多两次切换（约 29 ns）。
+
+新用例 `test_graph_capture_running`（已加入 `run_gpu_sanitize.sh`）：两条 stream 都 launch 过（运行记录带事件），余量只剩半个 graph；G1 挂在 s1 上运行，另一个线程开着 GLOBAL 捕获，在 s2 上 launch 同样大小的 G2。
+
+| | 新库 | 旧库（c6e049b） | 变异：查询不切换 |
+|---|---|---|---|
+| [A] G1 在跑时 launch G2 | **拒绝** | 放行（越限） | 放行（查询被拒，当作已完成） |
+| [B] G1 跑完后 launch G2 | 放行 | 放行 | 放行 |
+| 另一线程结束捕获 | 0 | 0 | **901（被弄坏）** |
+| 结果 | PASS，重复 10 次 10/10 | FAIL | FAIL |
+
+回归（新库）：`test_graph_mem_admission_ptsz`、`test_graph_pool_trim`、`test_gap_wait_bounded`、`test_alloc_async_accounting` 通过；`make test-gpu-sanitize` 7/7（含两个新用例）。`test_graph_mem_admission` 第一次 [Z] 的前置检查失败（"the launch on the parked stream waited 2.5 s: not set up as meant"，即用例自己的 setup 没达到预期，不是断言失败），重跑通过。[Z] 里没有打开的捕获，与本次改动无关；推测是占空比路径的 1 s 上限加上限流睡眠偶尔超过用例的 2 s 门限，**未查实**，记为待查。
+
+没有跑的（机器 13:32 回收）：全量 `make test`、`test-probes` 没有在这次修改后重跑（修改前的 c6e049b 全量 32/32、probes rc=0）；`test_graph_mem_admission` 只跑了两遍。只验证了 550。

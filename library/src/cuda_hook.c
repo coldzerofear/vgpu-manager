@@ -5511,12 +5511,31 @@ static void graph_use_reset_after_fork(void) {
   pthread_rwlock_init(&g_graph_ev_lock, NULL);
 }
 
-/* 1 while the record's last launch has not finished on the GPU. */
-static int graph_running_busy_locked(graph_running_t *r) {
+/* cuEventQuery with this thread switched to RELAXED around it, for while a capture is
+ * open: under its default mode the query breaks another thread's GLOBAL capture (and
+ * this thread's own), switched it does not, and the switch back restores the rule
+ * (driver 550, docs 6.20). Only the query: RELAXED does not stop a call blocking, nor a
+ * record landing in a capture. CUDA_ERROR_NOT_SUPPORTED when it cannot switch. */
+static CUresult graph_event_query_relaxed(CUevent ev) {
+  CUstreamCaptureMode mode = CU_STREAM_CAPTURE_MODE_RELAXED;
+  if (CUDA_INTERNAL_CALL(cuda_library_entry, cuThreadExchangeStreamCaptureMode, &mode) != CUDA_SUCCESS) {
+    return CUDA_ERROR_NOT_SUPPORTED;
+  }
+  CUresult q = CUDA_INTERNAL_CALL(cuda_library_entry, cuEventQuery, ev);
+  CUDA_INTERNAL_CALL(cuda_library_entry, cuThreadExchangeStreamCaptureMode, &mode);
+  return q;
+}
+
+/* 1 while the record's last launch has not finished on the GPU. With a capture open
+ * (quiet), queried switched to RELAXED; an answer other than done or not ready then
+ * counts it finished for now and leaves the record as it is, as before the switch. */
+static int graph_running_busy_locked(graph_running_t *r, int quiet) {
   if (r->active == GRAPH_RUN_PENDING) return 1;
   if (r->active != GRAPH_RUN_EVENT) return 0;
-  CUresult q = CUDA_INTERNAL_CALL(cuda_library_entry, cuEventQuery, r->ev);
+  CUresult q = quiet ? graph_event_query_relaxed(r->ev)
+                     : CUDA_INTERNAL_CALL(cuda_library_entry, cuEventQuery, r->ev);
   if (q == CUDA_ERROR_NOT_READY) return 1;
+  if (quiet && q != CUDA_SUCCESS) return 0;
   r->active = GRAPH_RUN_DONE;
   if (q != CUDA_SUCCESS) r->ev = NULL;   /* not ours to destroy any more */
   return 0;
@@ -5556,7 +5575,7 @@ static graph_running_t *graph_running_slot_locked(const graph_skey_t *k, CUconte
   if (g_graph_running.count >= GRAPH_RUNNING_KEEP) {
     for (size_t i = 0; i < g_graph_running.capacity; i++) {
       graph_running_t *idle = (graph_running_t *)slot_table_cell(&g_graph_running, i);
-      if (idle->h.key == 0 || idle->active == GRAPH_RUN_PENDING || graph_running_busy_locked(idle)) continue;
+      if (idle->h.key == 0 || idle->active == GRAPH_RUN_PENDING || graph_running_busy_locked(idle, 0)) continue;
       ev = idle->ev;
       ev_ctx = idle->ctx;
       slot_table_remove(&g_graph_running, idle);
@@ -5725,18 +5744,20 @@ static size_t graph_pool_available(int dev, size_t reserved, const graph_skey_t 
                                    const graph_mem_t *mem) {
   size_t unavailable = 0;
   pthread_rwlock_rdlock(&g_capture_gate);
-  int quiet = capture_reg_any();   /* no event call with a capture open: see above */
+  int quiet = capture_reg_any();   /* a capture open: queries only switched, no records */
   pthread_mutex_lock(&g_graph_use_lock);
   if (dev >= 0 && dev < MAX_DEVICE_COUNT) {
     size_t held = g_graph_held_bytes[dev];
     unavailable = held > own_held ? held - own_held : 0;
     if (!quiet && graph_skey_valid(k)) graph_streams_note_locked(dev, k);
   }
-  for (size_t i = 0; i < g_graph_running.capacity && !quiet && dev >= 0 && dev < MAX_DEVICE_COUNT; i++) {
+  /* With a capture open the launches already running still count, queried switched to
+   * RELAXED; nothing new is noted or claimed, which would take event records. */
+  for (size_t i = 0; i < g_graph_running.capacity && dev >= 0 && dev < MAX_DEVICE_COUNT; i++) {
     graph_running_t *r = (graph_running_t *)slot_table_cell(&g_graph_running, i);
     if (r->h.key == 0 || !r->active || r->need[dev] == 0) continue;
     if ((r->h.key == k->key && r->h.key2 == k->key2) || (exec != NULL && r->exec == exec)) continue;
-    if (graph_running_busy_locked(r)) unavailable = graph_pool_add_sat(unavailable, r->need[dev]);
+    if (graph_running_busy_locked(r, quiet)) unavailable = graph_pool_add_sat(unavailable, r->need[dev]);
   }
   if (t != NULL && !t->claimed && !quiet) graph_running_claim_locked(mem, k, exec, t);
   pthread_mutex_unlock(&g_graph_use_lock);
@@ -5745,9 +5766,7 @@ static size_t graph_pool_available(int dev, size_t reserved, const graph_skey_t 
 }
 
 /* The part of dev's pool no graph is using or holding: what a trim could give back. No
- * stream is the asker's own, so every running launch counts. With a capture open the
- * running launches are not looked at, and the answer is too high: graph_pool_trim()
- * does not ask then. */
+ * stream is the asker's own, so every running launch counts. */
 static size_t graph_pool_idle(int dev, size_t reserved) {
   const graph_skey_t none = {0, 0};
   return graph_pool_available(dev, reserved, &none, NULL, 0, NULL, NULL);

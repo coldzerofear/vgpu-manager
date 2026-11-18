@@ -38,7 +38,8 @@ export UBSAN_OPTIONS=print_stacktrace=1
 fail=0
 for t in test_graph_mem_admission test_graph_mem_admission_ptsz \
          test_alloc_async_accounting test_alloc_async_accounting_ptsz \
-         test_vmm_accounting test_graph_pool_trim; do
+         test_vmm_accounting test_graph_pool_trim \
+         test_graph_capture_running; do
   printf '=== %-36s ' "${t}"
   log="$(mktemp)"
   # Overrides the environment above if left behind by an earlier run.
