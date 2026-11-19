@@ -1802,3 +1802,16 @@ trim 会不会等正在运行的 graph：[D] 里 graph 被 `cuStreamWaitValue32`
 回归（新库）：`test_graph_mem_admission_ptsz`、`test_graph_pool_trim`、`test_gap_wait_bounded`、`test_alloc_async_accounting` 通过；`make test-gpu-sanitize` 7/7（含两个新用例）。`test_graph_mem_admission` 第一次 [Z] 的前置检查失败（"the launch on the parked stream waited 2.5 s: not set up as meant"，即用例自己的 setup 没达到预期，不是断言失败），重跑通过。[Z] 里没有打开的捕获，与本次改动无关；推测是占空比路径的 1 s 上限加上限流睡眠偶尔超过用例的 2 s 门限，**未查实**，记为待查。
 
 没有跑的（机器 13:32 回收）：全量 `make test`、`test-probes` 没有在这次修改后重跑（修改前的 c6e049b 全量 32/32、probes rc=0）；`test_graph_mem_admission` 只跑了两遍。只验证了 550。
+
+#### 合并前验证（2026-11-19，RTX 3080 10 GiB，驱动 595.84，CUDA 13.0 工具链，分支 e3542da）
+
+6.19、6.20 的修改之前只在 V100/550 上验证过，最终提交没有跑过全量回归。这一轮在 595 上补齐：
+
+| 项目 | 结果 |
+|---|---|
+| `make test`（`run_tests_with_env.sh`） | **33/33 通过**（含 `test_graph_pool_trim`、`test_graph_capture_running`），5 个框架测试因未安装跳过 |
+| `make test-probes` | rc=0；fork 循环 60 次，0 挂起、0 异常；graph 限流探针 6000 个 graph 3.47 s 实例化（48601 次 launch 同时进行）；`probe_capture_apis` 加载库与不加载库输出一致，本线程 global 捕获中 `cuDeviceGraphMemTrim` 不破坏捕获 |
+| `make test-gpu-sanitize` | 7/7（含两个新用例），无 ASan/UBSan 报告 |
+| `test_graph_mem_admission` 与 `_ptsz` 交替各 3 次 | 6/6，每次 59–61 s；连同全量里的各 1 次共 8 次，[Z] 的前置检查都没有再失败（V100/550 上那一次仍未复现，记为待查） |
+| main 的库跑两个新用例（对照） | `test_graph_pool_trim` 5 处失败、`test_graph_capture_running` [A] 越限放行，与 550 上一致 |
+| `xmode` 探针（不加载库） | 与 550 完全一致：默认模式下查询/同步/`cuMemAlloc` 弄坏别的线程的 GLOBAL 捕获，前后切 RELAXED 则不会，切回后恢复；本线程自己的 GLOBAL 捕获同样；`cuDeviceGetGraphMemAttribute`、`cuDeviceGraphMemTrim` 在默认模式下也不破坏。切换一次 26.7 ns，`cuEventQuery`（已完成）229 ns |
