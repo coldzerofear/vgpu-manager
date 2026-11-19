@@ -17,6 +17,7 @@ limitations under the License.
 package cgroup
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path"
@@ -24,12 +25,20 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/docker/go-units"
 	"github.com/opencontainers/cgroups"
 	"github.com/opencontainers/cgroups/systemd"
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
+	cache2 "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	"k8s.io/kubectl/pkg/util/qos"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
@@ -500,4 +509,88 @@ func GetContainerPidsFunc(pod *corev1.Pod, containerName string, fullPath func(s
 		}
 	}
 	return pids
+}
+
+var containerCache sync.Map
+
+func SetContainerCgroupDeviceMemoryLimit(
+	lib *nvidia.DeviceLib, podGetter cache2.KeyGetter, podKey string, podUid types.UID,
+	claim *device.ContainerDeviceClaim, memoryScaling float64, timeout time.Duration,
+) {
+	if lib == nil || podGetter == nil || podKey == "" || claim == nil || len(claim.DeviceClaims) == 0 || memoryScaling <= 0 {
+		return
+	}
+	if !cgroups.IsCgroup2UnifiedMode() {
+		klog.ErrorS(fmt.Errorf("only supports cgroupv2 container environment"),
+			"SetContainerCgroupDeviceMemoryLimit failed", "pod", podKey, "container", claim.Name)
+		return
+	}
+	key := fmt.Sprintf("%s/%s", podKey, claim.Name)
+	_, loaded := containerCache.LoadOrStore(key, nil)
+	if loaded {
+		return
+	}
+	defer containerCache.Delete(key)
+	if err := lib.NvmlInit(); err != nil {
+		klog.ErrorS(err, "SetContainerCgroupDeviceMemoryLimit failed", "pod", podKey, "container", claim.Name)
+		return
+	}
+	defer lib.NvmlShutdown()
+	ctx, cancelFunc := context.WithTimeout(context.Background(), timeout)
+	defer cancelFunc()
+
+	count := 0
+	err := wait.PollUntilContextCancel(ctx, 100*time.Millisecond, false, func(ctx context.Context) (bool, error) {
+		obj, exist, err := podGetter.GetByKey(podKey)
+		if err != nil {
+			return false, fmt.Errorf("get pod %s failed: %w", podKey, err)
+		} else if !exist {
+			return false, fmt.Errorf("pod %s does not exist", podKey)
+		} else if pod, ok := obj.(*corev1.Pod); !ok {
+			return false, fmt.Errorf("pod type assertion failed, got %T", obj)
+		} else if pod.UID != podUid {
+			return false, fmt.Errorf("pod UID mismatch, expected %s, got %s", podUid, pod.UID)
+		} else if cgroupPath, err := GetK8sPodContainerCGroupFullPath(pod, claim.Name, GetK8sPodCGroupFullPath); err != nil {
+			klog.V(5).InfoS("Will retry searching for container cgroup path",
+				"err", err, "pod", podKey, "container", claim.Name)
+			return false, nil
+		} else {
+			count = 0
+			for _, deviceClaim := range claim.DeviceClaims {
+				if deviceClaim.Memory <= 0 {
+					continue
+				}
+				memoryLimit := uint64(deviceClaim.Memory) * uint64(units.MiB)
+				if memoryScaling > 1 {
+					memoryLimit = uint64(float64(memoryLimit) / memoryScaling)
+				}
+				if memoryLimit == 0 {
+					continue
+				}
+				ret := lib.SetMemoryLimits(deviceClaim.Uuid, cgroupPath, memoryLimit, memoryLimit)
+				if ret == nvml.ERROR_NOT_SUPPORTED {
+					return false, fmt.Errorf("current driver version does not support setting device memory limits")
+				}
+				if ret != nvml.SUCCESS {
+					return false, fmt.Errorf("error setting memory limits for device %d: %w", deviceClaim.Id, ret)
+				}
+				count++
+			}
+			return true, nil
+		}
+	})
+	if err != nil {
+		klog.V(2).ErrorS(err, "SetContainerCgroupDeviceMemoryLimit failed",
+			"pod", podKey, "container", claim.Name)
+		return
+	}
+	if count == 0 {
+		klog.V(2).ErrorS(fmt.Errorf("no valid device claim to apply"),
+			"SetContainerCgroupDeviceMemoryLimit failed",
+			"pod", podKey, "container", claim.Name)
+		return
+	}
+	klog.V(3).InfoS("Successfully set the device memory limit for the container",
+		"pod", podKey, "container", claim.Name,
+		"reqDevNum", len(claim.DeviceClaims), "setDevNum", count)
 }

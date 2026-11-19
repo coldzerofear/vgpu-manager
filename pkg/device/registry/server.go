@@ -207,8 +207,7 @@ type GetTargetByPodUidFunc func(ctx context.Context, podUid, contName string) (*
 // fallback partition keys baked into claim annotations at Prepare time.
 type GetTargetByRegisterUuidFunc func(ctx context.Context, uuid string) (*Target, error)
 
-func NewDeviceRegistryServer(
-	containerPath string,
+func NewDeviceRegistryServer(containerPath string,
 	getTargetByPodUidFunc GetTargetByPodUidFunc,
 	getTargetByRegisterUuidFunc GetTargetByRegisterUuidFunc,
 ) *DeviceRegistryServerImpl {

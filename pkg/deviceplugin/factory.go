@@ -44,8 +44,8 @@ import (
 	ctrm "sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-func GetDevicePlugins(
-	ctx context.Context, option *options.Options, devManager *manager.DeviceManager,
+func GetDevicePlugins(ctx context.Context,
+	option *options.Options, devManager *manager.DeviceManager,
 	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset,
 ) (plugins []base.DevicePlugin, err error) {
 	// Build the CDI handler (a null no-op handler is returned when no CDI

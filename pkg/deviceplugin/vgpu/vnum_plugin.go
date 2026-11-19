@@ -31,13 +31,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/cdi"
@@ -47,15 +45,12 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
-	"github.com/docker/go-units"
 	"github.com/google/uuid"
-	"github.com/opencontainers/cgroups"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	cache2 "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
@@ -63,6 +58,7 @@ import (
 	"k8s.io/kubelet/pkg/apis/podresources/v1alpha1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	client2 "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type vNumberDevicePlugin struct {
@@ -81,7 +77,7 @@ var _ base.DevicePlugin = &vNumberDevicePlugin{}
 
 // NewVNumberDevicePlugin returns an initialized vNumberDevicePlugin.
 func NewVNumberDevicePlugin(
-	resourceName, socket string, manager *manager.DeviceManager,
+	resourceName string, socket string, manager *manager.DeviceManager,
 	kubeClient *kubernetes.Clientset, kubeCache cache.Cache, cdiHandler cdi.Handler,
 ) (base.DevicePlugin, error) {
 	podInformer, err := kubeCache.GetInformer(context.TODO(), &corev1.Pod{}, cache.BlockUntilSynced(false))
@@ -1002,64 +998,6 @@ func getRealContainerDeviceClaim(pod *corev1.Pod, containerName string) (*device
 	return ptr.To(realDevices[idx]), nil
 }
 
-func SetContainerCgroupDeviceMemoryLimit(
-	devlib *nvidia.DeviceLib,
-	podGetter cache2.KeyGetter,
-	podKey string,
-	podUid types.UID,
-	claim *device.ContainerDeviceClaim,
-	timeout time.Duration,
-) {
-	if devlib == nil || podGetter == nil || podKey == "" || claim == nil || len(claim.DeviceClaims) == 0 {
-		return
-	}
-	if !cgroups.IsCgroup2UnifiedMode() {
-		klog.ErrorS(fmt.Errorf("only supports cgroupv2 container environment"),
-			"SetContainerCgroupDeviceMemoryLimit failed", "pod", podKey, "container", claim.Name)
-		return
-	}
-	if err := devlib.NvmlInit(); err != nil {
-		klog.ErrorS(err, "SetContainerCgroupDeviceMemoryLimit failed", "pod", podKey, "container", claim.Name)
-		return
-	}
-	ctx, cancelFunc := context.WithTimeout(context.Background(), timeout)
-	defer func() {
-		cancelFunc()
-		devlib.NvmlShutdown()
-	}()
-	err := wait.PollUntilContextCancel(ctx, 100*time.Millisecond, false, func(ctx context.Context) (bool, error) {
-		obj, exist, err := podGetter.GetByKey(podKey)
-		if err != nil {
-			return false, fmt.Errorf("get pod %s failed: %w", podKey, err)
-		} else if !exist {
-			return false, fmt.Errorf("pod %s does not exist", podKey)
-		} else if pod, ok := obj.(*corev1.Pod); !ok {
-			return false, fmt.Errorf("pod type assertion failed, got %T", obj)
-		} else if pod.UID != podUid {
-			return false, fmt.Errorf("pod UID mismatch, expected %s, got %s", podUid, pod.UID)
-		} else if cgroupPath, err := cgroup.GetK8sPodContainerCGroupFullPath(pod, claim.Name, cgroup.GetK8sPodCGroupFullPath); err != nil {
-			return false, nil
-		} else {
-			for _, deviceClaim := range claim.DeviceClaims {
-				memoryLimit := uint64(deviceClaim.Memory * units.MiB)
-				ret := devlib.SetMemoryLimits(deviceClaim.Uuid, cgroupPath, memoryLimit, memoryLimit)
-				if ret == nvml.ERROR_NOT_SUPPORTED {
-					return false, fmt.Errorf("current driver version does not support setting device memory limits")
-				}
-				if ret != nvml.SUCCESS {
-					return false, fmt.Errorf("error setting memory limits for device %d: %w", deviceClaim.Id, ret)
-				}
-			}
-			return true, nil
-		}
-	})
-	if err != nil {
-		klog.V(1).ErrorS(err, "SetContainerCgroupDeviceMemoryLimit failed", "pod", podKey, "container", claim.Name)
-		return
-	}
-	klog.InfoS("Successfully set the device memory limit for the container", "pod", podKey, "container", claim.Name)
-}
-
 // PreStartContainer is called, if indicated by Device Plugin during registeration phase,
 // before each container start. Device plugin can run device specific operations
 // such as resetting the device before making devices available to the container.
@@ -1075,8 +1013,11 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 			klog.V(4).ErrorS(err, util.PreStartContainerCheckErrMsg)
 			err = fmt.Errorf("%s: %w", util.PreStartContainerCheckErrMsg, err)
 		} else if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.DeviceCGroupMemoryLimit) {
-			lib := m.baseServer.GetDeviceManager().DeviceLib
-			go SetContainerCgroupDeviceMemoryLimit(lib, m.podCache, klog.KObj(pod).String(), pod.UID, deviceClaim, 30*time.Second)
+			podKey := client2.ObjectKeyFromObject(pod)
+			go cgroup.SetContainerCgroupDeviceMemoryLimit(
+				m.baseServer.GetDeviceManager().DeviceLib, m.podCache, podKey.String(), pod.UID, deviceClaim,
+				m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceMemoryScaling(), 30*time.Second,
+			)
 		}
 	}()
 

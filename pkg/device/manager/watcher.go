@@ -73,7 +73,10 @@ func (m *DeviceManager) doWatcher() {
 	klog.V(3).Infoln("DeviceManager sm watcher stopped")
 }
 
-func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDeviceMap map[string]*GPUDevice, filePath string) {
+func SMUtilWatcherStart(
+	ctx context.Context, deviceLib *nvidia.DeviceLib,
+	gpuDeviceMap map[string]*GPUDevice, filePath string,
+) {
 	wait.UntilWithContext(ctx, func(ctx context.Context) {
 		if err := watcher.PrepareDeviceUtilFile(filePath); err != nil {
 			klog.ErrorS(err, "PrepareDeviceUtilFile failed")
@@ -145,7 +148,8 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 }
 
 func smWatcherBatchWithContext(
-	ctx context.Context, utilAdapter watcher.DeviceUtilInterface, mmapUtil *watcher.MmapDeviceUtil,
+	ctx context.Context,
+	utilAdapter watcher.DeviceUtilInterface, mmapUtil *watcher.MmapDeviceUtil,
 	batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device,
 ) error {
 	interval := 80 * time.Millisecond / time.Duration(batch.Count)
