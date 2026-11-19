@@ -100,6 +100,10 @@ int main(void) {
     g_broken += end("cuDeviceGetGraphMemAttribute",
                     cuDeviceGetGraphMemAttribute(d0, CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT, &reserved)) != CUDA_SUCCESS;
   }
+  /* Never called by the library with a capture open (graph_pool_trim()): printed only,
+   * to know whether it could be. */
+  begin();
+  end("cuDeviceGraphMemTrim (not relied on)", cuDeviceGraphMemTrim(d0));
   /* What goes through the library's stream lookups. */
   begin();
   r = cuMemAllocAsync(&p, 1u << 20, s0);
