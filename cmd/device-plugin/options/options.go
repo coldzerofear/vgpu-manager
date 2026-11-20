@@ -137,9 +137,7 @@ func NewOptions() *Options {
 	featureGate := featuregate.NewFeatureGate()
 	runtime.Must(featureGate.Add(defaultFeatureGates))
 	runtime.Must(compatibility.DefaultComponentGlobalsRegistry.Register(
-		Component,
-		compatibility.DefaultBuildEffectiveVersion(),
-		featureGate,
+		Component, compatibility.DefaultBuildEffectiveVersion(), featureGate,
 	))
 	var imexChannelIDs []int
 	for _, val := range strings.Split(os.Getenv("IMEX_CHANNEL_IDS"), ",") {

@@ -522,17 +522,19 @@ func SetContainerCgroupDeviceMemoryLimit(
 	}
 	if !cgroups.IsCgroup2UnifiedMode() {
 		klog.ErrorS(fmt.Errorf("only supports cgroupv2 container environment"),
-			"SetContainerCgroupDeviceMemoryLimit failed", "pod", podKey, "container", claim.Name)
+			"SetContainerCgroupDeviceMemoryLimit failed",
+			"pod", podKey, "container", claim.Name, "uid", podUid)
 		return
 	}
-	key := fmt.Sprintf("%s/%s", podKey, claim.Name)
-	_, loaded := containerCache.LoadOrStore(key, nil)
+	cacheKey := fmt.Sprintf("%s/%s", podUid, claim.Name)
+	_, loaded := containerCache.LoadOrStore(cacheKey, nil)
 	if loaded {
 		return
 	}
-	defer containerCache.Delete(key)
+	defer containerCache.Delete(cacheKey)
 	if err := lib.NvmlInit(); err != nil {
-		klog.ErrorS(err, "SetContainerCgroupDeviceMemoryLimit failed", "pod", podKey, "container", claim.Name)
+		klog.ErrorS(err, "SetContainerCgroupDeviceMemoryLimit failed",
+			"pod", podKey, "container", claim.Name, "uid", podUid)
 		return
 	}
 	defer lib.NvmlShutdown()
@@ -552,7 +554,7 @@ func SetContainerCgroupDeviceMemoryLimit(
 			return false, fmt.Errorf("pod UID mismatch, expected %s, got %s", podUid, pod.UID)
 		} else if cgroupPath, err := GetK8sPodContainerCGroupFullPath(pod, claim.Name, GetK8sPodCGroupFullPath); err != nil {
 			klog.V(5).InfoS("Will retry searching for container cgroup path",
-				"err", err, "pod", podKey, "container", claim.Name)
+				"err", err, "pod", podKey, "container", claim.Name, "uid", podUid)
 			return false, nil
 		} else {
 			count = 0
@@ -581,16 +583,16 @@ func SetContainerCgroupDeviceMemoryLimit(
 	})
 	if err != nil {
 		klog.V(2).ErrorS(err, "SetContainerCgroupDeviceMemoryLimit failed",
-			"pod", podKey, "container", claim.Name)
+			"pod", podKey, "container", claim.Name, "uid", podUid)
 		return
 	}
 	if count == 0 {
 		klog.V(2).ErrorS(fmt.Errorf("no valid device claim to apply"),
 			"SetContainerCgroupDeviceMemoryLimit failed",
-			"pod", podKey, "container", claim.Name)
+			"pod", podKey, "container", claim.Name, "uid", podUid)
 		return
 	}
 	klog.V(3).InfoS("Successfully set the device memory limit for the container",
-		"pod", podKey, "container", claim.Name,
+		"pod", podKey, "container", claim.Name, "uid", podUid,
 		"reqDevNum", len(claim.DeviceClaims), "setDevNum", count)
 }

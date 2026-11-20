@@ -148,7 +148,7 @@ spec:
           command:
             - device-plugin
             - --domain=nvidia.com
-            - --device-list-strategy=envvar
+            - --device-list-strategy=envvar,cdi-annotations,cdi-cri
             - --device-split-count=10
             - --device-cores-scaling=1
             - --device-memory-scaling=1
@@ -164,7 +164,7 @@ spec:
             # bundled in the image and installed to $HOST_MANAGER_DIR/nvidia-cdi-hook
             # on the host by the install init container, and referenced automatically.
             # Tune the spec generation below if needed:
-#            - --cdi-annotation-prefix=cdi.k8s.io/
+            - --cdi-annotation-prefix=cdi.k8s.io/
             # Only when the driver is NOT installed on the host (e.g. GPU-Operator
             # driver container): point at the driver root. The same host path must be
             # mounted into the plugin (and monitor) at the SAME path — uncomment the

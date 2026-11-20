@@ -257,6 +257,8 @@ spec:
               value: all
             - name: NVIDIA_MIG_CONFIG_DEVICES
               value: all
+            - name: CUDA_DEVICE_ORDER
+              value: PCI_BUS_ID
             - name: LUPINE_LOG_LEVEL
               value: "1"
             - name: LUPINE_TRACE

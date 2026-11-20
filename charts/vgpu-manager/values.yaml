@@ -225,7 +225,7 @@ devicePlugin:
       # Multiple comma-separated values may be combined, e.g. "envvar,cdi-annotations".
       # When a cdi-* strategy is enabled the plugin generates a CDI spec under the host
       # CDI dir (cdiRoot) and the container runtime must have CDI support enabled.
-      deviceListStrategy: "envvar"
+      deviceListStrategy: "envvar,cdi-annotations,cdi-cri"
       # CDI options (only used when deviceListStrategy contains a cdi-* value).
       # Host CDI spec directory; mounted into the plugin so the generated spec is
       # visible to the container runtime on the host.
