@@ -16,6 +16,15 @@ cmake_minimum_required(VERSION 3.5)
 # ASM: src/dlsym_entry.S provides the exported dlsym entry point.
 project(vgpu C CXX ASM)
 
+# GNU C11, pinned. GCC 15 and later default to C23, where an empty parameter list
+# means no parameters: the hook tables' function pointers (cuda_sym_t, driver_sym_t)
+# are declared unprototyped and called with arguments, which C23 rejects ("too many
+# arguments to function", 1718 errors with -std=gnu2x). C11 rather than C17:
+# C_STANDARD 17 needs CMake 3.21, and the two differ only in defect fixes.
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS ON)
+
 add_definitions(-D_GNU_SOURCE)
 #add_compile_options(-Wall -Wshadow -Werror -Wno-format)
 add_compile_options(-Wall -Wshadow -Werror=format-truncation=0)
