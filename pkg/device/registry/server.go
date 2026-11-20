@@ -511,7 +511,7 @@ func cgroupFullPathResolver() func(string) string {
 	case cgroups.IsCgroup2UnifiedMode():
 		return cgroup.GetK8sPodCGroupFullPath
 	case cgroups.IsCgroup2HybridMode():
-		if util.PathIsNotExist(cgroup.CGroupDevicePath) {
+		if util.PathIsNotExist(cgroup.CGroupDevicesPath) {
 			return cgroup.GetK8sPodCGroupFullPath
 		}
 		return cgroup.GetK8sPodDeviceCGroupFullPath

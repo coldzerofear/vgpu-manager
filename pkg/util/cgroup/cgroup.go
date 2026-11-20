@@ -65,11 +65,18 @@ const (
 	KubeletConfigPath = "/var/lib/kubelet/config.yaml"
 	KubeadmFlagsPath  = "/var/lib/kubelet/kubeadm-flags.env"
 
-	CGroupBasePath   = "/sys/fs/cgroup"
-	CGroupDevicePath = CGroupBasePath + "/devices"
-
-	SYSTEMD  CGroupDriver = "systemd"
-	CGROUPFS CGroupDriver = "cgroupfs"
+	CGroupBasePath                            = "/sys/fs/cgroup"
+	CGroupDevicesPath                         = CGroupBasePath + "/devices"
+	CGroupKubepodsPath                        = CGroupBasePath + "/kubepods"
+	CGroupKubepodsSlicePath                   = CGroupKubepodsPath + ".slice"
+	CGroupSystemSlicePath                     = CGroupBasePath + "/system.slice"
+	CGroupSystemdPath                         = CGroupBasePath + "/systemd"
+	CGroupCpuPath                             = CGroupBasePath + "/cpu"
+	CGroupControllersPath                     = CGroupBasePath + "/cgroup.controllers"
+	CGroupUnifiedPath                         = CGroupBasePath + "/unified"
+	CGroupUnifiedSystemSlicePath              = CGroupUnifiedPath + "/system.slice"
+	SYSTEMD                      CGroupDriver = "systemd"
+	CGROUPFS                     CGroupDriver = "cgroupfs"
 )
 
 func MustInitCGroupDriver(cgroupDriver string) CGroupDriver {
@@ -265,8 +272,8 @@ func readProcessCmdline(pid int) ([]string, error) {
 
 // detectCgroupDriver detects the cgroup driver (cgroupfs or systemd) on the system
 func detectCgroupDriver() (CGroupDriver, error) {
-	_, err1 := os.Stat("/sys/fs/cgroup/kubepods.slice")
-	_, err2 := os.Stat("/sys/fs/cgroup/kubepods")
+	_, err1 := os.Stat(CGroupKubepodsSlicePath)
+	_, err2 := os.Stat(CGroupKubepodsPath)
 	switch {
 	case err1 == nil && err2 != nil:
 		return SYSTEMD, nil
@@ -276,33 +283,33 @@ func detectCgroupDriver() (CGroupDriver, error) {
 
 	// Check if systemd is managing cgroups by looking for systemd cgroup hierarchy
 	// In systemd-managed systems, there's typically a systemd slice at the root
-	if _, err := os.Stat("/sys/fs/cgroup/system.slice"); err == nil {
+	if _, err := os.Stat(CGroupSystemSlicePath); err == nil {
 		return SYSTEMD, nil
 	}
 
 	// Check if we can find systemd cgroup paths
-	if _, err := os.Stat("/sys/fs/cgroup/systemd"); err == nil {
+	if _, err := os.Stat(CGroupSystemdPath); err == nil {
 		return SYSTEMD, nil
 	}
 
 	// Check for cgroupfs by looking for traditional cgroup hierarchy
 	// In cgroupfs systems, we typically see individual controller directories
-	if _, err := os.Stat("/sys/fs/cgroup/cpu"); err == nil {
+	if _, err := os.Stat(CGroupCpuPath); err == nil {
 		return CGROUPFS, nil
 	}
 
 	// Additional check for cgroup v2 with cgroupfs driver
-	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err == nil {
+	if _, err := os.Stat(CGroupControllersPath); err == nil {
 		// Check if systemd is not managing this hierarchy
-		if _, err := os.Stat("/sys/fs/cgroup/system.slice"); err != nil {
+		if _, err := os.Stat(CGroupSystemSlicePath); err != nil {
 			return CGROUPFS, nil
 		}
 	}
 
 	// Check for hybrid mode where systemd might be managing some controllers
-	if _, err := os.Stat("/sys/fs/cgroup/unified"); err == nil {
+	if _, err := os.Stat(CGroupUnifiedPath); err == nil {
 		// In hybrid mode, check if systemd is managing the unified hierarchy
-		if _, err := os.Stat("/sys/fs/cgroup/unified/system.slice"); err == nil {
+		if _, err := os.Stat(CGroupUnifiedSystemSlicePath); err == nil {
 			return SYSTEMD, nil
 		}
 		return CGROUPFS, nil
@@ -361,7 +368,7 @@ func (cgroupName CgroupName) ToCgroupfs() string {
 
 // GetK8sPodDeviceCGroupFullPath Obtain the full path of the cgroup device subsystem of the pod.
 func GetK8sPodDeviceCGroupFullPath(podCGroupPath string) string {
-	return filepath.Join(CGroupDevicePath, podCGroupPath)
+	return filepath.Join(CGroupDevicesPath, podCGroupPath)
 }
 
 // GetK8sPodCGroupFullPath Obtain the cgroupv2 full path of the pod.
@@ -485,22 +492,16 @@ func GetContainerPidsFunc(pod *corev1.Pod, containerName string, fullPath func(s
 		klog.Errorln(err)
 		return nil
 	}
-	klog.V(4).InfoS("Get container cgroup path",
-		"pod", klog.KObj(pod),
-		"container", containerName,
-		"cgroupPath", cgroupFullPath)
+	klog.V(4).InfoS("Get container cgroup path", "pod", klog.KObj(pod),
+		"container", containerName, "cgroupPath", cgroupFullPath)
 	pids, err := cgroups.GetAllPids(cgroupFullPath)
 	if err != nil {
 		klog.ErrorS(err, "Failed to retrieve container pids",
-			"pod", klog.KObj(pod),
-			"container", containerName)
+			"pod", klog.KObj(pod), "container", containerName)
 		return nil
 	}
-	klog.V(5).InfoS("Get container all pids",
-		"pod", klog.KObj(pod),
-		"container", containerName,
-		"cgroupPath", cgroupFullPath,
-		"pids", pids)
+	klog.V(5).InfoS("Get container all pids", "pod", klog.KObj(pod),
+		"container", containerName, "cgroupPath", cgroupFullPath, "pids", pids)
 	if len(funcs) > 0 {
 		for _, pid := range pids {
 			for _, fn := range funcs {
@@ -511,17 +512,28 @@ func GetContainerPidsFunc(pod *corev1.Pod, containerName string, fullPath func(s
 	return pids
 }
 
-var containerCache sync.Map
+var (
+	containerCache sync.Map
+	detectDmemOnce sync.Once
+	dmemAvailable  bool
+)
 
 func SetContainerCgroupDeviceMemoryLimit(
 	lib *nvidia.DeviceLib, podGetter cache2.KeyGetter, podKey string, podUid types.UID,
 	claim *device.ContainerDeviceClaim, memoryScaling float64, timeout time.Duration,
 ) {
-	if lib == nil || podGetter == nil || podKey == "" || claim == nil || len(claim.DeviceClaims) == 0 || memoryScaling <= 0 {
+	if lib == nil || podGetter == nil || podKey == "" ||
+		claim == nil || len(claim.DeviceClaims) == 0 || memoryScaling <= 0 {
 		return
 	}
 	if !cgroups.IsCgroup2UnifiedMode() {
 		klog.ErrorS(fmt.Errorf("only supports cgroupv2 container environment"),
+			"SetContainerCgroupDeviceMemoryLimit failed",
+			"pod", podKey, "container", claim.Name, "uid", podUid)
+		return
+	}
+	if !IsDmemControllerAvailable() {
+		klog.ErrorS(fmt.Errorf("dmem controller of cgroup2 is unavailable"),
 			"SetContainerCgroupDeviceMemoryLimit failed",
 			"pod", podKey, "container", claim.Name, "uid", podUid)
 		return
@@ -595,4 +607,25 @@ func SetContainerCgroupDeviceMemoryLimit(
 	klog.V(3).InfoS("Successfully set the device memory limit for the container",
 		"pod", podKey, "container", claim.Name, "uid", podUid,
 		"reqDevNum", len(claim.DeviceClaims), "setDevNum", count)
+}
+
+func IsDmemControllerAvailable() bool {
+	detectDmemOnce.Do(func() {
+		dmemAvailable = CGroup2ControllerAvailable("dmem")
+	})
+	return dmemAvailable
+}
+
+func CGroup2ControllerAvailable(controller string) bool {
+	data, err := os.ReadFile(CGroupControllersPath)
+	if err != nil {
+		return false
+	}
+	controllers := strings.Fields(string(data))
+	for _, ctrl := range controllers {
+		if strings.TrimSpace(ctrl) == controller {
+			return true
+		}
+	}
+	return false
 }

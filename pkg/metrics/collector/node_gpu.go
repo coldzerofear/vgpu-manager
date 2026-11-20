@@ -511,7 +511,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				case cgroups.IsCgroup2HybridMode():
 					// If the device controller does not exist, use the path of cgroupv2.
 					getFullPath = cgroup.GetK8sPodDeviceCGroupFullPath
-					if util.PathIsNotExist(cgroup.CGroupDevicePath) {
+					if util.PathIsNotExist(cgroup.CGroupDevicesPath) {
 						getFullPath = cgroup.GetK8sPodCGroupFullPath
 					}
 				default: // cgroupv1
