@@ -66,6 +66,7 @@ import (
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	kubelettypes "k8s.io/kubernetes/pkg/kubelet/types"
 )
 
@@ -823,10 +824,7 @@ func passthrough(args extenderv1.ExtenderPreemptionArgs) *extenderv1.ExtenderPre
 //     where in-tree's proposed victims include a pod that just entered
 //     bind state during our processing.
 func isProtectedFromPreemption(pod *corev1.Pod, gangName string) (string, bool) {
-	if pod.DeletionTimestamp != nil {
-		return metrics.ProtectedTerminating, true
-	}
-	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+	if !pod.DeletionTimestamp.IsZero() || podutil.IsPodTerminal(pod) {
 		return metrics.ProtectedTerminating, true
 	}
 	if kubelettypes.IsCriticalPod(pod) {

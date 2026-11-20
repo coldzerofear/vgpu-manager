@@ -118,57 +118,56 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 	if !pod.DeletionTimestamp.IsZero() || !util.IsVGPUResourcePod(pod) || pod.Spec.NodeName != r.nodeName {
 		return reconcile.Result{}, nil
 	}
-	switch pod.Status.Phase {
-	case corev1.PodFailed, corev1.PodPending:
-		if !util.IsShouldDeletePod(pod) {
+	// Skip pods that do not meet the criteria
+	if !(pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodPending) || !util.IsShouldDeletePod(pod) {
+		return reconcile.Result{}, nil
+	}
+	// Skip prototype pods that cannot be evicted
+	if types.IsCriticalPod(pod) {
+		klog.ErrorS(nil, "Cannot evict a critical pod", "pod", klog.KObj(pod))
+		r.recorder.Eventf(pod, nil, corev1.EventTypeWarning, "CriticalPod",
+			"EvictSkipped", "Critical pod does not restore scheduling through eviction")
+		return reconcile.Result{}, nil
+	}
+	// Determine whether it is necessary to delete the pod
+	// Only when a pod is controlled by a controller and
+	// not controlled by another pod, is it eligible for deletion.
+	shouldEvictPod := false
+	for _, reference := range pod.OwnerReferences {
+		if reference.Controller != nil &&
+			*reference.Controller && reference.Kind != pod.Kind {
+			shouldEvictPod = true
 			break
 		}
-		if types.IsCriticalPod(pod) {
-			klog.ErrorS(nil, "Cannot evict a critical pod", "pod", klog.KObj(pod))
-			r.recorder.Eventf(pod, nil, corev1.EventTypeWarning, "CriticalPod",
-				"EvictSkipped", "Critical pod does not restore scheduling through eviction")
-			break
+	}
+	// Manual recovery for bare pods
+	if len(pod.OwnerReferences) == 0 {
+		klog.V(4).InfoS("Try to recovery pod", "pod", klog.KObj(pod), "uid", pod.UID)
+		if err := r.recovery.AddPodToCheckpoint(pod); err != nil {
+			klog.ErrorS(err, "Adding pod to recovery checkpoint failed", "pod", klog.KObj(pod))
+			return reconcile.Result{}, err
 		}
-		// Determine whether it is necessary to delete the pod
-		// Only when a pod is controlled by a controller and
-		// not controlled by another pod, is it eligible for deletion.
-		shouldEvictPod := false
-		for _, reference := range pod.OwnerReferences {
-			if reference.Controller != nil &&
-				*reference.Controller && reference.Kind != pod.Kind {
-				shouldEvictPod = true
-				break
-			}
+		// Attempt to delete pod
+		if err := r.client.Delete(ctx, pod, &client.DeleteOptions{
+			Preconditions: metav1.NewUIDPreconditions(string(pod.UID)),
+		}); err != nil {
+			_ = r.recovery.RemovePodCheckpoint(pod)
+			klog.ErrorS(err, "Failed to delete pod", "pod", klog.KObj(pod))
+			return reconcile.Result{}, err
 		}
-		// Manual recovery for bare pods
-		if len(pod.OwnerReferences) == 0 {
-			klog.V(4).InfoS("Try to recovery pod", "pod", klog.KObj(pod), "uid", pod.UID)
-			if err := r.recovery.AddPodToCheckpoint(pod); err != nil {
-				klog.ErrorS(err, "Adding pod to recovery checkpoint failed", "pod", klog.KObj(pod))
-				return reconcile.Result{}, err
-			}
-			// Attempt to delete pod
-			if err := r.client.Delete(ctx, pod, &client.DeleteOptions{
-				Preconditions: metav1.NewUIDPreconditions(string(pod.UID)),
-			}); err != nil {
-				_ = r.recovery.RemovePodCheckpoint(pod)
-				klog.ErrorS(err, "Failed to delete pod", "pod", klog.KObj(pod))
-				return reconcile.Result{}, err
-			}
-			r.recorder.Eventf(pod, nil, corev1.EventTypeWarning, "Recovery", "Deleted",
-				"Pod has been deleted, the controller will recreate and reschedule it")
-			// Push the pod into the recovery controller.
-			r.recovery.AddPodToRecoveryQueue(pod, 20*time.Millisecond)
+		r.recorder.Eventf(pod, nil, corev1.EventTypeWarning, "Recovery", "Deleted",
+			"Pod has been deleted, the controller will recreate and reschedule it")
+		// Push the pod into the recovery controller.
+		r.recovery.AddPodToRecoveryQueue(pod, 20*time.Millisecond)
+	}
+	if shouldEvictPod {
+		klog.V(4).InfoS("Try to evict pod", "pod", klog.KObj(pod), "uid", pod.UID)
+		gracePeriodSeconds := int64(0)
+		if pod.Spec.TerminationGracePeriodSeconds != nil {
+			gracePeriodSeconds = *pod.Spec.TerminationGracePeriodSeconds
 		}
-		if shouldEvictPod {
-			klog.V(4).InfoS("Try to evict pod", "pod", klog.KObj(pod), "uid", pod.UID)
-			gracePeriodSeconds := int64(0)
-			if pod.Spec.TerminationGracePeriodSeconds != nil {
-				gracePeriodSeconds = *pod.Spec.TerminationGracePeriodSeconds
-			}
-			r.eviction.Evict(ctx, pod, r.recorder, gracePeriodSeconds,
-				"Evicting pod to trigger controller reconciliation and rescheduling.")
-		}
+		r.eviction.Evict(ctx, pod, r.recorder, gracePeriodSeconds,
+			"Evicting pod to trigger controller reconciliation and rescheduling.")
 	}
 	return reconcile.Result{}, nil
 }

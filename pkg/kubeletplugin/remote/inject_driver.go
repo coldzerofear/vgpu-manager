@@ -43,6 +43,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
@@ -372,8 +373,7 @@ func (d *InjectDriver) claimHasLiveConsumers(ctx context.Context, claim *resourc
 		if err != nil {
 			return false, fmt.Errorf("get consumer pod %s/%s of claim %s: %w", claim.Namespace, ref.Name, klog.KObj(claim), err)
 		}
-		if pod.UID != ref.UID || pod.Spec.NodeName == d.config.NodeName ||
-			pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		if pod.UID != ref.UID || pod.Spec.NodeName == d.config.NodeName || podutil.IsPodTerminal(pod) {
 			continue
 		}
 		return true, nil

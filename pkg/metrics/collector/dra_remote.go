@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -94,7 +95,7 @@ func (c draGPUCollector) remoteConsumerPods(devInfoNameMap map[string]*DRADevice
 			if err = c.GetPod(ctx, key, &pod); err != nil || (ref.UID != "" && pod.UID != ref.UID) {
 				continue
 			}
-			if pod.Spec.NodeName == c.nodeName || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			if pod.Spec.NodeName == c.nodeName || podutil.IsPodTerminal(&pod) {
 				continue
 			}
 			out[pod.UID] = &pod

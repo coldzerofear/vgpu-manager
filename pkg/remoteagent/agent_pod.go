@@ -38,6 +38,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
@@ -159,7 +160,7 @@ func (a *Agent) refreshNodeDevicesFromNode(obj interface{}) {
 // podUsesNodeDevices reports whether the pod is a live remote pod whose
 // devices the scheduler took from this node.
 func podUsesNodeDevices(pod *corev1.Pod, nodeName string) bool {
-	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+	if podutil.IsPodTerminal(pod) {
 		return false
 	}
 	if mode, _ := util.PodVGPUAccessMode(pod); mode != util.AccessModeRemote {

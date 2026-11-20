@@ -46,6 +46,7 @@ import (
 	"k8s.io/component-helpers/resource"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/api/v1/pod"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -334,8 +335,7 @@ func CheckDeviceUuid(annotations map[string]string, deviceUUID string) bool {
 func ShouldRetry(err error) bool {
 	// these errors indicate a transient error that should be retried.
 	return errors.IsConflict(err) || errors.IsServerTimeout(err) ||
-		errors.IsTooManyRequests(err) || net.IsConnectionReset(err) ||
-		net.IsHTTP2ConnectionLost(err)
+		errors.IsTooManyRequests(err) || net.IsConnectionReset(err) || net.IsHTTP2ConnectionLost(err)
 }
 
 // IsShouldDeletePod Determine whether the pod has been deleted or needs to be deleted.
@@ -343,7 +343,7 @@ func IsShouldDeletePod(pod *corev1.Pod) bool {
 	if pod == nil {
 		return false
 	}
-	if pod.DeletionTimestamp != nil {
+	if !pod.DeletionTimestamp.IsZero() {
 		return true
 	}
 	if len(pod.Status.ContainerStatuses) > MaxContainerLimit {
@@ -364,8 +364,7 @@ func PodIsTerminated(pod *corev1.Pod) bool {
 	if pod == nil {
 		return false
 	}
-	return pod.Status.Phase == corev1.PodFailed ||
-		pod.Status.Phase == corev1.PodSucceeded ||
+	return podutil.IsPodTerminal(pod) ||
 		(pod.DeletionTimestamp != nil && notRunning(pod.Status.ContainerStatuses))
 }
 
@@ -475,9 +474,7 @@ func PodsOnNodeCallback(pods []*corev1.Pod, node *corev1.Node, callbackFn func(*
 	}
 	klog.V(5).InfoS("pods on node callback", "node", node.Name)
 	for _, pod := range pods {
-		if PodPlanSchedulingNode(pod) == node.Name &&
-			pod.Status.Phase != corev1.PodSucceeded &&
-			pod.Status.Phase != corev1.PodFailed {
+		if PodPlanSchedulingNode(pod) == node.Name && !podutil.IsPodTerminal(pod) {
 			callbackFn(pod)
 		}
 	}
